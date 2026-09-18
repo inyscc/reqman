@@ -1,0 +1,508 @@
+离线 Postman 类工具详细需求（Tauri + Windows）
+1. 产品定位
+离线、本地优先，不依赖云服务。
+
+Windows 桌面客户端，基于 Tauri v2。
+
+兼容 Postman Collection v2.1 / v2.0、Environment、Globals。
+
+核心能力：HTTP 请求构建、变量替换、pm 脚本兼容、代理、认证、测试、集合运行器、导入导出。
+
+数据本地存储，敏感信息加密。
+
+前端只做 UI，Rust 负责网络、文件、数据库、密钥、脚本沙箱。
+
+2. 功能需求
+2.1 工作区与集合管理
+P0 本地多工作区。
+
+P0 集合、文件夹、请求、示例的树形管理。
+
+P0 新建、重命名、复制、删除、拖拽排序。
+
+P0 集合/文件夹级变量、认证、脚本、Headers 继承。
+
+P0 请求保存、自动保存、另存为。
+
+P1 收藏、标签、最近打开。
+
+P1 集合导入导出 Postman v2.1 / v2.0。
+
+P1 环境、全局变量导入导出。
+
+P2 集合级 Mock、文档生成。
+
+2.2 请求构建
+P0 方法：GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS，自定义方法。
+
+P0 URL 输入、query 参数表格、启用/禁用、批量编辑。
+
+P0 路径变量 :id 和 {{var}}。
+
+P0 Headers 表格、批量编辑、预设、自动头。
+
+P0 Body 类型：
+
+none
+
+raw：JSON/XML/HTML/Text/JavaScript
+
+form-data，含文件上传
+
+x-www-form-urlencoded
+
+binary
+
+GraphQL（P1）
+
+P0 请求级设置：超时、重定向、SSL 校验、编码、HTTP 版本。
+
+P0 请求级代理。
+
+P1 Cookie 管理。
+
+P1 客户端证书 mTLS。
+
+P2 WebSocket / SSE / gRPC。
+
+2.3 变量与环境
+P0 变量作用域与优先级：
+
+local > data > environment > collection > global
+
+P0 全局变量 Globals。
+
+P0 环境变量 Environment。
+
+P0 集合变量 Collection Variables。
+
+P0 本地变量 Local。
+
+P0 迭代数据 Data。
+
+P0 动态变量：$guid、$timestamp、$randomInt、$randomUUID、随机姓名/邮箱等。
+
+P0 变量替换 {{var}}，未解析变量高亮提示。
+
+P0 变量初始值 / 当前值。
+
+P0 secret 类型变量，UI 掩码。
+
+P1 环境快速切换。
+
+P1 批量编辑变量。
+
+P1 脚本读写：
+
+pm.environment
+
+pm.globals
+
+pm.collectionVariables
+
+pm.variables
+
+P2 变量加密导出、团队共享占位符。
+
+2.4 认证与授权
+P0 No Auth。
+
+P0 Inherit from parent。
+
+P0 Basic Auth。
+
+P0 Bearer Token。
+
+P0 API Key：Header 或 Query。
+
+P1 OAuth 2.0。
+
+P1 OAuth 1.0。
+
+P1 Digest。
+
+P1 NTLM。
+
+P1 AWS Signature v4。
+
+P1 JWT 手工配置。
+
+P2 Hawk。
+
+P2 客户端证书认证。
+
+P2 代理认证独立存储。
+
+2.5 脚本与测试
+P0 Pre-request Script。
+
+P0 Tests / Post-response Script。
+
+P0 常用 pm.* API：
+
+pm.test
+
+pm.expect
+
+pm.response
+
+pm.request
+
+pm.environment
+
+pm.globals
+
+pm.collectionVariables
+
+pm.variables
+
+pm.sendRequest
+
+pm.cookies
+
+pm.iterationData
+
+pm.info
+
+console.log
+
+P0 脚本沙箱：无 Tauri API、无直接网络、无文件系统。
+
+P0 脚本超时、错误捕获、console 面板。
+
+P1 异步 / Promise / async-await。
+
+P1 内置库：lodash、moment、chai、cheerio、crypto-js、uuid、xml2js。
+
+P1 测试断言：状态码、响应时间、Header、Body、JSON Schema、JSONPath。
+
+P2 pm.visualizer。
+
+P2 Rust 侧 QuickJS 沙箱替代 iframe。
+
+2.6 集合运行器
+P0 顺序运行集合/文件夹。
+
+P0 迭代次数、延迟、失败继续。
+
+P0 运行结果汇总。
+
+P1 CSV / JSON 数据文件驱动。
+
+P1 运行报告：JSON、HTML、JUnit。
+
+P1 环境选择、变量覆盖。
+
+P2 CLI 运行器，便于 CI。
+
+2.7 响应与调试
+P0 状态码、耗时、大小。
+
+P0 Headers、Cookies、Body。
+
+P0 格式化：JSON、XML、HTML、图片、二进制。
+
+P0 Raw / Pretty / Preview。
+
+P0 查找、复制、下载。
+
+P0 保存为示例。
+
+P1 响应对比。
+
+P1 历史响应。
+
+P1 脚本 console。
+
+P2 请求时间线、网络日志。
+
+2.8 历史记录与搜索
+P0 自动记录请求历史。
+
+P0 历史搜索、过滤、重放、删除。
+
+P0 清理策略、最大条数。
+
+P1 历史分组、收藏。
+
+P1 从历史生成请求。
+
+P2 历史导出。
+
+2.9 Cookie 与证书
+P0 Cookie Jar 自动保存 Set-Cookie。
+
+P0 手动编辑 Cookie。
+
+P1 Cookie 导入导出。
+
+P1 自定义 CA 证书。
+
+P1 忽略 SSL 校验，仅请求级，红色警告。
+
+P1 客户端证书 mTLS。
+
+P2 证书密码存 keyring。
+
+2.10 代理与网络
+P0 HTTP / HTTPS 代理。
+
+P0 SOCKS5 代理。
+
+P0 系统代理、手动代理。
+
+P0 代理认证。
+
+P0 全局 / 环境 / 请求三级代理。
+
+P0 no_proxy 白名单。
+
+P1 PAC 代理。
+
+P1 重定向、超时、重试。
+
+P1 gzip / br 解压。
+
+P1 大响应流式处理。
+
+P2 HTTP/2、HTTP/3。
+
+2.11 导入导出与兼容
+P0 导入 Postman Collection v2.1 / v2.0。
+
+P0 导入 Postman Environment、Globals。
+
+P0 导出 Postman Collection v2.1。
+
+P0 导出 Environment、Globals。
+
+P0 导出 curl。
+
+P1 导入 curl。
+
+P1 导入 HAR。
+
+P1 导入 OpenAPI / Swagger。
+
+P1 导出代码：curl、Python、JS、C#、Java、Go、PHP。
+
+P1 Round-trip 尽量不丢结构。
+
+P2 导入 Insomnia、Thunder Client。
+
+2.12 高级功能
+P2 本地 Mock Server。
+
+P2 OpenAPI 文档生成。
+
+P2 GraphQL Schema 支持。
+
+P2 WebSocket / SSE / gRPC。
+
+P2 性能 / 并发测试。
+
+P2 插件系统。
+
+3. 非功能需求
+P0 完全离线可用。
+
+P0 Windows 10/11 安装包。
+
+P0 启动时间 < 3 秒。
+
+P0 普通请求 UI 不卡顿。
+
+P0 大响应限制大小，避免内存爆炸。
+
+P0 崩溃恢复、自动保存。
+
+P0 本地 SQLite 存储。
+
+P0 可备份、恢复。
+
+P1 深色 / 浅色主题。
+
+P1 多标签、多窗口。
+
+P1 快捷键、命令面板。
+
+P1 国际化。
+
+P1 自动更新可选，必须签名验证。
+
+P2 插件化扩展。
+
+4. 安全与隐私需求
+P0 前端无直接网络权限，所有 HTTP 走 Rust。
+
+P0 前端无全局 fs / shell / process 权限。
+
+P0 Tauri capabilities 最小化。
+
+P0 主窗口 CSP 严格，禁止外部导航。
+
+P0 脚本 iframe 沙箱：sandbox="allow-scripts"，无 allow-same-origin。
+
+P0 脚本无 Tauri API、无直接 fetch、无文件系统。
+
+P0 响应 HTML / SVG / Markdown 沙箱预览。
+
+P0 secret 变量 UI 掩码。
+
+P0 敏感字段加密存储：keyring / Stronghold / DPAPI。
+
+P0 日志脱敏：Authorization、Cookie、Set-Cookie、X-Api-Key、secret 变量。
+
+P0 导出 Collection 时 secret 默认占位符。
+
+P0 默认校验证书。
+
+P1 主密码可选。
+
+P1 加密备份导出。
+
+P1 pm.sendRequest 域名限制选项。
+
+P1 导入脚本首次运行提示。
+
+P2 企业策略、审计日志。
+
+5. 数据模型与存储需求
+P0 SQLite 表：
+
+workspaces
+
+collections
+
+folders
+
+requests
+
+responses
+
+environments
+
+variables
+
+history
+
+cookies
+
+settings
+
+certificates
+
+proxies
+
+P0 Postman v2.1 映射：
+
+item 递归 -> 文件夹/请求
+
+event -> pre-request / test
+
+auth -> 认证
+
+variable -> 变量
+
+body -> Body
+
+url -> URL / query / path
+
+response -> 示例
+
+P0 敏感字段加密。
+
+P0 文件上传路径本地映射。
+
+P1 导入导出 JSON 与 SQLite 互转。
+
+P1 数据库迁移版本。
+
+6. UI / UX 需求
+P0 三栏布局：侧边栏、请求区、响应区。
+
+P0 树形集合导航。
+
+P0 请求编辑器标签页：Params、Headers、Body、Auth、Scripts、Tests、Settings。
+
+P0 响应查看器标签页：Body、Headers、Cookies、Tests、Console。
+
+P0 环境快速切换。
+
+P0 变量高亮、未解析提示。
+
+P1 拖拽排序、多标签。
+
+P1 快捷键、搜索、命令面板。
+
+P1 主题、字体、布局调整。
+
+P2 多窗口、国际化。
+
+7. 技术约束
+P0 Tauri v2 + Rust。
+
+P0 网络：reqwest + tokio。
+
+P0 Cookie：reqwest_cookie_store。
+
+P0 TLS：rustls 或 native-tls。
+
+P0 数据库：SQLite。
+
+P0 密钥：Windows Credential Manager / DPAPI / keyring。
+
+P0 脚本沙箱：iframe 起步，后续 QuickJS。
+
+P0 前端框架不限，推荐 React / Vue / Svelte。
+
+P0 Rust command 白名单：
+
+send_request
+
+import_postman_collection
+
+save_environment
+
+load_history
+
+pick_upload_file
+
+P0 禁止暴露：
+
+read_file(path)
+
+write_file(path, data)
+
+execute_command(cmd)
+
+generic_http(url)
+
+8. 里程碑建议
+MVP / P0
+Postman 导入导出、集合树、请求构建、变量替换、HTTP/HTTPS、代理、Basic/Bearer/API Key、基础 pm 脚本、响应查看、历史、SQLite、keyring、Tauri 最小权限。
+
+V1 / P1
+完整认证、Cookie Jar、证书/mTLS、Pre-request/Test 脚本、集合运行器、数据文件、代码生成、curl/OpenAPI 导入、OAuth、报告、主题、快捷键。
+
+V2 / P2
+完整 pm.* 兼容、QuickJS 沙箱、Mock、CLI、GraphQL/WebSocket/gRPC、性能测试、插件系统。
+
+9. 验收标准摘要
+能导入 Postman v2.1 集合并正确显示请求、变量、脚本、认证。
+
+能发 GET/POST/PUT/DELETE 等请求，支持代理、超时、证书开关。
+
+{{var}}、:id、动态变量正确替换。
+
+pm.environment、pm.globals、pm.test、pm.response 可用。
+
+脚本不能访问 Tauri API、不能直接联网、不能读文件。
+
+响应 HTML/SVG 预览不执行脚本。
+
+secret 变量不明文落库、不写入日志。
+
+导出 Postman 后 round-trip 基本不丢结构。
+
+完全离线可用。

@@ -1,0 +1,1061 @@
+/*
+ * 浅色单主题（change: rework-app-layout，design D9）。
+ * 不提供深色变体；承载响应文档的沙箱 iframe 用自身白底，与此无关。
+ */
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #f1f3f5;
+  --border: #e3e6ea;
+  --text: #1f2329;
+  --muted: #6b7280;
+  --accent: #1a73e8;
+  --accent-fg: #ffffff;
+  --danger: #d92d20;
+  --warn: #b54708;
+  --ok: #067647;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+
+button.ghost {
+  background: transparent;
+}
+
+input,
+select,
+textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+  width: 100%;
+}
+
+textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+}
+
+/*
+ * 布局（change: rework-app-layout，见 design.md D1）：
+ *   侧栏 280px + 主区，底栏横跨两列。
+ *   主区四行：会话标签 / 面包屑 / 请求区 45fr / 响应区 55fr。
+ */
+.app {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) 32px;
+  height: 100%;
+  overflow: hidden;
+}
+
+.sidebar {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  flex: none;
+}
+
+.sidebar-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  flex: none;
+}
+
+.sidebar-tab {
+  flex: 1;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.sidebar-tab.active {
+  background: var(--panel);
+  border-color: var(--border);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+}
+
+.sidebar-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+
+.main {
+  grid-column: 2;
+  grid-row: 1;
+  display: grid;
+  /* 未选中请求时只有一列：请求区独占整宽（design D1） */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+/* 选中请求后才追加响应列 */
+.main.with-response {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.session-bar {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  min-height: 34px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.session-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 与右侧的环境选择器同排：允许收缩，避免把选择器挤出这一行 */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 420px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.session-tab .name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 会话标签行右侧的全局环境选择器（change: add-collection-search-and-env-management）。
+ * 它属于工作区级状态，因此没有打开请求时同样显示。 */
+.env-select {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  min-width: 0;
+  max-width: 46%;
+}
+
+.env-select select {
+  /* 全局 select 是 5px 内边距的表单控件；这一行是密集工具条，
+   * 收紧到与标签同高，避免把会话标签行撑高 */
+  width: auto;
+  min-width: 0;
+  max-width: 180px;
+  padding: 2px 4px;
+  font-size: 12px;
+}
+
+.crumb-bar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.crumb {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.crumb-sep {
+  color: var(--muted);
+}
+
+.crumb-bar input.crumb-name {
+  width: auto;
+  min-width: 160px;
+  max-width: 320px;
+  flex: none;
+}
+
+.request-region {
+  grid-column: 1;
+  grid-row: 3;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.response-region {
+  grid-column: 2;
+  grid-row: 3;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+}
+
+/* ResponsePanel / EntityScriptPanel 的根节点仍沿用 .pane，嵌入分区后需要撑满一圈 */
+.request-region > .pane,
+.response-region > .pane {
+  flex: 1;
+  min-height: 0;
+  border-right: none;
+}
+
+.request-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.request-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 4px;
+  flex: none;
+}
+
+/* URL 高亮：原生 input 无法局部着色，用同尺寸叠层承载着色文本（design D4/风险）。
+   叠层与输入框共用字体与内边距，因此字符位置一致。 */
+.url-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.url-field input.url-input {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+}
+
+.url-field input.url-input::placeholder {
+  color: var(--muted);
+}
+
+.url-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  padding: 5px 8px;
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--text);
+}
+
+.url-overlay .var {
+  color: var(--accent);
+}
+
+.preview-strip {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 10px 0;
+}
+
+.preview-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: none;
+  color: var(--muted);
+  align-self: flex-start;
+}
+
+.preview-body {
+  padding-bottom: 4px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(16, 24, 40, 0.42);
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 100%);
+  max-height: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgba(16, 24, 40, 0.18);
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+
+.status-bar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.status-text {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.env-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+/* 环境变量编辑器现在铺在主区（design D8）：VariablesPanel 原先是给 260px 侧栏写的，
+ * 放进宽区域后操作列与「写入」按钮会被挤成两行，这里按宽版重排。 */
+.var-editor th.var-actions,
+.var-editor td.var-actions {
+  width: 132px;
+  white-space: nowrap;
+}
+
+.var-editor .row > input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+.var-editor .row > button,
+.var-editor .row > label {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* 值单元格的就地编辑（change: add-variable-inline-editing）：输入框铺满列宽，
+ * 未揭示 secret 的掩码文本旁边挂一个轻量的「修改」入口 */
+.var-editor .var-value-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.var-editor .var-edit {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.var-editor .var-edit:hover:not(:disabled) {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+/* Environments tab 的工具栏：与 Collections 同款式——图标按钮，不重复 tab 名 */
+.env-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+}
+
+.env-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+}
+
+.env-item.active {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  border-color: var(--border);
+}
+
+/* 环境行：选项按钮 + 行内「⋯」按钮 + 就地改名输入（change:
+ * add-collection-search-and-env-management，design D5/D6）。 */
+.env-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.env-row > .env-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.env-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.env-item.editing {
+  padding: 1px 4px;
+}
+
+.env-name-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+
+/* 删除确认条占满整行，落在选项行下方 */
+.env-row > .node-confirm {
+  flex: 1 0 100%;
+  margin: 2px 0 4px;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.pane:last-child {
+  border-right: none;
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex-wrap: wrap;
+}
+
+.pane-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.row > .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  padding: 4px 9px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tab.active {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* 集合树（change: rework-collection-tree-and-scripts）：紧凑、小字号，
+ * 形态对齐 Postman。样式收在 .tree 作用域内，不动侧栏其它面板。 */
+.tree {
+  list-style: none;
+  margin: 0;
+  padding-left: 14px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.tree-root {
+  padding-left: 0;
+}
+
+/* Collections tab 的工具栏（change: add-collection-search-and-env-management）：
+ * 搜索框 + 两个图标按钮，对齐 Postman。tab 名已是 Collections，行内不再放标题。 */
+.tree-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tree-toolbar > .tree-search {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 工具栏图标按钮（Collections 与 Environments 两处同款式） */
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.icon-button:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+/* 过滤是纯前端视图态；搜索态下折叠控件被禁用、层级强制展开。 */
+.tree-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+}
+
+.tree-search:focus-within {
+  border-color: var(--accent);
+}
+
+.tree-search-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--muted);
+}
+
+.tree-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 0;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+}
+
+.tree-search-input:focus {
+  outline: none;
+}
+
+.tree-search-clear {
+  flex: none;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  line-height: 1;
+}
+
+.tree-toggle:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+/* 层级参考线：每深入一级就多一条竖线，可据此数出嵌套深度 */
+.tree .tree {
+  margin-left: 5px;
+  border-left: 1px solid var(--border);
+}
+
+.tree > li {
+  margin: 0;
+}
+
+.node {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.node:hover {
+  background: var(--panel-2);
+}
+
+.node.selected {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.tree-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.tree-toggle-space {
+  flex: none;
+  width: 14px;
+}
+
+.tree-icon {
+  flex: none;
+  color: var(--muted);
+}
+
+.tree-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 方法标签：小号彩色文字，视觉权重轻于名称 */
+.tree-method {
+  flex: none;
+  min-width: 42px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.tree-method[data-method='GET'] {
+  color: #067647;
+}
+
+.tree-method[data-method='POST'] {
+  color: #b54708;
+}
+
+.tree-method[data-method='PUT'] {
+  color: #1a73e8;
+}
+
+.tree-method[data-method='PATCH'] {
+  color: #7048e8;
+}
+
+.tree-method[data-method='DELETE'] {
+  color: #d92d20;
+}
+
+.node-more {
+  flex: none;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  line-height: 1;
+}
+
+.node-menu {
+  position: absolute;
+  top: 100%;
+  right: 2px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 132px;
+  padding: 3px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
+}
+
+.node-menu button {
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.node-menu button:hover {
+  background: var(--panel-2);
+}
+
+.node-menu button.danger {
+  color: var(--danger);
+}
+
+.node-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 4px 4px 18px;
+  padding: 5px 8px;
+  border: 1px solid var(--danger);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+/* 脚本编辑区：左栏切换、右栏编辑（change: rework-collection-tree-and-scripts） */
+.script-pane {
+  display: flex;
+  flex: 1;
+  gap: 10px;
+  min-height: 0;
+}
+
+.script-pane-list {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  width: 168px;
+  padding-right: 8px;
+  border-right: 1px solid var(--border);
+}
+
+.script-pane-list button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  border-radius: 5px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.script-pane-list button:hover {
+  background: var(--panel-2);
+}
+
+.script-pane-list button.active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  font-weight: 600;
+}
+
+.script-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.script-pane-editor {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.script-pane-editor textarea {
+  flex: 1;
+  min-height: 220px;
+}
+
+.badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.badge.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.badge.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.badge.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.notice {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 6px 9px;
+  background: var(--panel);
+}
+
+.notice.warn {
+  border-left-color: var(--warn);
+  color: var(--warn);
+}
+
+.notice.danger {
+  border-left-color: var(--danger);
+  color: var(--danger);
+}
+
+.notice.info {
+  border-left-color: var(--accent);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  font-size: 12px;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+td input,
+td select,
+td button {
+  padding: 3px 6px;
+}
+
+/* 幽灵行：表格末尾常驻的空行，用户一输入就变成普通行。
+ * 用虚线底边与浅色 placeholder 表达「这里不是已有内容，而是可以开始写的地方」。
+ * 行高与内容行一致——注意内容行的高度由同格的输入框决定，因此上面那条
+ * `td button`（与输入框同内边距）是这里的必要条件：否则内容行里的删除按钮
+ * 会把行撑高 4px，幽灵行就会比它矮一截。 */
+.ghost-row td {
+  border-bottom-color: transparent;
+}
+
+.ghost-row input,
+.ghost-row select {
+  background: transparent;
+  border-color: transparent;
+  border-bottom: 1px dashed var(--border);
+  border-radius: 0;
+}
+
+.ghost-row input:hover,
+.ghost-row input:focus,
+.ghost-row select:hover,
+.ghost-row select:focus {
+  border-bottom-color: var(--accent);
+}
+
+.ghost-row input::placeholder {
+  color: var(--muted);
+}
+
+.ghost-row .var-actions,
+.ghost-row label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.var-editor .var-name-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.checkbox {
+  width: auto;
+}
+
+pre.body {
+  margin: 0;
+  padding: 8px;
+  background: #f6f8fa;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: auto;
+  max-height: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+iframe.preview {
+  width: 100%;
+  min-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.secret-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.scroll-y {
+  overflow-y: auto;
+}

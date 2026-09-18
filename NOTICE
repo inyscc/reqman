@@ -1,0 +1,90 @@
+reqman 附带了第三方软件。本文件列出本应用分发时所含第三方代码的来源与许可证，
+以满足这些许可证的署名要求。
+
+## 本文件如何产生，以及它的证据强度
+
+本应用通过 `postman-sandbox`（Apache-2.0）提供 Postman 脚本运行时。它随包分发一份
+**预打包、且经过压缩** 的引导代码（`node_modules/postman-sandbox/.cache/bootcode.browser.js`，
+约 2.2 MiB）。该产物是单行压缩文件，**其中的许可证注释已被剥离**，且上游未提供任何
+NOTICE 或许可汇总文件。
+
+因此下面的「打包在引导代码内」一节，是两种证据交叉得出的：
+
+1. 上游包声明的 `devDependencies` —— 这是打包器构建该引导代码的源码集合；
+2. 对压缩产物做字符串存在性核对（逐项确认该库确实出现在产物中）。
+
+它是**逐项核对过的清单，不是字节级的产物成分保证**。上游若调整打包内容，本文件需要
+重新核对。核对方式与 2.2 的验证方式一致。
+
+## 直接依赖（运行时依赖）
+
+| 组件 | 版本 | 许可证 |
+|---|---|---|
+| postman-sandbox | 6.7.4 | Apache-2.0 |
+| postman-collection | 5.3.1 | Apache-2.0 |
+| uvm | 4.0.2 | Apache-2.0 |
+| teleport-javascript | 1.0.0 | ISC |
+| lodash | 4.18.1 | MIT |
+
+版本被精确锁定，`postman-sandbox` 的行为即本项目的兼容性基准。
+
+## 打包在预构建引导代码内
+
+| 组件 | 版本 | 许可证 |
+|---|---|---|
+| ajv | 6.12.5 | MIT |
+| backbone | 1.6.0 | MIT |
+| chai | 4.4.1 | MIT |
+| chai-postman | 2.0.1 | Apache-2.0 |
+| cheerio | 0.22.0 | MIT |
+| crypto-js | 3.3.0 | MIT |
+| csv-parse | 1.2.4 | BSD-3-Clause |
+| js-yaml | 4.1.0 | MIT |
+| liquid-json | 0.3.1 | Apache-2.0 |
+| lodash (3.x) | 3.10.2 | MIT |
+| moment | 2.30.1 | MIT |
+| tv4 | 1.3.0 | Public Domain + MIT（双许可） |
+| uniscope | 3.1.0 | Apache-2.0 |
+| xml2js | 0.6.2 | MIT |
+| @postman/tough-cookie | 4.1.3-postman.1 | BSD-3-Clause |
+| assert | 2.0.0 | MIT |
+| buffer | 6.0.3 | MIT |
+| jquery | 3.7.1 | MIT |
+
+注意 `lodash` 同时存在 4.x（直接依赖）与 3.x（打包在引导代码内）两个版本，这不是重复
+条目：`postman-sandbox` 沙箱内 `_` 指向 3.x，与 Postman 一致。
+
+## 内嵌于 postman-sandbox 源码中（lib/vendor）
+
+| 组件 | 许可证 |
+|---|---|
+| sugar.js | MIT-style license，Copyright (c) 2013 Andrew Plummer |
+| uuid.js | 未随附许可证声明（见下方说明） |
+
+`atob.js` 与 `btoa.js` 只是对 `buffer` 的同名方法的再导出，不构成独立组件。
+
+## 两项需要说明的情况
+
+**1. `lib/vendor/uuid.js` 没有许可证声明。** 该文件是上游内嵌的一段 UUID 生成实现，
+不含许可证头部也未注明出处。它随 `postman-sandbox`（Apache-2.0）分发，但本文件不替
+上游断言它的权利状态。若需要消除这一不确定性，应向 `postmanlabs/postman-sandbox`
+询问，或在沙箱内以其他 UUID 来源替换。
+
+**2. 上游依赖带已知安全告警，且无法在不放弃版本锁定的前提下修掉。** 安装后
+`npm audit` 报告 3 high + 1 moderate：`@faker-js/faker <= 10.4.0`（`helpers.fake`
+可被诱导为任意代码执行，GHSA-qxc2-j82w-r537）经 `postman-collection` 传入；另有
+`uuid < 11.1.1` 的缓冲区边界检查缺失（GHSA-w5hq-g745-h8pq）。`npm audit fix` 给出的
+解法是把 `postman-sandbox` 降级到 4.1.1，与本项目的兼容性基准冲突，故不采用。当前
+的处置见变更 `add-pm-script-runtime` 的 design.md。
+
+## 许可证全文
+
+各许可证的全文可从以下位置取得：
+
+- Apache-2.0：https://www.apache.org/licenses/LICENSE-2.0
+- MIT：https://opensource.org/licenses/MIT
+- ISC：https://opensource.org/licenses/ISC
+- BSD-3-Clause：https://opensource.org/licenses/BSD-3-Clause
+- tv4 的双许可：http://geraintluff.github.io/tv4/LICENSE.txt 与 http://jsonary.com/LICENSE.txt
+
+`postman-sandbox` 自身的许可证全文见 `node_modules/postman-sandbox/LICENSE.md`。

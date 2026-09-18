@@ -1,0 +1,19 @@
+上游一致性测试套件（任务 4.5 / 10.2 的验收基准）
+================================================
+
+来源：https://github.com/postmanlabs/postman-sandbox
+版本：v6.7.4（与本项目锁定的 npm 依赖 `postman-sandbox@6.7.4` 同版本，见 design D1/D4）
+许可证：Apache-2.0（与上游仓库一致）
+
+本目录下的文件为**上游原样拷贝**，未做任何修改：
+
+- `test/unit/sandbox-libraries/*.test.js`（18 个文件）——沙箱标准库与 pm API 的一致性用例
+- `lib/environment.js`、`lib/sandbox/postman-legacy-interface.js`——
+  两个用例文件（`deprecation.test.js` / `pm-require.test.js`）直接引用的包内模块
+- `index.js`——本地新增的转发文件，把 `require('../../../')` 指向 npm 安装的同版本包
+
+为什么原样拷贝而不改写：D4 把「全兼容」的验收基准定义为**上游实现的实际行为**。
+改写用例就等于改写基准。若有用例失败，正确做法是记录偏离（见 RESULTS.md），
+而不是改测试。
+
+运行：`npm run test:upstream`

@@ -1,0 +1,6 @@
+{
+  "name": "reqman-upstream-sandbox-suite",
+  "private": true,
+  "type": "commonjs",
+  "description": "上游 postman-sandbox 一致性用例的承载目录：局部声明 CommonJS，避免被项目根的 type=module 影响；用例保持上游原样"
+}
