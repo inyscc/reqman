@@ -721,23 +721,6 @@ textarea {
   background: var(--panel);
 }
 
-/* 请求级操作（另存为 / 删除）：保留文字标签，指针悬停请求带或其中获得键盘焦点时
-   显现。用 visibility 而不是条件渲染或 display:none —— 它保留布局占位，使显现与
-   隐藏 SHALL NOT 引起水平跳动（ui-layout「显现不引起水平跳动」）。
-   悬停范围是**整条请求带**（spec: 指针移到请求带上即显现），而不只是身份行。 */
-.request-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-  visibility: hidden;
-}
-
-.request-band:hover .request-actions,
-.request-band:focus-within .request-actions {
-  visibility: visible;
-}
-
 .request-region {
   grid-column: 1;
   grid-row: 3;
@@ -827,28 +810,6 @@ textarea {
 
 .url-overlay .var {
   color: var(--accent);
-}
-
-.preview-strip {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-4) 0;
-}
-
-.preview-toggle {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-1) var(--space-2);
-  border: none;
-  color: var(--muted);
-  align-self: flex-start;
-}
-
-.preview-body {
-  padding-bottom: var(--space-2);
 }
 
 .modal-backdrop {
@@ -1119,6 +1080,12 @@ textarea {
   flex: 1;
   overflow: auto;
   padding: var(--space-4);
+}
+
+/* Scripts 与 cURL 两页要把编辑器铺满正文区：这两页的正文区不再自身滚动，把高度让给
+   编辑器（.script-pane / .curl-block 都是 flex:1），滚动由编辑器自己承担。 */
+.pane-body.fill {
+  overflow: hidden;
 }
 
 .stack {
@@ -1523,6 +1490,8 @@ select.method-select[data-method='OPTIONS'] {
   flex-direction: column;
   gap: var(--space-3);
   min-width: 0;
+  /* 让 textarea 的 flex:1 落在可用高度上：少了这条，编辑器会把正文区顶高而不是铺满 */
+  min-height: 0;
 }
 
 .script-pane-editor textarea {
@@ -1782,32 +1751,20 @@ iframe.preview {
   padding: var(--space-4);
 }
 
-/* cURL 快照（spec: 请求带上的 cURL 快照）：入口常驻在请求带右端，命令文本块展开在
- * 地址栏下方。命令可能很长（多请求头 + 多行正文），因此给最大高度并内部滚动，
- * 不让它把分栏区挤没。 */
-.curl-toggle {
-  flex: none;
-  padding: var(--space-1) var(--space-3);
-  font-size: var(--text-sm);
-  font-family: var(--font-mono);
-}
-
-.curl-toggle[aria-expanded='true'] {
-  background: var(--panel-2);
-  border-color: var(--border);
-  color: var(--text);
-}
-
+/* cURL 快照（spec: cURL 快照标签）：命令文本块是标签正文，铺满正文区。命令可能很长
+ * （多请求头 + 多行正文），由它自身滚动，不再另设高度上限——正文区已把高度让给它。 */
 .curl-block {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-2) var(--space-4) var(--space-4);
+  min-height: 0;
 }
 
 .curl-block .curl-command {
+  flex: 1;
   width: 100%;
-  max-height: 220px;
+  min-height: 160px;
   overflow: auto;
   white-space: pre;
 }

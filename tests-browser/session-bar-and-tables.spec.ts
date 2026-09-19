@@ -251,7 +251,7 @@ describe('通栏请求带（真实引擎）', () => {
     }
   });
 
-  it('请求级操作随请求带悬停显现，且不引起面包屑水平跳动', async () => {
+  it('请求面板头只承载身份：没有请求级操作按钮，面包屑不随指针跳动', async () => {
     const page = await openApp({ width: 1100, height: 700 });
     try {
       await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click();
@@ -260,26 +260,31 @@ describe('通栏请求带（真实引擎）', () => {
       const snapshot = () =>
         page.evaluate(() => {
           const round = (value: number) => Math.round(value * 100) / 100;
-          const actions = document.querySelector('.request-actions') as HTMLElement;
+          const header = document.querySelector(
+            '[data-testid="request-panel-header"]',
+          ) as HTMLElement;
           const crumb = document.querySelector('.crumb') as HTMLElement;
           return {
-            actionsVisibility: getComputedStyle(actions).visibility,
+            buttons: Array.from(header.querySelectorAll('button')).map(
+              (node) => node.textContent ?? '',
+            ),
             crumbLeft: round(crumb.getBoundingClientRect().left),
           };
         });
 
-      // 指针移到别处：操作不可见，但仍在 DOM 里占位
+      // 指针移到别处
       await page.mouse.move(5, 5);
       const before = await snapshot();
-      expect(before.actionsVisibility).toBe('hidden');
-
       // 指针移进请求带（地址栏那一行同样算请求带内）
       await page.hover('.request-toolbar');
       const after = await snapshot();
-      expect(after.actionsVisibility).toBe('visible');
+
+      // 面板头里没有任何请求级操作按钮（复制/删除在集合树，cURL 在标签里）
+      expect(after.buttons).toEqual([]);
+      // 指针进出不改变面包屑的位置
       expect(
         Math.abs(after.crumbLeft - before.crumbLeft),
-        `显现引起了面包屑水平跳动：${JSON.stringify({ before, after })}`,
+        `指针进出引起了面包屑水平跳动：${JSON.stringify({ before, after })}`,
       ).toBeLessThanOrEqual(0.5);
     } finally {
       await page.close();
@@ -376,7 +381,7 @@ describe('变量浮层的锚定（真实引擎）', () => {
   });
 });
 
-describe('cURL 快照的复制（真实引擎）', () => {
+describe('cURL 快照标签（真实引擎）', () => {
   it('复制把命令写进剪贴板，写的是改动后的内容', async () => {
     // 剪贴板权限要显式授予，否则 writeText 会被拒绝——这条用例同时验证
     // 「运行环境里 navigator.clipboard 可用」这个假设（design D5）
@@ -391,7 +396,8 @@ describe('cURL 快照的复制（真实引擎）', () => {
       await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click();
       await page.getByLabel('请求地址').waitFor();
 
-      await page.getByTestId('curl-toggle').click();
+      // cURL 是请求编辑器的一个标签：切过去即生成，不需要再点一次
+      await page.getByRole('button', { name: 'cURL', exact: true }).click();
       const field = page.getByLabel('curl 命令');
       await field.waitFor();
       await field.fill('curl -X GET 改过的命令');
@@ -407,12 +413,12 @@ describe('cURL 快照的复制（真实引擎）', () => {
     }
   });
 
-  it('长命令在文本块内部滚动，不会把分栏区挤没', async () => {
+  it('命令正文铺满正文区：长命令由它自身滚动，不会把分栏区挤没', async () => {
     const page = await openApp({ width: 1100, height: 700 });
     try {
       await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click();
       await page.getByLabel('请求地址').waitFor();
-      await page.getByTestId('curl-toggle').click();
+      await page.getByRole('button', { name: 'cURL', exact: true }).click();
       const field = page.getByLabel('curl 命令');
       await field.waitFor();
 
@@ -422,16 +428,19 @@ describe('cURL 快照的复制（真实引擎）', () => {
       const geometry = await page.evaluate(() => {
         const round = (value: number) => Math.round(value * 100) / 100;
         const box = document.querySelector('.curl-command') as HTMLTextAreaElement;
+        const body = document.querySelector('.pane-body.fill') as HTMLElement;
         const response = document.querySelector('.response-region') as HTMLElement;
         return {
           fieldHeight: round(box.getBoundingClientRect().height),
+          bodyHeight: round(body.getBoundingClientRect().height),
           fieldScrolls: box.scrollHeight > box.clientHeight,
           responseHeight: round(response.getBoundingClientRect().height),
         };
       });
 
-      // max-height: 220px（box-sizing: border-box），因此文本块内部滚动而不是无限长高
-      expect(geometry.fieldHeight).toBeLessThanOrEqual(222);
+      // 不再是 220px 的高度上限：正文块跟着正文区一起长，滚动发生在它自己内部
+      expect(geometry.fieldHeight).toBeGreaterThan(240);
+      expect(geometry.fieldHeight).toBeLessThanOrEqual(geometry.bodyHeight);
       expect(geometry.fieldScrolls).toBe(true);
       // 分栏区仍保有可用高度
       expect(geometry.responseHeight).toBeGreaterThan(150);

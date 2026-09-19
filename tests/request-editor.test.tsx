@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { RequestBand, RequestEditor } from '../src/components/RequestEditor';
+import { RequestBand, RequestEditor, type Tab } from '../src/components/RequestEditor';
 import {
   defaultSettings,
   emptyAuth,
@@ -9,8 +9,6 @@ import {
   type CurlCommand,
   type SavedRequest,
 } from '../src/lib/types';
-
-type Tab = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'scripts';
 
 function draft(overrides: Partial<SavedRequest> = {}): SavedRequest {
   return {
@@ -35,35 +33,40 @@ function draft(overrides: Partial<SavedRequest> = {}): SavedRequest {
 /**
  * 受控编辑器的测试宿主：把每次 onChange 的结果记下来，并按新值重新渲染。
  *
- * 请求带（身份行 + 地址栏 + 解析预览）与列内容（内层标签与正文）现在是两块——
- * 前者由主区作为通栏项渲染，因此这里也分开挂，测试才拿得到地址栏。
+ * 请求带（身份行 + 地址栏）与列内容（内层标签与正文）是两块——前者由主区作为通栏项
+ * 渲染，因此这里也分开挂，测试才拿得到地址栏。内层标签由宿主持有，测试点标签按钮切换。
  */
 function harness(
   initial: SavedRequest,
-  tab: Tab = 'params',
+  initialTab: Tab = 'params',
   curlResult?: CurlCommand | 'reject',
 ) {
   const seen: SavedRequest[] = [];
   let curlCalls = 0;
-  /** 命令生成：默认给一段可辨识的文本；测试可以换成带 warnings 或直接抛错。 */
-  const generateCurl = async (): Promise<CurlCommand> => {
-    curlCalls += 1;
-    if (curlResult === 'reject') throw { code: 'io', message: '生成失败' };
-    return (
-      curlResult ?? {
-        command: `curl -X ${initial.method} '${initial.url}'`,
-        contains_secret: false,
-        warnings: [],
-      }
-    );
-  };
+  let setDraft: (next: SavedRequest) => void = () => {};
 
   function Host() {
     const [value, setValue] = useState(initial);
+    const [tab, setTab] = useState<Tab>(initialTab);
     const change = (next: SavedRequest) => {
       seen.push(next);
       setValue(next);
     };
+    setDraft = setValue;
+
+    /** 命令生成：按**当前**草稿生成（换请求后必须跟着变），测试可换成带 warnings 或抛错。 */
+    const generateCurl = async (): Promise<CurlCommand> => {
+      curlCalls += 1;
+      if (curlResult === 'reject') throw { code: 'io', message: '生成失败' };
+      return (
+        curlResult ?? {
+          command: `curl -X ${value.method} '${value.url}'`,
+          contains_secret: false,
+          warnings: [],
+        }
+      );
+    };
+
     return (
       <>
         <RequestBand
@@ -73,18 +76,26 @@ function harness(
           onSend={() => {}}
           collectionName="我的集合"
           dirty={false}
-          onSave={() => {}}
-          onDuplicate={() => {}}
-          onDelete={() => {}}
+        />
+        <RequestEditor
+          draft={value}
+          tab={tab}
+          onTab={setTab}
+          onChange={change}
           onCurl={generateCurl}
         />
-        <RequestEditor draft={value} tab={tab} onTab={() => {}} onChange={change} />
       </>
     );
   }
 
   render(<Host />);
-  return { seen, latest: () => seen[seen.length - 1], curlCalls: () => curlCalls };
+  return {
+    seen,
+    latest: () => seen[seen.length - 1],
+    curlCalls: () => curlCalls,
+    /** 换一条请求：内层标签保持不动，用来验证「命令始终对应当前请求」。 */
+    switchRequest: (next: SavedRequest) => act(() => setDraft(next)),
+  };
 }
 
 function bodyRows(): HTMLTableRowElement[] {
@@ -405,16 +416,16 @@ describe('描述列（spec: 键值表的列与描述列）', () => {
   });
 });
 
-describe('请求带上的 cURL 快照（spec: 请求带上的 cURL 快照）', () => {
+describe('cURL 快照标签（spec: cURL 快照标签）', () => {
   const command = "curl -X GET 'https://api.test/users'";
   const plain = { command, contains_secret: false, warnings: [] };
 
-  it('一次点击展开可编辑的命令，再点一次收起', async () => {
+  it('切换到标签即生成可编辑的命令，切到别的标签后不再显示', async () => {
     harness(draft(), 'params', plain);
 
     expect(screen.queryByTestId('curl-block')).toBeNull();
 
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('cURL'));
 
     const field = (await screen.findByLabelText('curl 命令')) as HTMLTextAreaElement;
     expect(field.value).toBe(command);
@@ -422,14 +433,14 @@ describe('请求带上的 cURL 快照（spec: 请求带上的 cURL 快照）', (
     expect(field.tagName).toBe('TEXTAREA');
     expect(field.disabled).toBe(false);
 
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('Params'));
     expect(screen.queryByTestId('curl-block')).toBeNull();
   });
 
   it('编辑命令不影响请求', async () => {
     const { seen } = harness(draft(), 'params', plain);
 
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('cURL'));
     fireEvent.change(await screen.findByLabelText('curl 命令'), {
       target: { value: 'curl -X DELETE 改过的' },
     });
@@ -444,7 +455,7 @@ describe('请求带上的 cURL 快照（spec: 请求带上的 cURL 快照）', (
   it('「重新生成」覆盖编辑并重新生成一次', async () => {
     const { curlCalls } = harness(draft(), 'params', plain);
 
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('cURL'));
     fireEvent.change(await screen.findByLabelText('curl 命令'), { target: { value: '改过的' } });
 
     fireEvent.click(screen.getByTestId('curl-regenerate'));
@@ -455,34 +466,35 @@ describe('请求带上的 cURL 快照（spec: 请求带上的 cURL 快照）', (
     expect(curlCalls()).toBe(2);
   });
 
-  it('展开期间请求变化不覆盖文本块', async () => {
-    harness(draft(), 'params', plain);
-
-    fireEvent.click(screen.getByTestId('curl-toggle'));
-    fireEvent.change(await screen.findByLabelText('curl 命令'), {
-      target: { value: '保留我' },
-    });
-
-    fireEvent.change(screen.getByLabelText('请求地址'), {
-      target: { value: 'https://api.test/other' },
-    });
-
-    expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe('保留我');
-  });
-
-  it('收起再展开即重新生成，编辑不保留', async () => {
+  it('切走再切回即重新生成，编辑不保留', async () => {
     const { curlCalls } = harness(draft(), 'params', plain);
 
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('cURL'));
     fireEvent.change(await screen.findByLabelText('curl 命令'), { target: { value: '改过的' } });
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('Params'));
 
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('cURL'));
 
     await waitFor(() =>
       expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe(command),
     );
     expect(curlCalls()).toBe(2);
+  });
+
+  it('切换请求后命令对应当前请求，而不是上一条', async () => {
+    // 不给固定结果：这里要验的正是"按当前草稿生成"
+    const { switchRequest } = harness(draft(), 'curl');
+
+    expect((await screen.findByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe(command);
+
+    // 内层标签仍停在 cURL：换请求也必须重新生成
+    switchRequest({ ...draft(), id: 'r2', url: 'https://api.test/other' });
+
+    await waitFor(() =>
+      expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe(
+        "curl -X GET 'https://api.test/other'",
+      ),
+    );
   });
 
   it('「复制」写入的是改动后的内容', async () => {
@@ -491,7 +503,7 @@ describe('请求带上的 cURL 快照（spec: 请求带上的 cURL 快照）', (
 
     harness(draft(), 'params', plain);
 
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('cURL'));
     fireEvent.change(await screen.findByLabelText('curl 命令'), {
       target: { value: 'curl 改过的' },
     });
@@ -508,7 +520,7 @@ describe('请求带上的 cURL 快照（spec: 请求带上的 cURL 快照）', (
       warnings: ['请求体为二进制文件，命令中的文件位置是占位符'],
     });
 
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('cURL'));
 
     // 命令里是占位符（要用户自己替换），提示里说明原因
     expect((await screen.findByLabelText('curl 命令') as HTMLTextAreaElement).value).toContain(
@@ -520,7 +532,7 @@ describe('请求带上的 cURL 快照（spec: 请求带上的 cURL 快照）', (
   it('生成失败时给出可见的错误，而不是静默', async () => {
     harness(draft(), 'params', 'reject');
 
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('cURL'));
 
     expect((await screen.findByTestId('curl-error')).textContent).toContain('生成失败');
   });

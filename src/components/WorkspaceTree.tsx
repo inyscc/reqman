@@ -23,6 +23,8 @@ export interface WorkspaceTreeProps {
   onDeleteCollection: (id: string) => void;
   onDeleteFolder: (id: string) => void;
   onDeleteRequest: (id: string) => void;
+  /** 复制一条请求（spec: 集合树的操作入口默认隐藏）：请求节点菜单里的「复制」。 */
+  onDuplicateRequest: (id: string) => void;
   /** 选中实体并把焦点交给面包屑的名称输入框。 */
   onRenameEntity: (entity: EntitySelection) => void;
   onRenameRequest: (id: string) => void;
@@ -38,6 +40,7 @@ interface TreeActions {
   onDeleteCollection: (id: string) => void;
   onDeleteFolder: (id: string) => void;
   onDeleteRequest: (id: string) => void;
+  onDuplicateRequest: (id: string) => void;
   onRenameEntity: (entity: EntitySelection) => void;
   onRenameRequest: (id: string) => void;
   onToggle: (id: string) => void;
@@ -312,6 +315,7 @@ function RequestRow({
   const reveal = useRowReveal(node.id, view);
   const menu: MenuItem[] = [
     { label: '重命名', onSelect: () => actions.onRenameRequest(node.id) },
+    { label: '复制', onSelect: () => actions.onDuplicateRequest(node.id) },
     { label: '删除', danger: true, onSelect: () => actions.onDeleteRequest(node.id) },
   ];
 
@@ -327,6 +331,12 @@ function RequestRow({
           if (event.key === 'Enter' && event.target === event.currentTarget) {
             actions.onSelectRequest(node.id);
           }
+        }}
+        // 右键与「⋯」是同一份菜单、同一个展开状态：两处只是不同触发器，逻辑不分叉
+        // （spec: 集合树的操作入口默认隐藏）。preventDefault 挡掉运行环境自带的页面菜单。
+        onContextMenu={(event) => {
+          event.preventDefault();
+          view.setMenu(node.id);
         }}
         {...reveal}
       >
@@ -502,6 +512,7 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     onDeleteCollection,
     onDeleteFolder,
     onDeleteRequest,
+    onDuplicateRequest,
     onRenameEntity,
     onRenameRequest,
     onImport,
@@ -525,6 +536,7 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     onDeleteCollection,
     onDeleteFolder,
     onDeleteRequest,
+    onDuplicateRequest,
     onRenameEntity,
     onRenameRequest,
     onToggle: (id) => {

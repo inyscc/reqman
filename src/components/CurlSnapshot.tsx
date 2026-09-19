@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { describeError } from '../lib/commands';
 import type { CurlCommand } from '../lib/types';
 
@@ -10,39 +10,49 @@ export interface CurlSnapshotState {
   copied: boolean;
 }
 
-export interface CurlSnapshot {
-  open: boolean;
-  toggle: () => void;
-  /** 交给 CurlPanel 的属性包，便于调用方只做一次展开。 */
-  panel: CurlSnapshotState & {
-    onChangeCommand: (value: string) => void;
-    onRegenerate: () => void;
-    onCopy: () => void;
-  };
+export interface CurlSnapshot extends CurlSnapshotState {
+  onChangeCommand: (value: string) => void;
+  onRegenerate: () => void;
+  onCopy: () => void;
 }
 
-/**
- * 请求带上的 cURL 快照（spec: 请求带上的 cURL 快照）。
- *
- * 语义上刻意是**快照**而不是跟随：展开时生成一次，之后请求再变也不覆盖文本块——
- * 「能改」正是这个功能的理由，自动跟随会在用户编辑时把内容冲掉。覆盖只能由用户点
- * 「重新生成」触发；收起即重置，所以再展开是重新生成（不留上一次的编辑）。
- */
-export function useCurlSnapshot(onGenerate: () => Promise<CurlCommand>): CurlSnapshot {
-  const [open, setOpen] = useState(false);
-  const [state, setState] = useState<CurlSnapshotState>({
-    command: '',
-    warnings: [],
-    error: null,
-    busy: false,
-    copied: false,
-  });
-  const copiedTimer = useRef<number | null>(null);
+const EMPTY: CurlSnapshotState = {
+  command: '',
+  warnings: [],
+  error: null,
+  busy: false,
+  copied: false,
+};
 
-  const generate = async () => {
-    setState((current) => ({ ...current, busy: true, error: null }));
+/**
+ * cURL 快照（spec: cURL 快照标签）。
+ *
+ * 语义是**每次进入即重新生成**：`active` 为真时按当前请求生成一次，离开标签即清空，
+ * 编辑不跨标签留存——要留用改动后的命令，用户在离开前点「复制」。
+ *
+ * `requestKey` 也要参与触发：内层标签不会因为换了请求而复位（从树里打开另一条请求时
+ * `innerTab` 仍停在 cURL），只盯"标签切换"会把上一条请求的命令留在屏幕上。因此生成
+ * 的触发条件是「是否停在该标签」**且**「当前请求的身份」。
+ */
+export function useCurlSnapshot(
+  onGenerate: () => Promise<CurlCommand>,
+  active: boolean,
+  requestKey: string,
+): CurlSnapshot {
+  const [state, setState] = useState<CurlSnapshotState>(EMPTY);
+  const copiedTimer = useRef<number | null>(null);
+  /** 生成回调经 ref 读取：它的身份每次渲染都在变，进依赖会变成死循环。 */
+  const generate = useRef(onGenerate);
+  generate.current = onGenerate;
+  /** 作废在途生成：离开标签或换了请求后，旧结果不许再写回。 */
+  const sequence = useRef(0);
+
+  const load = useCallback(async () => {
+    const current = ++sequence.current;
+    setState((previous) => ({ ...previous, busy: true, error: null }));
     try {
-      const result = await onGenerate();
+      const result = await generate.current();
+      if (current !== sequence.current) return;
       setState({
         command: result.command,
         warnings: result.warnings,
@@ -51,20 +61,21 @@ export function useCurlSnapshot(onGenerate: () => Promise<CurlCommand>): CurlSna
         copied: false,
       });
     } catch (caught) {
-      setState((current) => ({ ...current, busy: false, error: describeError(caught).message }));
+      // 生成失败要说出来：静默失败会让人以为这段命令本来就是空的
+      if (current !== sequence.current) return;
+      setState({ ...EMPTY, error: describeError(caught).message });
     }
-  };
+  }, []);
 
-  // 展开时生成一次；收起即清空（下次展开是重新生成）。
-  // 刻意只依赖 open：展开期间请求变化不覆盖文本块，也不重新生成。
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (!open) {
-      setState({ command: '', warnings: [], error: null, busy: false, copied: false });
+    if (!active) {
+      // 离开标签即清空：下次进来是重新生成，上一次的编辑不保留
+      sequence.current += 1;
+      setState(EMPTY);
       return;
     }
-    void generate();
-  }, [open]);
+    void load();
+  }, [active, requestKey, load]);
 
   useEffect(
     () => () => {
@@ -89,19 +100,15 @@ export function useCurlSnapshot(onGenerate: () => Promise<CurlCommand>): CurlSna
   };
 
   return {
-    open,
-    toggle: () => setOpen((value) => !value),
-    panel: {
-      ...state,
-      onChangeCommand: (value: string) => setState((current) => ({ ...current, command: value })),
-      onRegenerate: () => void generate(),
-      onCopy: () => void copy(),
-    },
+    ...state,
+    onChangeCommand: (value: string) => setState((current) => ({ ...current, command: value })),
+    onRegenerate: () => void load(),
+    onCopy: () => void copy(),
   };
 }
 
 /** 命令文本块：可编辑的多行文本 + 「重新生成」「复制」+ 生成结果给出的提示。 */
-export function CurlPanel(props: CurlSnapshot['panel']) {
+export function CurlPanel(props: CurlSnapshot) {
   const { command, warnings, error, busy, copied, onChangeCommand, onRegenerate, onCopy } = props;
 
   return (
@@ -115,7 +122,6 @@ export function CurlPanel(props: CurlSnapshot['panel']) {
       <textarea
         className="curl-command"
         aria-label="curl 命令"
-        rows={5}
         value={command}
         disabled={busy}
         onChange={(event) => onChangeCommand(event.target.value)}

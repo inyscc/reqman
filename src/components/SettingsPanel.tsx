@@ -14,11 +14,16 @@ export interface SettingsPanelProps {
   editing?: EditingRegistry;
 }
 
+/** 改动停止后自动落库的延迟（spec: 脚本的编辑与保存对设置面同样适用）。 */
+const SETTINGS_AUTOSAVE_DELAY_MS = 500;
+
 /**
  * 应用设置。目前只有一项：`pm.sendRequest` 的目标策略。
  *
  * 这一项之所以要有界面，是因为它是**安全相关**的设置：默认与 Postman 一致、不限制
  * 目标地址，用户必须能主动收紧，也必须能看出当前是松是紧。
+ *
+ * 这里**没有保存按钮**：改动停止后自动落库，落库成功后基线前移，脏判据自然为假。
  */
 export function SettingsPanel({ client, editing }: SettingsPanelProps) {
   const [mode, setMode] = useState<'allow' | 'deny'>('allow');
@@ -88,6 +93,18 @@ export function SettingsPanel({ client, editing }: SettingsPanelProps) {
     }
   };
 
+  // 编辑即自动保存（spec: 脚本的编辑与保存）：改动停止后落库。
+  // 失败时基线不前移，因此这里会随下一次键入再次排期；退出/关模态时守卫也会拦。
+  useEffect(() => {
+    if (mode === baseline.mode && hosts === baseline.hosts) return;
+    const timer = window.setTimeout(() => {
+      void save();
+    }, SETTINGS_AUTOSAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+    // save 每次渲染都是新函数，进依赖会让定时器永远重排；脏判据已由 mode/hosts/baseline 表达
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, hosts, baseline.mode, baseline.hosts]);
+
   useEditingSurface(editing, {
     id: 'settings-policy',
     priority: SURFACE_PRIORITY.modal,
@@ -138,13 +155,6 @@ export function SettingsPanel({ client, editing }: SettingsPanelProps) {
       />
 
       <div className="row">
-        <button
-          onClick={() => {
-            void save();
-          }}
-        >
-          保存策略
-        </button>
         <button
           className="ghost"
           onClick={() => {

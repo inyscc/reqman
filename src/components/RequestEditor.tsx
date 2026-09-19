@@ -16,25 +16,19 @@ import type {
   SavedRequest,
 } from '../lib/types';
 
-type Tab = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'scripts';
+/** 请求编辑器的内层标签。`App` 直接复用它（容器侧不再另立一份同义声明）。 */
+export type Tab = 'params' | 'headers' | 'body' | 'auth' | 'scripts' | 'settings' | 'curl';
 
 export interface RequestBandProps {
   draft: SavedRequest;
   busy: boolean;
   onChange: (next: SavedRequest) => void;
   onSend: () => void;
-  /** 地址栏正下方的解析预览条（change: rework-app-layout，design D4）。 */
-  preview?: ReactNode;
-  /** 请求面板头（spec: 请求面板头的身份与操作）——身份与请求级操作落在这里。 */
+  /** 请求面板头（spec: 请求面板头的身份）——请求身份落在这里，请求级操作不在这里。 */
   collectionName: string | null;
   dirty: boolean;
-  onSave: () => void;
-  onDuplicate: () => void;
-  onDelete: () => void;
   /** 面板头里的请求名输入框：树菜单的「重命名」把焦点交给它。 */
   nameRef?: RefObject<HTMLInputElement | null>;
-  /** 生成当前请求的 curl 快照（spec: 请求带上的 cURL 快照）。 */
-  onCurl: () => Promise<CurlCommand>;
 }
 
 export interface RequestEditorProps {
@@ -42,9 +36,11 @@ export interface RequestEditorProps {
   tab: Tab;
   onTab: (tab: Tab) => void;
   onChange: (next: SavedRequest) => void;
+  /** 生成当前请求的 curl 快照（spec: cURL 快照标签）。 */
+  onCurl: () => Promise<CurlCommand>;
 }
 
-/** 请求标签的顺序与文案对齐 Postman（spec: 请求标签命名）。 */
+/** 请求标签的顺序与文案对齐 Postman（spec: 请求标签命名）；cURL 排在 Settings 右侧。 */
 const TABS: { value: Tab; label: string }[] = [
   { value: 'params', label: 'Params' },
   { value: 'auth', label: 'Authorization' },
@@ -52,6 +48,7 @@ const TABS: { value: Tab; label: string }[] = [
   { value: 'body', label: 'Body' },
   { value: 'scripts', label: 'Scripts' },
   { value: 'settings', label: 'Settings' },
+  { value: 'curl', label: 'cURL' },
 ];
 
 /**
@@ -328,35 +325,21 @@ function KeyValueTable({
 }
 
 /**
- * 通栏请求带（spec: 请求面板头的身份与操作 / 地址栏与解析预览条）：请求身份行 +
- * 地址栏 + 解析预览条。它由主区作为独立网格项渲染、横跨整宽，位于左右分栏之上，
- * 因此地址栏不再被分栏切成半宽。
+ * 通栏请求带（spec: 请求面板头的身份 / 地址栏）：请求身份行 + 地址栏。它由主区作为独立
+ * 网格项渲染、横跨整宽，位于左右分栏之上，因此地址栏不再被分栏切成半宽。
+ *
+ * 请求级操作都不在这里：复制与删除落在集合树的节点菜单（spec: 集合树的操作入口默认隐藏），
+ * cURL 落在请求编辑器的标签里（spec: cURL 快照标签），保存由 `Ctrl+S` 承担。
  */
 export function RequestBand(props: RequestBandProps) {
-  const {
-    draft,
-    busy,
-    onChange,
-    onSend,
-    preview,
-    collectionName,
-    dirty,
-    onSave,
-    onDuplicate,
-    onDelete,
-    nameRef,
-    onCurl,
-  } = props;
-
+  const { draft, busy, onChange, onSend, collectionName, dirty, nameRef } = props;
   const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
-  /** cURL 快照（spec: 请求带上的 cURL 快照）：在请求带上生成、就地可编辑、不回写请求。 */
-  const curl = useCurlSnapshot(onCurl);
 
   return (
     <div className="request-band">
-      {/* 请求面板头（spec: 请求面板头的身份与操作）：所属集合面包屑 + 可就地编辑的
-          请求名 + 请求级操作。身份随请求区一同出现与消失，不再占用会话标签行；
-          方法由紧邻其下的地址栏选择框承载，这里 SHALL NOT 重复方法徽标。 */}
+      {/* 请求面板头（spec: 请求面板头的身份）：所属集合面包屑 + 可就地编辑的请求名。
+          身份随请求区一同出现与消失，不再占用会话标签行；方法由紧邻其下的地址栏选择框
+          承载，这里 SHALL NOT 重复方法徽标。 */}
       <div className="request-pane-header" data-testid="request-panel-header">
         {collectionName && (
           <>
@@ -372,42 +355,13 @@ export function RequestBand(props: RequestBandProps) {
           onChange={(event) => patch({ name: event.target.value })}
         />
         <span className="grow" />
-        {/* 未保存标记与保存入口只在有改动时同时出现——默认界面上不存在「保存」按钮。 */}
+        {/* 未保存标记是这一行唯一的"还没存下"信号：保存入口已不存在，等价的键盘操作
+            写在提示里，否则用户无从知道怎么保存。 */}
         {dirty && (
-          <>
-            <span className="badge warn">未保存</span>
-            <button
-              data-testid="save-request"
-              title="保存（Ctrl+S）"
-              onClick={onSave}
-              disabled={busy}
-            >
-              保存
-            </button>
-          </>
+          <span className="badge warn" title="保存（Ctrl+S）">
+            未保存
+          </span>
         )}
-        {/* 另存为 / 删除：保留文字标签，指针悬停或面板头内键盘聚焦时显现（见 App.css），
-            且显现与隐藏不改变该行布局宽度。 */}
-        <span className="request-actions">
-          <button onClick={onDuplicate} disabled={busy}>
-            另存为
-          </button>
-          <button onClick={onDelete} disabled={busy}>
-            删除
-          </button>
-        </span>
-
-        {/* cURL 快照入口（spec: 请求带上的 cURL 快照）：常驻可见——另存为/删除是按需
-            显现的次要操作，而这个是功能入口，藏起来就找不到了。 */}
-        <button
-          className="ghost curl-toggle"
-          type="button"
-          aria-expanded={curl.open}
-          data-testid="curl-toggle"
-          onClick={curl.toggle}
-        >
-          cURL
-        </button>
       </div>
 
       <div className="request-toolbar">
@@ -446,21 +400,22 @@ export function RequestBand(props: RequestBandProps) {
           发送
         </button>
       </div>
-
-      {/* 命令文本块展开在地址栏下方（spec: 请求带上的 cURL 快照） */}
-      {curl.open && <CurlPanel {...curl.panel} />}
-
-      {preview}
     </div>
   );
 }
 
 /**
- * 请求区的列内容：内层标签与正文。请求带（身份、地址栏、预览）已抬到主区顶部，
+ * 请求区的列内容：内层标签与正文。请求带（身份与地址栏）已抬到主区顶部，
  * 不再属于这里——本组件只负责分栏以下的那一列。
  */
-export function RequestEditor({ draft, tab, onTab, onChange }: RequestEditorProps) {
+export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEditorProps) {
   const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
+
+  /**
+   * cURL 快照（spec: cURL 快照标签）：停在该标签时按当前请求生成；离开标签即清空，
+   * 编辑不跨标签留存；换了请求同样重新生成（`draft.id` 参与触发）。
+   */
+  const curl = useCurlSnapshot(onCurl, tab === 'curl', draft.id);
 
   /** 切换请求体类型：清掉其它类型的残留内容（既有行为，与控件形态无关）。 */
   const patchBodyKind = (kind: BodyKind) => {
@@ -489,7 +444,9 @@ export function RequestEditor({ draft, tab, onTab, onChange }: RequestEditorProp
         ))}
       </div>
 
-      <div className="pane-body stack">
+      {/* Scripts 与 cURL 两页要把编辑器铺满正文区，因此正文区不再自身滚动
+          （见 App.css 的 .pane-body.fill），滚动交给编辑器自己。 */}
+      <div className={`pane-body stack${tab === 'scripts' || tab === 'curl' ? ' fill' : ''}`}>
 
         {tab === 'params' && (
           <KeyValueTable
@@ -588,30 +545,24 @@ export function RequestEditor({ draft, tab, onTab, onChange }: RequestEditorProp
         {tab === 'auth' && <AuthEditor draft={draft} onChange={(auth) => patch({ auth })} />}
 
         {tab === 'scripts' && (
-          <div className="stack">
-            <ScriptPane
-              pre={draft.pre_request_script ?? ''}
-              test={draft.test_script ?? ''}
-              preLabel="前置脚本"
-              testLabel="后置脚本"
-              preHint="前置脚本 — 发送前执行；与本集合、文件夹的脚本按 集合 → 文件夹 → 请求 依次运行"
-              testHint={
-                <>
-                  后置脚本 — 收到响应后执行；可读 <code>pm.response</code>、注册 <code>pm.test</code>
-                </>
-              }
-              prePlaceholder={'// 例如：pm.environment.set("token", "...");'}
-              testPlaceholder={
-                '// 例如：pm.test("状态码为 200", () => pm.expect(pm.response.code).to.eql(200));'
-              }
-              onChangePre={(value) => patch({ pre_request_script: value || null })}
-              onChangeTest={(value) => patch({ test_script: value || null })}
-            />
-
-            <p className="muted">
-              在本应用中编写并保存的脚本视为已授权，发送时不再弹出脚本确认。
-            </p>
-          </div>
+          <ScriptPane
+            pre={draft.pre_request_script ?? ''}
+            test={draft.test_script ?? ''}
+            preLabel="前置脚本"
+            testLabel="后置脚本"
+            preHint="前置脚本 — 发送前执行；与本集合、文件夹的脚本按 集合 → 文件夹 → 请求 依次运行"
+            testHint={
+              <>
+                后置脚本 — 收到响应后执行；可读 <code>pm.response</code>、注册 <code>pm.test</code>
+              </>
+            }
+            prePlaceholder={'// 例如：pm.environment.set("token", "...");'}
+            testPlaceholder={
+              '// 例如：pm.test("状态码为 200", () => pm.expect(pm.response.code).to.eql(200));'
+            }
+            onChangePre={(value) => patch({ pre_request_script: value || null })}
+            onChangeTest={(value) => patch({ test_script: value || null })}
+          />
         )}
 
         {tab === 'settings' && (
@@ -620,6 +571,8 @@ export function RequestEditor({ draft, tab, onTab, onChange }: RequestEditorProp
             onChange={(settings) => patch({ settings })}
           />
         )}
+
+        {tab === 'curl' && <CurlPanel {...curl} />}
       </div>
     </div>
   );

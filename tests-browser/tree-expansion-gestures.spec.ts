@@ -286,3 +286,73 @@ describe('集合树展开手势（真实引擎）', () => {
     expect(await visibleNow(page, '外层请求')).toBe(false);
   });
 });
+
+describe('请求节点的右键菜单（真实引擎）', () => {
+  it('右键打开与「⋯」相同的一份菜单，并阻止运行环境自带的页面菜单', async () => {
+    const page = await openApp();
+    page.setDefaultTimeout(10_000);
+    const tree = page.getByTestId('workspace-tree');
+
+    // 记录 contextmenu 的默认行为有没有被拦下：window 是冒泡路径的最后一站，
+    // 因此它读到的就是最终状态
+    await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__ctxPrevented = null;
+      window.addEventListener('contextmenu', (event) => {
+        (window as unknown as Record<string, unknown>).__ctxPrevented = event.defaultPrevented;
+      });
+    });
+
+    const row = tree.locator('.node').filter({ hasText: '外层请求' }).first();
+    await row.click({ button: 'right' });
+
+    await expect.poll(() => tree.getByRole('menu').count()).toBe(1);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as Record<string, unknown>).__ctxPrevented,
+      ),
+    ).toBe(true);
+
+    const fromRightClick = await tree.getByRole('menu').locator('button').allTextContents();
+    expect(fromRightClick).toEqual(['重命名', '复制', '删除']);
+
+    // 同一份菜单：换成「⋯」打开，操作项必须完全一致（两处逻辑不分叉）
+    await page.keyboard.press('Escape');
+    await expect.poll(() => tree.getByRole('menu').count()).toBe(0);
+    await row.hover();
+    await row.getByLabel('更多操作').click();
+    const fromMoreButton = await tree.getByRole('menu').locator('button').allTextContents();
+    expect(fromMoreButton).toEqual(fromRightClick);
+
+    // 右键只开菜单，不改变选中：主区没有因此打开任何请求
+    expect(await page.getByTestId('session-tab').count()).toBe(0);
+  });
+});
+
+describe('脚本编辑器的铺满（真实引擎）', () => {
+  it('实体脚本面板的编辑器占满右栏，且编辑器下方没有授权说明段落', async () => {
+    const page = await openApp();
+    page.setDefaultTimeout(10_000);
+    const tree = page.getByTestId('workspace-tree');
+
+    const row = tree.locator('.node').filter({ hasText: '外层' }).first();
+    await row.hover();
+    await row.getByLabel('更多操作').click();
+    await tree.getByText('编辑脚本').click();
+    await page.getByTestId('entity-script-panel').waitFor();
+
+    const geometry = await page.evaluate(() => {
+      const round = (value: number) => Math.round(value * 100) / 100;
+      const area = document.querySelector('[data-testid="entity-script-panel"]') as HTMLElement;
+      const editor = area.querySelector('textarea') as HTMLTextAreaElement;
+      return {
+        areaHeight: round(area.getBoundingClientRect().height),
+        editorHeight: round(editor.getBoundingClientRect().height),
+      };
+    });
+
+    // 编辑器吃掉右栏的绝大部分高度：差的只是左栏提示行与正文内边距
+    expect(geometry.editorHeight).toBeGreaterThan(geometry.areaHeight * 0.6);
+    // 说明段落已删除
+    expect(await page.getByText('视为已授权').count()).toBe(0);
+  });
+});

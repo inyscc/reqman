@@ -231,12 +231,6 @@ export function ResponsePanel({
               </div>
             )}
 
-            {response.unresolved.length > 0 && (
-              <div className="notice warn">
-                请求中存在未解析变量：{response.unresolved.join('、')}
-              </div>
-            )}
-
             <div className="response-view-bar">
               {/* 与头部那组标签分属不同维度（容器视图 vs 呈现方式），因此不合并，
                   只把它收紧成一行紧凑工具条（design D6）。 */}

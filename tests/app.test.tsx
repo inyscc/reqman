@@ -187,6 +187,9 @@ interface Harness {
   variablesPreview: ReturnType<typeof vi.fn>;
 }
 
+/** 保存当前生效的编辑面：面板头不再有保存按钮，等价操作只有 `Ctrl+S`。 */
+const saveWithKeyboard = () => fireEvent.keyDown(window, { key: 's', ctrlKey: true });
+
 function harness(options: {
   request?: SavedRequest;
   previewResult?: RequestPreview;
@@ -589,7 +592,7 @@ describe('前端数据流骨架', () => {
     expect(await screen.findByText('我的请求')).toBeTruthy();
   });
 
-  it('未解析变量在发送之前就可见，且不会发出请求（6.3）', async () => {
+  it('未解析变量在发出请求之前被拦下，且请求不发出（spec: 未解析变量提示）', async () => {
     const { client, sendRequest } = harness({
       previewResult: preview({
         url: 'https://api.test/{{missing}}',
@@ -599,36 +602,46 @@ describe('前端数据流骨架', () => {
     render(<App client={client} />);
     await openRequest();
 
-    const warning = await screen.findByTestId('unresolved-warning');
-    expect(warning.textContent).toContain('missing');
-    expect(warning.textContent).toContain('id');
+    // 地址栏下方不再有解析预览条（spec: 地址栏）
+    expect(screen.queryByText('解析预览')).toBeNull();
+
+    fireEvent.click(screen.getByText('发送'));
+
+    const error = await screen.findByTestId('app-error');
+    expect(error.textContent).toContain('missing');
+    expect(error.textContent).toContain('id');
     expect(sendRequest).not.toHaveBeenCalled();
   });
 
-  it('解析预览条默认展开且可折叠，折叠后未解析警告仍常驻（rework-app-layout）', async () => {
-    const { client } = harness({
-      previewResult: preview({
-        url: 'https://api.test/{{missing}}/users',
-        unresolved: ['missing'],
-      }),
+  it('占位符全部解析成功时发送照常发出（spec: 未解析变量提示）', async () => {
+    const { client, sendRequest } = harness({
+      previewResult: preview({ url: 'https://api.test/users' }),
     });
     render(<App client={client} />);
     await openRequest();
 
-    // 默认展开：解析后的 URL 可见
-    expect(await screen.findByText('https://api.test/{{missing}}/users')).toBeTruthy();
+    fireEvent.click(screen.getByText('发送'));
 
-    fireEvent.click(screen.getByRole('button', { name: /解析预览/ }));
-
-    // 折叠掉的只是「解析成什么样」，未解析警告必须留着
-    expect(screen.queryByText('https://api.test/{{missing}}/users')).toBeNull();
-    expect(screen.getByTestId('unresolved-warning')).toBeTruthy();
-
-    fireEvent.click(screen.getByRole('button', { name: /解析预览/ }));
-    expect(await screen.findByText('https://api.test/{{missing}}/users')).toBeTruthy();
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1));
   });
 
-  it('面包屑并入会话标签行，请求操作与保存都在这一行（rework-visual-system-and-app-chrome）', async () => {
+  it('拦截早于脚本门禁：未解析变量时门禁不会先出现（spec: 未解析变量提示）', async () => {
+    const { client, sendRequest } = harness({
+      scriptGateAllowed: false,
+      previewResult: preview({ url: 'https://api.test/{{missing}}', unresolved: ['missing'] }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+
+    // 拦截在最前面：这条路径连门禁都到不了（门禁放行后的重发同样走这里，无从绕过）
+    expect((await screen.findByTestId('app-error')).textContent).toContain('missing');
+    expect(screen.queryByTestId('script-gate')).toBeNull();
+    expect(sendRequest).not.toHaveBeenCalled();
+  });
+
+  it('面包屑并入会话标签行，身份在这一行而请求级操作不在（rework-visual-system-and-app-chrome）', async () => {
     const { client } = harness();
     render(<App client={client} />);
     await openRequest();
@@ -647,11 +660,13 @@ describe('前端数据流骨架', () => {
     // 未改动时没有「未保存」标记
     expect(screen.queryByText('未保存')).toBeNull();
 
-    // 请求名可改名，保存与另存为/删除都在这一行
+    // 请求名可就地改；改动只留未保存标记——这一行不再有保存 / 另存为 / 删除按钮
     fireEvent.change(screen.getByLabelText('请求名称'), { target: { value: '改名后的请求' } });
-    expect(await screen.findByText('未保存')).toBeTruthy();
-    expect(screen.getByText('另存为')).toBeTruthy();
-    expect(screen.getByText('删除')).toBeTruthy();
+    const badge = await screen.findByText('未保存');
+    expect(badge.getAttribute('title')).toContain('Ctrl+S');
+    expect(screen.queryByText('另存为')).toBeNull();
+    expect(screen.queryByText('删除')).toBeNull();
+    expect(screen.queryByText('保存')).toBeNull();
   });
 
   it('请求身份与地址栏落在主区顶部的通栏带内，且先于提示块渲染（spec: 请求面板头的身份与操作）', async () => {
@@ -702,7 +717,8 @@ describe('前端数据流骨架', () => {
     fireEvent.change(screen.getByLabelText('新增行的描述'), {
       target: { value: '还没填名称的说明' },
     });
-    fireEvent.click(await screen.findByTestId('save-request'));
+    await screen.findByText('未保存');
+    saveWithKeyboard();
 
     await waitFor(() => expect(requestSave).toHaveBeenCalled());
     const saved = requestSave.mock.calls.at(-1)?.[0] as SavedRequest;
@@ -836,7 +852,7 @@ describe('前端数据流骨架', () => {
     });
     expect(await screen.findByText('未保存')).toBeTruthy();
 
-    fireEvent.click(screen.getByText('保存'));
+    saveWithKeyboard();
     await waitFor(() => expect(screen.queryByText('未保存')).toBeNull());
   });
 
@@ -992,27 +1008,28 @@ describe('前端数据流骨架', () => {
     expect(curlExport).toHaveBeenCalledTimes(1);
   });
 
-  it('cURL 快照：未选中请求时没有入口；请求带与模态里的入口共用一个生成口径（spec: 请求带上的 cURL 快照）', async () => {
+  it('cURL 快照：未选中请求时没有入口；请求编辑器与模态里的入口共用一个生成口径（spec: cURL 快照标签）', async () => {
     const { client, curlExport } = harness();
     render(<App client={client} />);
 
-    // 未选中请求：请求带不存在，入口也就不存在
+    // 未选中请求：请求编辑器不存在，标签也就不存在
     await screen.findByText('我的集合');
-    expect(screen.queryByTestId('curl-toggle')).toBeNull();
+    expect(screen.queryByTestId('curl-block')).toBeNull();
+    expect(screen.queryByText('cURL')).toBeNull();
 
     await openRequest();
-    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.click(screen.getByText('cURL'));
     await screen.findByTestId('curl-block');
 
     expect(curlExport).toHaveBeenCalledTimes(1);
-    const fromBand = curlExport.mock.calls[0][0];
+    const fromEditor = curlExport.mock.calls[0][0];
 
     // 模态里的既有入口用的是同一份输入，因此两处命令必然一致
     fireEvent.click(await screen.findByText('导入/导出'));
     fireEvent.click(screen.getByText('导出 curl'));
 
     await waitFor(() => expect(curlExport).toHaveBeenCalledTimes(2));
-    expect(curlExport.mock.calls[1][0]).toEqual(fromBand);
+    expect(curlExport.mock.calls[1][0]).toEqual(fromEditor);
   });
 
   it('没有脚本输出也没有断言时不出现「脚本」标签页（6.4）', async () => {
@@ -1036,8 +1053,9 @@ describe('前端数据流骨架', () => {
     const panel = await screen.findByTestId('settings-panel');
     expect(panel.textContent).toContain('未配置');
 
+    // 没有保存按钮：改动停止后自动落库（spec: 脚本的编辑与保存）
+    expect(screen.queryByText('保存策略')).toBeNull();
     fireEvent.change(screen.getByLabelText('主机名单'), { target: { value: 'api.test' } });
-    fireEvent.click(screen.getByText('保存策略'));
 
     await waitFor(() =>
       expect(settingsSet).toHaveBeenCalledWith(
@@ -1241,7 +1259,9 @@ describe('脚本编辑', () => {
     fireEvent.change(screen.getByLabelText('后置脚本'), {
       target: { value: 'pm.test("ok", () => pm.expect(1).to.eql(1));' },
     });
-    fireEvent.click(screen.getByText('保存'));
+    // 请求脚本随请求保存：界面上只有 Ctrl+S
+    await screen.findByText('未保存');
+    saveWithKeyboard();
 
     await waitFor(() => expect(settingsSet).toHaveBeenCalledWith('script_gate', 'c1', 'allowed'));
 
@@ -1270,10 +1290,11 @@ describe('脚本编辑', () => {
     // 实体面板头改为可编辑的名称输入框（design D2），不再渲染「集合 · 名称」静态文本
     expect((screen.getByLabelText('集合名称') as HTMLInputElement).value).toBe('我的集合');
 
+    // 没有保存按钮：停止输入后自动落库（spec: 脚本的编辑与保存）
+    expect(screen.queryByText('保存')).toBeNull();
     fireEvent.change(screen.getByLabelText('集合前置脚本'), {
       target: { value: 'console.log("collection level");' },
     });
-    fireEvent.click(screen.getByText('保存'));
 
     await waitFor(() =>
       expect(collectionSetScript).toHaveBeenCalledWith('c1', 'console.log("collection level");', null),
@@ -1304,7 +1325,6 @@ describe('脚本编辑', () => {
     fireEvent.change(screen.getByLabelText('文件夹前置脚本'), {
       target: { value: 'console.log("folder level");' },
     });
-    fireEvent.click(screen.getByText('保存'));
 
     await waitFor(() =>
       expect(folderSetScript).toHaveBeenCalledWith('f1', 'console.log("folder level");', null),
@@ -2587,7 +2607,7 @@ describe('空行不进请求与保存（出口清洗）', () => {
     await screen.findByText('未保存');
     leaveAnEmptyRow();
 
-    fireEvent.click(screen.getByTestId('save-request'));
+    saveWithKeyboard();
 
     await waitFor(() => expect(requestSave).toHaveBeenCalledTimes(1));
     expect(requestSave.mock.calls[0][0].params).toEqual([]);
@@ -2612,32 +2632,31 @@ describe('空行不进请求与保存（出口清洗）', () => {
   });
 });
 
-describe('保存入口（spec: 面包屑与请求操作行）', () => {
-  it('未改动时没有保存按钮，改动后与未保存标记同时出现，保存后一并消失', async () => {
+describe('保存入口（spec: 请求面板头的身份）', () => {
+  it('界面上不存在保存按钮：改动只出现未保存标记，Ctrl+S 保存后清除', async () => {
     const { client, requestSave } = harness();
     render(<App client={client} />);
     await openRequest();
 
-    expect(screen.queryByTestId('save-request')).toBeNull();
+    expect(screen.queryByText('保存')).toBeNull();
     expect(screen.queryByText('未保存')).toBeNull();
-    // 另存为 / 删除照旧常驻
-    expect(screen.getByText('另存为')).toBeTruthy();
-    expect(screen.getByText('删除')).toBeTruthy();
+    // 另存为 / 删除同样不在面板头（改由集合树节点菜单承载）
+    expect(screen.queryByText('另存为')).toBeNull();
+    expect(screen.queryByText('删除')).toBeNull();
 
     fireEvent.change(screen.getByLabelText('请求地址'), {
       target: { value: 'https://api.test/edited' },
     });
 
-    const save = await screen.findByTestId('save-request');
-    expect(screen.getByText('未保存')).toBeTruthy();
-    // 入口自己说明等价的键盘操作
-    expect(save.getAttribute('title')).toContain('Ctrl+S');
+    const badge = await screen.findByText('未保存');
+    // 标记自己说明等价的键盘操作
+    expect(badge.getAttribute('title')).toContain('Ctrl+S');
+    expect(screen.queryByText('保存')).toBeNull();
 
-    fireEvent.click(save);
+    saveWithKeyboard();
 
     await waitFor(() => expect(requestSave).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.queryByTestId('save-request')).toBeNull());
-    expect(screen.queryByText('未保存')).toBeNull();
+    await waitFor(() => expect(screen.queryByText('未保存')).toBeNull());
   });
 });
 
@@ -2775,11 +2794,12 @@ describe('未保存守卫', () => {
     await waitFor(() => expect(screen.queryByLabelText('请求地址')).toBeNull());
   });
 
-  it('删除当前打开的请求先询问', async () => {
+  it('删除当前打开的请求先询问（入口在集合树节点菜单里）', async () => {
     const { client } = harness();
     await openDirty(client);
 
-    fireEvent.click(screen.getByText('删除'));
+    openNodeMenu('我的请求');
+    fireEvent.click(tree().getByText('删除'));
 
     expect(guard()).toBeTruthy();
     expect(screen.getByLabelText('请求地址')).toBeTruthy();
@@ -3763,6 +3783,7 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
   /** 按名称取到对应的会话标签按钮。 */
   const tabByName = (name: string): HTMLElement =>
     within(screen.getByTestId('session-tabs')).getByText(name).closest('.session-tab') as HTMLElement;
+  const guard = () => screen.queryByTestId('unsaved-guard');
 
   it('同一请求重复打开只持有一个标签（去重，1.3）', async () => {
     const { client } = harness();
@@ -3790,7 +3811,7 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     expect(screen.queryByTestId('unsaved-guard')).toBeNull();
   });
 
-  it('另存为请求追加一个标签，原标签与草稿保留（1.4）', async () => {
+  it('树菜单的「复制」追加一个标签，原标签与草稿保留（1.4）', async () => {
     const { client } = harness();
     vi.spyOn(client, 'requestDuplicate').mockResolvedValueOnce(
       makeRequest({ id: 'r-dup', name: '我的请求 副本' }),
@@ -3802,34 +3823,79 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     });
     await screen.findByText('未保存');
 
-    fireEvent.click(screen.getByText('另存为'));
+    openNodeMenu('我的请求');
+    fireEvent.click(tree().getByText('复制'));
+
     await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
-    // 原标签与它的草稿都还在：切回原标签验证（另存为后激活的是新副本）
+    // 原标签与它的草稿都还在：切回原标签验证（复制后激活的是新副本）
     fireEvent.click(tabByName('我的请求'));
     expect((screen.getByLabelText('请求地址') as HTMLInputElement).value).toBe(
       'https://api.test/draft',
     );
   });
 
-  it('Ctrl+S 只作用于当前面：后台脏实体标签不被保存（2.2 / design D4）', async () => {
+  it('复制非激活请求：按被点的那个节点复制，原请求与其草稿不受影响（spec: 集合树的操作入口默认隐藏）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    const duplicate = vi
+      .spyOn(client, 'requestDuplicate')
+      .mockResolvedValueOnce(makeRequest({ id: 'r2-copy', name: '另一个请求 副本' }));
+    render(<App client={client} />);
+    await openRequest();
+
+    // 当前打开的是「我的请求」，被复制的是另一个节点
+    openNodeMenu('另一个请求');
+    fireEvent.click(tree().getByText('复制'));
+
+    await waitFor(() => expect(duplicate).toHaveBeenCalledWith('r2', null));
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
+    expect(tabByName('另一个请求 副本').className).toContain('active');
+    // 原请求的标签仍在，草稿没有被这次复制改动
+    expect(tabByName('我的请求')).toBeTruthy();
+  });
+
+  it('Ctrl+S 只作用于当前面：后台实体标签走自动保存，不经过快捷键（2.2 / design D4）', async () => {
     const { client, collectionSetScript } = harness();
     render(<App client={client} />);
     await openRequest();
-    // 打开集合脚本面板并制造脏改动
+    // 打开集合脚本面板并制造改动（这一处不再有未保存标记：它走自动保存）
     openEntityPanel('我的集合');
     await screen.findByTestId('entity-script-panel');
     fireEvent.change(screen.getByLabelText('集合前置脚本'), {
       target: { value: 'console.log("c");' },
     });
-    await screen.findByText('未保存');
-    // 切回请求标签：集合脚本退到后台（仍脏），但不再是当前面
+
+    // 切回请求标签：集合脚本退到后台，它的落库由自动保存负责
     fireEvent.click(tabByName('我的请求'));
     await screen.findByLabelText('请求地址');
+    await waitFor(() => expect(collectionSetScript).toHaveBeenCalledTimes(1));
+    const afterAutoSave = collectionSetScript.mock.calls.length;
 
     fireEvent.keyDown(window, { key: 's', ctrlKey: true });
-    // 当前面是干净的请求，后台的脏集合脚本不应被快捷键保存
-    expect(collectionSetScript).not.toHaveBeenCalled();
+    // Ctrl+S 不会因此再去动后台的实体标签
+    expect(collectionSetScript).toHaveBeenCalledTimes(afterAutoSave);
   });
+
+  it('自动保存失败时实体标签保持脏：内容不清空，关标签仍会先问（spec: 脚本的编辑与保存）', async () => {
+    const { client, collectionSetScript } = harness();
+    collectionSetScript.mockRejectedValueOnce({ code: 'io', message: '写不进去' });
+    render(<App client={client} />);
+    await openRequest();
+
+    openEntityPanel('我的集合');
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.change(screen.getByLabelText('集合前置脚本'), {
+      target: { value: 'console.log("collection");' },
+    });
+
+    // 自动保存失败：基线不前移，标签因此保持脏——但输入的内容一个字都没少
+    await waitFor(() => expect(collectionSetScript).toHaveBeenCalledTimes(1));
+    expect((screen.getByLabelText('集合前置脚本') as HTMLTextAreaElement).value).toBe(
+      'console.log("collection");',
+    );
+
+    fireEvent.click(within(tabByName('我的集合')).getByLabelText('关闭标签'));
+    expect(guard()).toBeTruthy();
+  }, 30_000);
 
   it('请求标签渲染成按钮并带方法徽标；实体标签带种类图标（3.2）', async () => {
     const { client } = harness();
@@ -3859,17 +3925,19 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     expect(within(aTab).getByTestId('tab-unsaved-dot')).toBeTruthy();
   });
 
-  it('请求操作常驻于面板头，不依赖 hover 显隐（3.6）', async () => {
+  it('请求面板头不再承载请求级操作，改动只留未保存标记（3.6）', async () => {
     const { client } = harness();
     render(<App client={client} />);
     await openRequest();
-    // 另存为 / 删除 始终在 DOM 内（仅 CSS 显隐，不改布局宽度）
-    expect(screen.getByText('另存为')).toBeTruthy();
-    expect(screen.getByText('删除')).toBeTruthy();
-    // 保存入口在有改动时同屏出现
+    // 另存为 / 删除 / 保存都不在面板头（复制与删除改由集合树节点菜单承载）
+    expect(screen.queryByText('另存为')).toBeNull();
+    expect(screen.queryByText('删除')).toBeNull();
+    expect(screen.queryByText('保存')).toBeNull();
+    // 有改动时只出现未保存标记，并说明等价的键盘操作
     fireEvent.change(screen.getByLabelText('请求地址'), { target: { value: 'https://api.test/x' } });
-    await screen.findByText('未保存');
-    expect(screen.getByText('保存')).toBeTruthy();
+    const badge = await screen.findByText('未保存');
+    expect(badge.getAttribute('title')).toContain('Ctrl+S');
+    expect(screen.queryByText('保存')).toBeNull();
   });
 
   it('请求面板头不放方法徽标（3.7）', async () => {
@@ -3914,7 +3982,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     const requestDeleteSpy = vi.spyOn(client, 'requestDelete');
     render(<App client={client} />);
     await openRequest();
-    fireEvent.click(screen.getByText('删除'));
+    openNodeMenu('我的请求');
+    fireEvent.click(tree().getByText('删除'));
     await waitFor(() => expect(screen.queryByLabelText('请求地址')).toBeNull());
     expect(requestDeleteSpy).toHaveBeenCalled();
   });

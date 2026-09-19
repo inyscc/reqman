@@ -3,13 +3,12 @@ import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
 import './App.css';
 import { BottomBar, type ModalKind } from './components/BottomBar';
 import { CookiePanel } from './components/CookiePanel';
-import { EntityScriptPanel } from './components/EntityScriptPanel';
+import { EntityScriptPanel, type EntitySaveStatus } from './components/EntityScriptPanel';
 import { EnvironmentsPanel } from './components/EnvironmentsPanel';
 import { CollectionIcon, FolderIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
-import { PreviewStrip } from './components/PreviewStrip';
-import { RequestBand, RequestEditor } from './components/RequestEditor';
+import { RequestBand, RequestEditor, type Tab } from './components/RequestEditor';
 import { ResizeStrips, isInteractiveSessionBarTarget } from './components/ResizeStrips';
 import { ResponsePanel } from './components/ResponsePanel';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -47,9 +46,13 @@ import { useEditingRegistryVersion } from './lib/useEditing';
 import { useStoreValue } from './lib/useStore';
 import { onBeforeUnload, tauriWindowCloser, type WindowCloser } from './lib/window';
 
-type Tab = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'scripts';
-
 type EntityKind = 'collection' | 'folder';
+
+/**
+ * 集合/文件夹脚本的自动保存延迟：用户停止输入后这么久落库。
+ * 短到"改完就走"不会丢，长到连续键入不会每次按键都写一次。
+ */
+const ENTITY_AUTOSAVE_DELAY_MS = 500;
 
 interface ScriptReport {
   console: ConsoleEntry[];
@@ -278,13 +281,14 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   /** 标签集合是否已按当前工作区恢复完成；恢复前不写持久化，避免把空集合写回去。 */
   const [tabsHydrated, setTabsHydrated] = useState(false);
   const [preview, setPreview] = useState<RequestPreview | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** 待确认的脚本门禁；非空时暂停发送，等用户在界面上做出选择（任务 9.3）。 */
   const [scriptGate, setScriptGate] = useState<{ collectionId: string; name: string } | null>(
     null,
   );
+  /** 集合/文件夹脚本自动保存的就地状态（spec: 脚本的编辑与保存）。 */
+  const [entitySave, setEntitySave] = useState<({ key: string } & EntitySaveStatus) | null>(null);
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [environmentId, setEnvironmentId] = useState<string | null>(null);
   const [variables, setVariables] = useState<Variable[]>([]);
@@ -675,7 +679,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     setPendingRenameFocus(false);
   }, [pendingRenameFocus, entityDraft, draft]);
 
-  // 解析预览：自动跟随编辑，因此未解析变量在发送前就可见
+  // 解析预览：只读变量浮层靠它回答「这个请求用了哪些变量」。
+  // 解析预览条已移除，因此这里的失败不再有呈现位——预览是辅助展示，失败不该比请求本身
+  // 更显眼，浮层在拿不到数据时降级为空列表（有意接受的信息损失，见 design D9）。
   useEffect(() => {
     if (!draft) {
       setPreview(null);
@@ -690,15 +696,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             inline: cleanForSend(draft),
             environment_id: environmentId,
           });
-          if (sequence === previewSequence.current) {
-            setPreview(next);
-            setPreviewError(null);
-          }
-        } catch (caught) {
-          if (sequence === previewSequence.current) {
-            setPreview(null);
-            setPreviewError(describeError(caught).message);
-          }
+          if (sequence === previewSequence.current) setPreview(next);
+        } catch {
+          if (sequence === previewSequence.current) setPreview(null);
         }
       })();
     }, 200);
@@ -829,6 +829,46 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       setBusy(false);
     }
   };
+
+  /** 自动保存一个实体脚本标签，并把结果写成就地状态（失败不清空输入，继续编辑会重试）。 */
+  const autosaveEntity = async (key: string) => {
+    setEntitySave({ key, status: 'saving', message: null });
+    const saved = await saveEntityTab(key);
+    setEntitySave(
+      saved
+        ? { key, status: 'saved', message: null }
+        : { key, status: 'error', message: '自动保存失败，继续编辑会重试' },
+    );
+  };
+
+  /**
+   * 集合/文件夹脚本的自动保存（spec: 脚本的编辑与保存）：编辑停止后短暂延迟落库。
+   *
+   * 遍历**全部**实体标签而不只是激活的那一个——"改完就切走"是常态，只盯激活标签会把
+   * 还没落库的编辑永远留在草稿里。签名带上脚本内容本身，因此每敲一下都重排定时器：
+   * 落库发生在"停止输入"之后，而不是第一次按键之后。
+   */
+  const entityDraftSignature = tabs
+    .map((item) =>
+      item.kind === 'entity' && item.entity
+        ? `${item.id}\u0000${entityPre(item.entity)}\u0000${entityTest(item.entity)}`
+        : '',
+    )
+    .join('\u0001');
+
+  useEffect(() => {
+    const pending = tabsRef.current.filter(
+      (item): item is EntitySessionTab => item.kind === 'entity' && isTabDirty(item),
+    );
+    if (pending.length === 0) return;
+
+    const timer = window.setTimeout(() => {
+      for (const item of pending) void autosaveEntity(item.id);
+    }, ENTITY_AUTOSAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+    // 只依赖脚本内容签名：落库成功后基线前移，脏判据自然为假，不会反复排期
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entityDraftSignature]);
 
   /** 保存任意一个标签（编辑面注册表经由它保存各自的面）。 */
   const saveTab = async (key: string): Promise<boolean> => {
@@ -1040,9 +1080,32 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     // 发送永远作用于当前激活的请求标签；响应与脚本报告写回它自己的标签
     const key = activeRequestTab?.id;
     if (!key || !draft) return;
-    setBusy(true);
     setError(null);
     setScriptGate(null);
+
+    // 未解析变量在发出请求之前拦截（spec: 未解析变量提示）：占位符解析不出来时请求
+    // 不放出去，错误里点名是哪些变量。判据取**发送时刻**的解析结果，而不是界面上那份
+    // 防抖的预览状态——后者可能比用户最后一次键入滞后，会漏拦。
+    //
+    // 拦在最前面（早于脚本门禁、早于任何网络调用），因此门禁放行后的重发同样被拦。
+    const sendInput = {
+      saved_id: dirty ? null : draft.id,
+      inline: cleanForSend(draft),
+      environment_id: environmentId,
+    };
+    let resolved: RequestPreview;
+    try {
+      resolved = await client.variablesPreview(sendInput);
+    } catch (caught) {
+      setError(describeError(caught).message);
+      return;
+    }
+    if (resolved.unresolved.length > 0) {
+      setError(`以下变量未能解析，请求没有发出：${resolved.unresolved.join('、')}`);
+      return;
+    }
+
+    setBusy(true);
     patchRequestTab(key, (item) => ({ ...item, scriptReport: null }));
 
     // 三级脚本：集合 → 文件夹 → 请求（任务 2.4）。集合与文件夹的脚本挂在实体上，
@@ -1083,14 +1146,10 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           ],
         };
 
-        // `pm.cookies` 需要解析后的请求 URL（3.5）。复用预览的解析路径；URL 中
-        // 引用 secret 变量的极端情形会以掩码形态出现，属已知限制。
-        const preview = await client.variablesPreview({
-          saved_id: dirty ? null : draft.id,
-          inline: cleanForSend(draft),
-          environment_id: environmentId,
-        });
-        requestUrl = preview.url || null;
+        // `pm.cookies` 需要解析后的请求 URL（3.5）。复用拦截处那一次解析的结果——
+        // 启用脚本的请求不该为此多跑一趟。URL 中引用 secret 变量的极端情形会以掩码
+        // 形态出现，属已知限制。
+        requestUrl = resolved.url || null;
 
         const pre = await runScriptPhase(client, target, 'prerequest', phases.pre, null, requestUrl);
 
@@ -1290,12 +1349,16 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     }
   };
 
-  /** 真正执行「另存为」：新增标签、原标签与它的草稿原样保留（design D1）。 */
-  const duplicateRequest = async () => {
-    if (!draft) return;
+  /**
+   * 复制请求（spec: 集合树的操作入口默认隐藏）：入口是集合树请求节点菜单里的「复制」。
+   *
+   * 按请求 id 复制，而不是"复制当前激活的那条"——被点的节点不一定是激活请求。收尾与
+   * 原先面板头的「另存为」一致：为副本打开并激活一个标签，原标签与其草稿原样保留。
+   */
+  const duplicateRequestById = async (id: string) => {
     setError(null);
     try {
-      const copy = await client.requestDuplicate(draft.id, null);
+      const copy = await client.requestDuplicate(id, null);
       if (workspaceId) await loadTree(workspaceId);
       const key = requestTabId(copy.id);
       setTabs((previous) =>
@@ -1327,11 +1390,6 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       (item) => item.kind === 'request' && item.requestId === id && item.dirty,
     );
 
-  /** 删除当前打开的请求（请求面板头上的「删除」）：有未保存改动时先问。 */
-  const removeRequest = () => {
-    if (!draft) return;
-    removeRequestById(draft.id);
-  };
 
   /** 树的菜单里删除请求：该请求带着脏标签时先问。 */
   const removeRequestById = (id: string) => {
@@ -1538,6 +1596,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               onDeleteCollection={removeCollection}
               onDeleteFolder={removeFolder}
               onDeleteRequest={removeRequestById}
+              onDuplicateRequest={(id) => void duplicateRequestById(id)}
               onRenameEntity={(entity) => renameEntity(entity)}
               onRenameRequest={(id) => renameRequest(id)}
               onImport={() => setModal('import-export')}
@@ -1724,18 +1783,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               busy={busy}
               onChange={editDraft}
               onSend={() => void send()}
-              preview={<PreviewStrip preview={preview} error={previewError} />}
               collectionName={crumbCollectionName}
               dirty={dirty}
-              onSave={() => void saveRequestTab(requestTabId(draft.id))}
-              onDuplicate={() => void duplicateRequest()}
-              onDelete={() => removeRequest()}
               nameRef={requestNameRef}
-              onCurl={() => {
-                // 与发送共用同一份输入（未保存时走内联载荷），因此两处命令必然一致
-                if (!exportSendInput) throw new Error('没有可导出的请求');
-                return client.curlExport(exportSendInput);
-              }}
             />
           )}
 
@@ -1792,14 +1842,16 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               key={activeEntityTab.id}
               kind={activeEntityTab.entityKind}
               entity={entityDraft}
-              dirty={isTabDirty(activeEntityTab)}
-              busy={busy}
               nameRef={entityNameRef}
               onChange={(next) =>
                 patchEntityTab(activeEntityTab.id, (item) => ({ ...item, entity: next }))
               }
               onCommitName={() => void commitEntityName()}
-              onSave={() => saveEntityTab(activeEntityTab.id)}
+              saveStatus={
+                entitySave?.key === activeEntityTab.id
+                  ? { status: entitySave.status, message: entitySave.message }
+                  : null
+              }
             />
           ) : draft ? (
             <RequestEditor
@@ -1807,6 +1859,11 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               tab={tab}
               onTab={setInnerTab}
               onChange={editDraft}
+              onCurl={() => {
+                // 与发送共用同一份输入（未保存时走内联载荷），因此两处命令必然一致
+                if (!exportSendInput) throw new Error('没有可导出的请求');
+                return client.curlExport(exportSendInput);
+              }}
             />
           ) : (
             <div className="pane-body muted">从左侧选择一个请求，或新建一个。</div>
