@@ -1,8 +1,14 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useState } from 'react';
-import { describe, expect, it } from 'vitest';
-import { RequestEditor } from '../src/components/RequestEditor';
-import { defaultSettings, emptyAuth, emptyBody, type SavedRequest } from '../src/lib/types';
+import { describe, expect, it, vi } from 'vitest';
+import { RequestBand, RequestEditor } from '../src/components/RequestEditor';
+import {
+  defaultSettings,
+  emptyAuth,
+  emptyBody,
+  type CurlCommand,
+  type SavedRequest,
+} from '../src/lib/types';
 
 type Tab = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'scripts';
 
@@ -26,29 +32,59 @@ function draft(overrides: Partial<SavedRequest> = {}): SavedRequest {
   };
 }
 
-/** 受控编辑器的测试宿主：把每次 onChange 的结果记下来，并按新值重新渲染。 */
-function harness(initial: SavedRequest, tab: Tab = 'params') {
+/**
+ * 受控编辑器的测试宿主：把每次 onChange 的结果记下来，并按新值重新渲染。
+ *
+ * 请求带（身份行 + 地址栏 + 解析预览）与列内容（内层标签与正文）现在是两块——
+ * 前者由主区作为通栏项渲染，因此这里也分开挂，测试才拿得到地址栏。
+ */
+function harness(
+  initial: SavedRequest,
+  tab: Tab = 'params',
+  curlResult?: CurlCommand | 'reject',
+) {
   const seen: SavedRequest[] = [];
+  let curlCalls = 0;
+  /** 命令生成：默认给一段可辨识的文本；测试可以换成带 warnings 或直接抛错。 */
+  const generateCurl = async (): Promise<CurlCommand> => {
+    curlCalls += 1;
+    if (curlResult === 'reject') throw { code: 'io', message: '生成失败' };
+    return (
+      curlResult ?? {
+        command: `curl -X ${initial.method} '${initial.url}'`,
+        contains_secret: false,
+        warnings: [],
+      }
+    );
+  };
 
   function Host() {
     const [value, setValue] = useState(initial);
+    const change = (next: SavedRequest) => {
+      seen.push(next);
+      setValue(next);
+    };
     return (
-      <RequestEditor
-        draft={value}
-        tab={tab}
-        busy={false}
-        onTab={() => {}}
-        onChange={(next) => {
-          seen.push(next);
-          setValue(next);
-        }}
-        onSend={() => {}}
-      />
+      <>
+        <RequestBand
+          draft={value}
+          busy={false}
+          onChange={change}
+          onSend={() => {}}
+          collectionName="我的集合"
+          dirty={false}
+          onSave={() => {}}
+          onDuplicate={() => {}}
+          onDelete={() => {}}
+          onCurl={generateCurl}
+        />
+        <RequestEditor draft={value} tab={tab} onTab={() => {}} onChange={change} />
+      </>
     );
   }
 
   render(<Host />);
-  return { seen, latest: () => seen[seen.length - 1] };
+  return { seen, latest: () => seen[seen.length - 1], curlCalls: () => curlCalls };
 }
 
 function bodyRows(): HTMLTableRowElement[] {
@@ -247,5 +283,245 @@ describe('URL 与参数表同步（spec: URL 与参数表保持同步）', () =>
     fireEvent.click(screen.getAllByLabelText('删除该行')[0]);
 
     expect(latest().url).toBe('https://api.test/users?b=2');
+  });
+});
+
+describe('请求体类型的选择行（spec: 请求体类型的选择行）', () => {
+  const bodyTab = (body: Partial<SavedRequest['body']>) =>
+    harness(draft({ body: { ...emptyBody(), ...body } }), 'body');
+
+  it('五种类型以同一行内的互斥单选呈现，不再有占满整行的下拉', () => {
+    bodyTab({});
+
+    const radios = screen.getAllByRole('radio');
+    expect(radios.map((radio) => radio.getAttribute('value'))).toEqual([
+      'none',
+      'form_data',
+      'url_encoded',
+      'raw',
+      'binary',
+    ]);
+    expect((screen.getByRole('radio', { name: 'none' }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByRole('combobox', { name: '请求体类型' })).toBeNull();
+  });
+
+  it('切换类型即切换编辑器，并清掉其它类型的残留内容', () => {
+    const { latest } = bodyTab({ kind: 'raw', raw: '{"a":1}', raw_language: 'json' });
+
+    fireEvent.click(screen.getByRole('radio', { name: 'form-data' }));
+
+    expect(latest().body.kind).toBe('form_data');
+    expect(latest().body.raw).toBeNull();
+    expect(screen.getByLabelText('新增字段的名称')).toBeTruthy();
+  });
+
+  it('raw 的语言选择内联在类型行行尾，且只在 raw 时出现', () => {
+    const { latest } = bodyTab({ kind: 'raw', raw: '', raw_language: 'json' });
+
+    expect(screen.getByLabelText('raw 语言')).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText('raw 语言'), { target: { value: 'xml' } });
+    expect(latest().body.raw_language).toBe('xml');
+
+    fireEvent.click(screen.getByRole('radio', { name: 'none' }));
+    expect(screen.queryByLabelText('raw 语言')).toBeNull();
+    expect(screen.queryByLabelText('raw 正文')).toBeNull();
+  });
+});
+
+describe('描述列（spec: 键值表的列与描述列）', () => {
+  it('Params 的描述列可就地编辑，写入的是 description 字段', () => {
+    const { latest } = harness(
+      draft({ params: [{ key: 'a', value: '1', enabled: true, description: '原来的说明' }] }),
+    );
+
+    const field = screen.getByLabelText('描述 0') as HTMLInputElement;
+    expect(field.value).toBe('原来的说明');
+
+    fireEvent.change(field, { target: { value: '改过的说明' } });
+
+    expect(latest().params[0]).toEqual({
+      key: 'a',
+      value: '1',
+      enabled: true,
+      description: '改过的说明',
+    });
+  });
+
+  it('清空描述写成 null，不留空字符串', () => {
+    const { latest } = harness(
+      draft({ params: [{ key: 'a', value: '1', enabled: true, description: '说明' }] }),
+    );
+
+    fireEvent.change(screen.getByLabelText('描述 0'), { target: { value: '' } });
+
+    expect(latest().params[0].description).toBeNull();
+  });
+
+  it('Headers 表同样有描述列', () => {
+    harness(
+      draft({ headers: [{ key: 'Accept', value: '*/*', enabled: true, description: '头说明' }] }),
+      'headers',
+    );
+
+    expect((screen.getByLabelText('描述 0') as HTMLInputElement).value).toBe('头说明');
+  });
+
+  it('urlencoded 表同样有描述列', () => {
+    harness(
+      draft({
+        body: {
+          ...emptyBody(),
+          kind: 'url_encoded',
+          urlencoded: [{ key: 'f', value: '1', enabled: true, description: '字段说明' }],
+        },
+      }),
+      'body',
+    );
+
+    expect((screen.getByLabelText('描述 0') as HTMLInputElement).value).toBe('字段说明');
+  });
+
+  it('幽灵行的描述输入即把这一行写进模型，且不打断正在输入的元素', () => {
+    const { latest } = harness(draft());
+
+    fireEvent.change(screen.getByLabelText('新增行的描述'), { target: { value: '只写说明' } });
+
+    // 物化：描述已经进入模型，而不是留在本地待丢的临时态
+    expect(latest().params).toEqual([
+      { key: '', value: '', enabled: true, description: '只写说明' },
+    ]);
+    // 仍由幽灵行自己承载这一行（元素没被重挂），其下方补出新的空行
+    expect((screen.getByLabelText('新增行的描述') as HTMLInputElement).value).toBe('只写说明');
+    expect(screen.getByLabelText('下一行的描述')).toBeTruthy();
+  });
+
+  it('描述不进入地址栏的查询串', () => {
+    const { latest } = harness(draft());
+
+    fireEvent.change(screen.getByLabelText('新增行的描述'), { target: { value: '只写说明' } });
+
+    expect(latest().url).toBe('https://api.test/users');
+  });
+});
+
+describe('请求带上的 cURL 快照（spec: 请求带上的 cURL 快照）', () => {
+  const command = "curl -X GET 'https://api.test/users'";
+  const plain = { command, contains_secret: false, warnings: [] };
+
+  it('一次点击展开可编辑的命令，再点一次收起', async () => {
+    harness(draft(), 'params', plain);
+
+    expect(screen.queryByTestId('curl-block')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+
+    const field = (await screen.findByLabelText('curl 命令')) as HTMLTextAreaElement;
+    expect(field.value).toBe(command);
+    // 可编辑的多行文本，而不是只读展示
+    expect(field.tagName).toBe('TEXTAREA');
+    expect(field.disabled).toBe(false);
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+    expect(screen.queryByTestId('curl-block')).toBeNull();
+  });
+
+  it('编辑命令不影响请求', async () => {
+    const { seen } = harness(draft(), 'params', plain);
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.change(await screen.findByLabelText('curl 命令'), {
+      target: { value: 'curl -X DELETE 改过的' },
+    });
+
+    expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe(
+      'curl -X DELETE 改过的',
+    );
+    // 请求侧一次 onChange 都没有发生
+    expect(seen).toHaveLength(0);
+  });
+
+  it('「重新生成」覆盖编辑并重新生成一次', async () => {
+    const { curlCalls } = harness(draft(), 'params', plain);
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.change(await screen.findByLabelText('curl 命令'), { target: { value: '改过的' } });
+
+    fireEvent.click(screen.getByTestId('curl-regenerate'));
+
+    await waitFor(() =>
+      expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe(command),
+    );
+    expect(curlCalls()).toBe(2);
+  });
+
+  it('展开期间请求变化不覆盖文本块', async () => {
+    harness(draft(), 'params', plain);
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.change(await screen.findByLabelText('curl 命令'), {
+      target: { value: '保留我' },
+    });
+
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/other' },
+    });
+
+    expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe('保留我');
+  });
+
+  it('收起再展开即重新生成，编辑不保留', async () => {
+    const { curlCalls } = harness(draft(), 'params', plain);
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.change(await screen.findByLabelText('curl 命令'), { target: { value: '改过的' } });
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+
+    await waitFor(() =>
+      expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe(command),
+    );
+    expect(curlCalls()).toBe(2);
+  });
+
+  it('「复制」写入的是改动后的内容', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+
+    harness(draft(), 'params', plain);
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+    fireEvent.change(await screen.findByLabelText('curl 命令'), {
+      target: { value: 'curl 改过的' },
+    });
+    fireEvent.click(screen.getByTestId('curl-copy'));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('curl 改过的'));
+    expect(screen.getByTestId('curl-copy').textContent).toBe('已复制');
+  });
+
+  it('生成结果给出的不可执行原因会显示出来', async () => {
+    harness(draft(), 'params', {
+      command: "curl -X POST 'https://api.test/users' --data-binary @<需自行替换为本地文件路径>",
+      contains_secret: false,
+      warnings: ['请求体为二进制文件，命令中的文件位置是占位符'],
+    });
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+
+    // 命令里是占位符（要用户自己替换），提示里说明原因
+    expect((await screen.findByLabelText('curl 命令') as HTMLTextAreaElement).value).toContain(
+      '需自行替换',
+    );
+    expect((await screen.findByTestId('curl-warnings')).textContent).toContain('占位符');
+  });
+
+  it('生成失败时给出可见的错误，而不是静默', async () => {
+    harness(draft(), 'params', 'reject');
+
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+
+    expect((await screen.findByTestId('curl-error')).textContent).toContain('生成失败');
   });
 });

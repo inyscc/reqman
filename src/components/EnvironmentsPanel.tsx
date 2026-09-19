@@ -19,15 +19,16 @@ export interface EnvironmentsPanelProps {
 
 /**
  * Environments tab（change: rework-app-layout，design D3；环境管理见 change:
- * add-collection-search-and-env-management，design D5/D6/D8）。
+ * add-collection-search-and-env-management，design D5/D6/D8；列表观感与搜索见
+ * change: rework-request-band-env-and-tables）。
  *
  * 这一栏只有**列表**：点击环境项即激活（与主区选择器共用同一份状态），Globals 是
  * 固定项，选中它等价于「取消环境激活」。变量的编辑在主区（`App` 的
  * environment-editor 分支）——侧栏只有 280px，变量表格挤在这里既看不清也占掉了
  * 列表的位置。
  *
- * 工具栏与 Collections tab 同款式：图标按钮，文字只留在 `aria-label` / `title`，
- * 顶部不再重复 tab 名（tab 已经叫 Environments）。
+ * 观感上刻意与集合树分道：环境列表短、行要好点，因此行高比树里的请求行大一档；
+ * 激活态用行首勾选标记 + 整行浅底表达，不用文字徽标与强调色竖条。
  */
 export function EnvironmentsPanel({
   client,
@@ -44,10 +45,17 @@ export function EnvironmentsPanel({
   /** 正在就地改名的环境 id 与草稿值。 */
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState('');
+  /** 按名称过滤（纯视图态）：不写后端、不改变激活环境）。 */
+  const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** 防抖：回车提交后紧跟的 blur 不该再提一次。 */
   const submitting = useRef(false);
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = normalizedQuery
+    ? environments.filter((environment) => environment.name.toLowerCase().includes(normalizedQuery))
+    : environments;
 
   const create = async () => {
     setError(null);
@@ -108,7 +116,14 @@ export function EnvironmentsPanel({
   return (
     <div className="env-panel" data-testid="environments-panel">
       <div className="env-toolbar">
-        <span className="grow" />
+        <input
+          className="env-search"
+          type="search"
+          aria-label="搜索环境"
+          placeholder="搜索环境"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
         <button
           className="icon-button"
           aria-label="新建环境"
@@ -142,12 +157,14 @@ export function EnvironmentsPanel({
             aria-selected={environmentId === null}
             onClick={() => onActivate(null)}
           >
+            <span className="env-check" aria-hidden="true">
+              {environmentId === null ? '✓' : ''}
+            </span>
             <strong className="env-name">Globals</strong>
-            <span className="muted">全局变量</span>
           </button>
         </div>
 
-        {environments.map((environment) => {
+        {filtered.map((environment) => {
           const revealed = activeId === environment.id || menuId === environment.id;
           const menu: MenuItem[] = [
             {
@@ -199,8 +216,10 @@ export function EnvironmentsPanel({
                   }}
                   onClick={() => onActivate(environment.id)}
                 >
+                  <span className="env-check" aria-hidden="true">
+                    {environmentId === environment.id ? '✓' : ''}
+                  </span>
                   <span className="env-name">{environment.name}</span>
-                  {environmentId === environment.id && <span className="badge ok">使用中</span>}
                 </button>
               )}
 
@@ -242,6 +261,12 @@ export function EnvironmentsPanel({
 
       {environments.length === 0 && (
         <div className="muted">还没有环境，可用工具栏的「新建环境」创建；Globals 始终可用。</div>
+      )}
+
+      {environments.length > 0 && filtered.length === 0 && (
+        <div className="muted" data-testid="env-search-empty">
+          没有名称匹配的环境。
+        </div>
       )}
     </div>
   );

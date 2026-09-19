@@ -10,9 +10,34 @@
 
 import type { FormField, KeyValue, SavedRequest } from './types';
 
-/** KeyValue 的空行：名称与值皆为空白。`enabled` 不参与判定。 */
+/**
+ * 发出判定：这一行是否构成请求数据。
+ *
+ * 名称与值皆为空白 → 不构成请求数据，不进入实际发出的请求。发出判定**不看描述**：
+ * 描述是给人看的说明，不是请求的一部分（spec: 键值表的列与描述列）。
+ */
+export function hasRequestData(row: KeyValue): boolean {
+  return row.key.trim() !== '' || row.value.trim() !== '';
+}
+
+/**
+ * 只带描述、不构成请求数据的行——用户在表格里写下的说明。
+ *
+ * 它们不对应任何查询串（参数表的同步按名称匹配，见 `url.ts` 的 `keepNotes`），
+ * 但也不该因为同步或清洗被丢掉。
+ */
+export function isDescriptionOnlyRow(row: KeyValue): boolean {
+  return !hasRequestData(row) && (row.description ?? '').trim() !== '';
+}
+
+/**
+ * 保留判定：名称、值、描述三者皆空才算空行。`enabled` 不参与判定。
+ *
+ * 与发出判定的区别只落在「只写了描述的行」上：它留在存储里（用户写下的东西不该
+ * 静默消失），但不会进入请求。清洗发生在出口，因此两个判定各由对应的出口使用。
+ */
 export function isEmptyKeyValue(row: KeyValue): boolean {
-  return row.key.trim() === '' && row.value.trim() === '';
+  return !hasRequestData(row) && !isDescriptionOnlyRow(row);
 }
 
 /** FormField 的空行只以名称为准：file 类型的字段本来就没有值。 */
@@ -58,7 +83,12 @@ export function withoutEmptyRows(request: SavedRequest): SavedRequest {
 }
 
 /**
- * 发送 / 预览 / 导出时用的清洗：在「剔空行」基础上再排除被停用的行。
+ * 发送 / 预览 / 导出时用的清洗：在「剔空行」基础上再排除被停用的行与不构成请求
+ * 数据的行。
+ *
+ * 「不构成请求数据」这一半是发出判定（`hasRequestData`）——只写了描述的行会被输出
+ * 路径剔除（它们留在存储里），名称为空的行也一并剔掉：Rust 侧只按 `enabled` 过滤，
+ * 一个 enabled 的空名请求头会让发送直接失败（见 `src-tauri/src/net/headers.rs`）。
  *
  * 注意：只在发送出口调用，**不要**在落库（保存）路径使用——停用的行要带着
  * `enabled:false` 持久化，不能被删掉（见 `App.tsx` 的保存分支）。库内存储的请求
@@ -66,13 +96,15 @@ export function withoutEmptyRows(request: SavedRequest): SavedRequest {
  */
 export function cleanForSend(request: SavedRequest): SavedRequest {
   const cleaned = withoutEmptyRows(request);
+  const sendable = (row: KeyValue) => row.enabled && hasRequestData(row);
+
   return {
     ...cleaned,
-    params: cleaned.params.filter((row) => row.enabled),
-    headers: cleaned.headers.filter((row) => row.enabled),
+    params: cleaned.params.filter(sendable),
+    headers: cleaned.headers.filter(sendable),
     body: {
       ...cleaned.body,
-      urlencoded: cleaned.body.urlencoded.filter((row) => row.enabled),
+      urlencoded: cleaned.body.urlencoded.filter(sendable),
       form: cleaned.body.form.filter((row) => row.enabled),
     },
   };

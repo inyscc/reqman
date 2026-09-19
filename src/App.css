@@ -264,8 +264,9 @@ textarea {
   display: grid;
   /* 未选中请求时只有一列：请求区独占整宽（design D1） */
   grid-template-columns: minmax(0, 1fr);
-  /* 两行：会话标签行 / 内容区。面包屑行已并入会话标签行（design D3） */
-  grid-template-rows: auto minmax(0, 1fr);
+  /* 三行：会话标签行 / 通栏请求带 / 分栏区。
+     请求带（身份行 + 地址栏 + 解析预览条）横跨整宽，分栏只作用于它以下。 */
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: var(--panel);
@@ -282,7 +283,7 @@ textarea {
    免得为了好点而把这条线画粗。 */
 .split-handle {
   grid-column: 2;
-  grid-row: 2;
+  grid-row: 3;
   position: relative;
   cursor: col-resize;
   background: transparent;
@@ -328,7 +329,10 @@ textarea {
   padding: 0 var(--sidebar-inset);
   border-bottom: 1px solid var(--border);
   background: var(--panel);
-  overflow: hidden;
+  /* 浮层要能溢出这一行（环境变量的只读浮层挂在环境选择器下），因此这里不裁剪；
+     标签自身的溢出仍由 .session-tabs 的横向滚动兜住，环境选择器与窗口按钮
+     照旧完整可见（有浏览器用例钉住）。 */
+  overflow: visible;
 }
 
 /* chrome 行里的按钮必须紧凑：全局 button 的内边距是给独立按钮设计的，
@@ -455,6 +459,80 @@ textarea {
   max-width: 180px;
   padding: var(--space-1) var(--space-2);
   font-size: var(--text-sm);
+}
+
+/* 环境变量的只读浮层（spec: 环境变量的只读浮层）：浮层锚在环境选择器下方、覆盖在
+   内容之上——不新增列、不挤占请求区或响应区。入口按钮与浮层在同一个根节点里，
+   因此「点击外部关闭」不会与入口按钮自己的开关打架，会话标签行的拖拽排除清单里
+   也已经包含 .env-select（见 ResizeStrips.tsx）。 */
+.env-peek {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.peek-panel {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 30;
+  width: min(420px, 70vw);
+  max-height: min(60vh, 460px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-3);
+  text-align: left;
+}
+
+.peek-panel h4 {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.peek-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.peek-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+}
+
+.peek-list li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+}
+
+.peek-name {
+  flex: none;
+  color: var(--muted);
+}
+
+.peek-value {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.peek-footer {
+  display: flex;
+  justify-content: flex-end;
 }
 
 /*
@@ -589,6 +667,25 @@ textarea {
    平时看起来就是文字（透明边与透明底），悬停给出可编辑的暗示，聚焦才落成输入框。
    min-width 必须是 0：这一行不可收缩的成员（环境选择器、窗口控制按钮）必须始终
    完整可见（window-chrome），所以让标签先缩。 */
+/* 通栏请求带（spec: 请求面板头的身份与操作 / 地址栏与解析预览条）：
+   主区网格的第 2 行、横跨整宽；左右分栏只作用于它以下的区域。
+   提示块与请求带同处这一行，因此也随它一起通栏。 */
+.request-top {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.request-band {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
 /* 请求面板头（spec: 请求面板头的身份与操作）：身份与请求级操作落在这里，
    不再占用会话标签行。 */
 .request-pane-header {
@@ -624,9 +721,10 @@ textarea {
   background: var(--panel);
 }
 
-/* 请求级操作（另存为 / 删除）：保留文字标签，指针悬停或面板头内键盘聚焦时显现。
-   用 visibility 而不是条件渲染或 display:none —— 它保留布局占位，使显现与隐藏
-   SHALL NOT 引起水平跳动（ui-layout「显现不引起水平跳动」）。 */
+/* 请求级操作（另存为 / 删除）：保留文字标签，指针悬停请求带或其中获得键盘焦点时
+   显现。用 visibility 而不是条件渲染或 display:none —— 它保留布局占位，使显现与
+   隐藏 SHALL NOT 引起水平跳动（ui-layout「显现不引起水平跳动」）。
+   悬停范围是**整条请求带**（spec: 指针移到请求带上即显现），而不只是身份行。 */
 .request-actions {
   display: flex;
   align-items: center;
@@ -635,14 +733,14 @@ textarea {
   visibility: hidden;
 }
 
-.request-pane-header:hover .request-actions,
-.request-pane-header:focus-within .request-actions {
+.request-band:hover .request-actions,
+.request-band:focus-within .request-actions {
   visibility: visible;
 }
 
 .request-region {
   grid-column: 1;
-  grid-row: 2;
+  grid-row: 3;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -652,7 +750,7 @@ textarea {
 
 .response-region {
   grid-column: 3;
-  grid-row: 2;
+  grid-row: 3;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -894,11 +992,16 @@ textarea {
   color: var(--text);
 }
 
-/* Environments tab 的工具栏：与 Collections 同款式——图标按钮，不重复 tab 名 */
+/* Environments tab 的工具栏：搜索框 + 新建按钮，与 Collections 同款式 */
 .env-toolbar {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
+}
+
+.env-toolbar > .env-search {
+  flex: 1;
   min-width: 0;
 }
 
@@ -911,37 +1014,34 @@ textarea {
   overflow: auto;
 }
 
+/* 环境行（spec: Environments tab 的列表观感与搜索）：行高明显大于集合树中的请求行
+ * ——环境列表短、行要好点，因此刻意不再与 .node 同一密度。 */
 .env-item {
-  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  /* 与 .node 取同一组内缩与最小高度：两个 tab 的列表行因此等高同宽 */
-  min-height: 22px;
-  padding: var(--space-1) var(--space-2);
+  min-height: 32px;
+  padding: var(--space-2);
   border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   text-align: left;
 }
 
-/* 选中态（design D0 三态）：实底浅色 + 左侧主色标。
-   左标用伪元素画，不需要改 DOM。 */
+/* 激活态：行首勾选标记 + 整行浅底。spec 明确要求不用文字徽标（「使用中」）与行内
+   强调色竖条——两者都曾让这一栏显得比内容更像告警。 */
 .env-item.active {
   background: var(--accent-soft);
   border-color: transparent;
   color: var(--text);
 }
 
-.env-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: var(--space-1);
-  bottom: var(--space-1);
-  width: 2px;
-  border-radius: 1px;
-  background: var(--accent);
+/* 勾选标记固定占位：未激活的行留同样宽度，名称因此始终对齐 */
+.env-check {
+  flex: none;
+  width: 14px;
+  color: var(--accent);
+  text-align: center;
 }
 
 /* 环境行：选项按钮 + 行内「⋯」按钮 + 就地改名输入（change:
@@ -1478,9 +1578,15 @@ select.method-select[data-method='OPTIONS'] {
   border-left-color: var(--accent);
 }
 
+/* 表格表面（spec: 表格轻量化与 hover 高亮）：
+   - 折叠边框在 sticky 单元格上不跟随绘制，因此改用 separate + border-spacing:0，
+     行分隔由单元格自己的 border-bottom 表达；
+   - 单元格内的输入控件在静默态下与文本同轻（无填充、无边框），
+     只在悬停或聚焦时显现可编辑的边界——整张表因此读起来像表格而不是一排输入框。 */
 table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
 }
 
 th,
@@ -1518,11 +1624,15 @@ th {
   scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
-/* Postman 风格表格：表头吸顶 + 行 hover 高亮 */
+/* 表头吸顶 + 可辨识的表面：表头钉在滚动容器顶部（滚动条所在的 .pane-body 有 8px
+   内边距，因此吸顶位置要向上抬同样的距离，否则会留出一条让行内容穿过的缝——
+   这正是此前「看起来没吸顶」的原因）。表头底用更重的分隔线与数据行区分，
+   同时它是不透明的，滚过的行不会从它下面透出来。 */
 thead th {
   position: sticky;
-  top: 0;
-  background: var(--panel);
+  top: calc(-1 * var(--space-4));
+  background: var(--surface-sunken);
+  border-bottom: 1px solid var(--border-strong);
   z-index: 1;
 }
 
@@ -1548,6 +1658,20 @@ td input,
 td select,
 td button {
   padding: var(--space-2) var(--space-3);
+}
+
+/* 静默态的单元格：无填充、无边框。幽灵行有自己的虚线底（见下方 .ghost-row），
+   不在此列的悬停规则之内，因此这里用 :not(.ghost-row) 把它排除在外。 */
+td input,
+td select,
+td textarea {
+  background: transparent;
+  border-color: transparent;
+}
+
+tbody tr:not(.ghost-row) input:hover,
+tbody tr:not(.ghost-row) select:hover {
+  border-color: var(--border);
 }
 
 /* 编辑单元格时的焦点态：用细的强调色焦点环替代浏览器默认的粗黑轮廓
@@ -1647,8 +1771,82 @@ iframe.preview {
   width: 28px;
 }
 
+/* 描述列：请求数据之外的说明，因此比名称/值窄；窄列下先压缩它，
+   名称与值保持可读（design D5）。 */
+.col-desc {
+  width: 30%;
+  min-width: 0;
+}
+
 .request-tabs {
   padding: var(--space-4);
+}
+
+/* cURL 快照（spec: 请求带上的 cURL 快照）：入口常驻在请求带右端，命令文本块展开在
+ * 地址栏下方。命令可能很长（多请求头 + 多行正文），因此给最大高度并内部滚动，
+ * 不让它把分栏区挤没。 */
+.curl-toggle {
+  flex: none;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+}
+
+.curl-toggle[aria-expanded='true'] {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.curl-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4) var(--space-4);
+}
+
+.curl-block .curl-command {
+  width: 100%;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre;
+}
+
+/* 请求体类型的选择行（spec: 请求体类型的选择行）：同一行内的互斥单选，与表格同一
+ * 重量——不再是占满整行宽度的下拉控件。选中项用主色表达，语言选择内联在行尾。 */
+.body-kind-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.body-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+/* 原生单选框不参与全局 input 的「撑满宽度 + 表单表面」规则 */
+.body-kind input {
+  width: auto;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.body-kind:has(input:checked) {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.raw-language {
+  width: auto;
+  margin-left: auto;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-sm);
 }
 
 .auth-location-select {

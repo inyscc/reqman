@@ -183,3 +183,50 @@ describe('打开请求时对齐两份数据', () => {
     expect(alignUrlAndParams(request)).toBe(request);
   });
 });
+
+describe('只带描述的行在同步中不被丢弃（spec: URL 与查询参数）', () => {
+  const note: KeyValue = { key: '', value: '', enabled: true, description: '只写了说明' };
+
+  it('地址栏编辑后它仍在参数表里（追加在重建结果之后）', () => {
+    const next = withUrl(
+      draft({ url: 'https://api.test/users?a=1', params: [row('a', '1'), note] }),
+      'https://api.test/users?a=1&b=2',
+    );
+
+    expect(next.params).toEqual([row('a', '1'), row('b', '2'), note]);
+  });
+
+  it('地址栏里删掉查询串时它同样留下', () => {
+    const next = withUrl(
+      draft({ url: 'https://api.test/users?a=1', params: [row('a', '1'), note] }),
+      'https://api.test/users',
+    );
+
+    expect(next.params).toEqual([note]);
+  });
+
+  it('反复编辑地址栏不会把它复制成多行', () => {
+    const first = withUrl(
+      draft({ url: 'https://api.test/users?a=1', params: [row('a', '1'), note] }),
+      'https://api.test/users?a=1&b=2',
+    );
+    const second = withUrl(first, 'https://api.test/users?a=1&b=2&c=3');
+
+    expect(second.params).toEqual([row('a', '1'), row('b', '2'), row('c', '3'), note]);
+  });
+
+  it('打开请求时重建参数表，它被追回', () => {
+    const aligned = alignUrlAndParams(
+      draft({ url: 'https://api.test/users?a=1', params: [row('a', '1'), note] }),
+    );
+
+    expect(aligned.params).toEqual([row('a', '1'), note]);
+  });
+
+  it('它不进 URL 的查询串，也不留下 `?=` 残迹', () => {
+    expect(composeUrl('https://api.test/users', [row('a', '1'), note])).toBe(
+      'https://api.test/users?a=1',
+    );
+    expect(composeUrl('https://api.test/users?a=1', [note])).toBe('https://api.test/users');
+  });
+});

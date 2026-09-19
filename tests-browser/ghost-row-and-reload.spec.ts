@@ -165,9 +165,10 @@ describe('幽灵行（真实引擎）', () => {
       await ghostKey.click();
       await page.keyboard.type('X-Trace-Id', { delay: 10 });
 
-      // 输入过程中：被输入的那一行由幽灵行自己承载（不重复渲染），
-      // 因此表格仍是「1 个普通行 + 1 个幽灵行」，焦点也还在同一个元素上
-      expect(await rowHeights(page)).toHaveLength(2);
+      // 输入过程中：被输入的那一行由幽灵行自己承载（不重复渲染），表格是
+      // 「1 个普通行 + 正在编辑的幽灵行 + 它下方的占位行」，行数不再增长，
+      // 焦点也还在同一个元素上
+      expect(await rowHeights(page)).toHaveLength(3);
       expect(await ghostKey.inputValue()).toBe('X-Trace-Id');
       expect(await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))).toBe(
         '新增行的名称',
@@ -200,8 +201,9 @@ describe('幽灵行（真实引擎）', () => {
       });
       await cdp.send('Input.insertText', { text: '你好' });
 
-      // 组合过程中的中间态没有被物化成额外的行
-      expect(await rowHeights(page)).toHaveLength(2);
+      // 组合过程中的中间态没有被物化成额外的行（行数与键入后一致：内容行 +
+      // 正在编辑的幽灵行 + 它下方的占位行）
+      expect(await rowHeights(page)).toHaveLength(3);
       expect(await ghostKey.inputValue()).toBe('你好');
 
       await page.keyboard.press('Enter');

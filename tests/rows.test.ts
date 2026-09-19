@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cleanForSend,
+  hasRequestData,
+  isDescriptionOnlyRow,
   isEmptyFormField,
   isEmptyKeyValue,
   withoutEmptyFormFields,
@@ -92,5 +95,44 @@ describe('空行清洗', () => {
     // 其余字段不受影响
     expect(cleaned.url).toBe(source.url);
     expect(cleaned.body.kind).toBe('form_data');
+  });
+});
+
+describe('描述列带来的两档判定', () => {
+  const note: KeyValue = { key: '', value: '', enabled: true, description: '只写了说明' };
+
+  it('保留判定看三列：只写描述的行不是空行', () => {
+    expect(isEmptyKeyValue(note)).toBe(false);
+    expect(isEmptyKeyValue({ ...note, description: '   ' })).toBe(true);
+    expect(isEmptyKeyValue({ ...note, description: null })).toBe(true);
+    expect(isEmptyKeyValue(kv('a', ''))).toBe(false);
+    expect(isEmptyKeyValue(kv('', ''))).toBe(true);
+  });
+
+  it('发出判定不看描述：只写描述的行不构成请求数据', () => {
+    expect(hasRequestData(note)).toBe(false);
+    expect(isDescriptionOnlyRow(note)).toBe(true);
+    expect(hasRequestData(kv('a', ''))).toBe(true);
+    expect(isDescriptionOnlyRow(kv('a', ''))).toBe(false);
+  });
+
+  it('只写描述的行被保留下来（保存与打开走的是这一档）', () => {
+    const source = request({ params: [kv('a', '1'), note], headers: [note] });
+
+    expect(withoutEmptyRows(source).params).toEqual([kv('a', '1'), note]);
+    expect(withoutEmptyRows(source).headers).toEqual([note]);
+  });
+
+  it('只写描述的行不进发送载荷，同表其它行照旧', () => {
+    const source = request({ params: [kv('a', '1'), note], headers: [note, kv('b', '2')] });
+
+    expect(cleanForSend(source).params).toEqual([kv('a', '1')]);
+    expect(cleanForSend(source).headers).toEqual([kv('b', '2')]);
+  });
+
+  it('名称为空但有值的行照旧进入发送载荷（让后端明确报错，不静默丢弃）', () => {
+    const source = request({ headers: [kv('', '有值没名')] });
+
+    expect(cleanForSend(source).headers).toEqual([kv('', '有值没名')]);
   });
 });

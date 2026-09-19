@@ -1,11 +1,13 @@
 import { useRef, useState, type FocusEvent, type ReactNode, type RefObject } from 'react';
 import { isEmptyFormField, isEmptyKeyValue } from '../lib/rows';
 import { withParams, withUrl } from '../lib/url';
+import { CurlPanel, useCurlSnapshot } from './CurlSnapshot';
 import { ScriptPane } from './ScriptPane';
 import type {
   ApiKeyLocation,
   AuthKind,
   BodyKind,
+  CurlCommand,
   HttpVersion,
   KeyValue,
   ProxyConfig,
@@ -16,16 +18,14 @@ import type {
 
 type Tab = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'scripts';
 
-export interface RequestEditorProps {
+export interface RequestBandProps {
   draft: SavedRequest;
-  tab: Tab;
   busy: boolean;
-  onTab: (tab: Tab) => void;
   onChange: (next: SavedRequest) => void;
   onSend: () => void;
   /** 地址栏正下方的解析预览条（change: rework-app-layout，design D4）。 */
   preview?: ReactNode;
-  /** 请求面板头（spec: 请求面板头的身份与操作）——身份与请求级操作下沉到这里。 */
+  /** 请求面板头（spec: 请求面板头的身份与操作）——身份与请求级操作落在这里。 */
   collectionName: string | null;
   dirty: boolean;
   onSave: () => void;
@@ -33,6 +33,15 @@ export interface RequestEditorProps {
   onDelete: () => void;
   /** 面板头里的请求名输入框：树菜单的「重命名」把焦点交给它。 */
   nameRef?: RefObject<HTMLInputElement | null>;
+  /** 生成当前请求的 curl 快照（spec: 请求带上的 cURL 快照）。 */
+  onCurl: () => Promise<CurlCommand>;
+}
+
+export interface RequestEditorProps {
+  draft: SavedRequest;
+  tab: Tab;
+  onTab: (tab: Tab) => void;
+  onChange: (next: SavedRequest) => void;
 }
 
 /** 请求标签的顺序与文案对齐 Postman（spec: 请求标签命名）。 */
@@ -71,11 +80,12 @@ function highlightUrl(url: string): ReactNode[] {
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 const RAW_LANGUAGES: RawLanguage[] = ['json', 'xml', 'html', 'text', 'javascript'];
+/** 请求体类型的顺序与文案（spec: 请求体类型的选择行）——英文小写，与内层标签命名一致。 */
 const BODY_KINDS: { value: BodyKind; label: string }[] = [
-  { value: 'none', label: '无' },
-  { value: 'raw', label: 'raw' },
+  { value: 'none', label: 'none' },
   { value: 'form_data', label: 'form-data' },
   { value: 'url_encoded', label: 'x-www-form-urlencoded' },
+  { value: 'raw', label: 'raw' },
   { value: 'binary', label: 'binary' },
 ];
 const AUTH_KINDS: AuthKind[] = ['none', 'inherit', 'basic', 'bearer', 'api_key'];
@@ -161,6 +171,7 @@ function KeyValueTable({
             <th className="col-check" />
             <th>名称</th>
             <th>值</th>
+            <th className="col-desc">描述</th>
             <th className="col-check" />
           </tr>
         </thead>
@@ -191,6 +202,18 @@ function KeyValueTable({
                     placeholder={valuePlaceholder}
                     aria-label={`${valuePlaceholder} ${index}`}
                     onChange={(event) => update(index, { value: event.target.value })}
+                  />
+                </td>
+                {/* 描述列：人类可读说明。它不参与「是否发出」（见 lib/rows.ts 的两档
+                    判定），但会被保留、并随请求持久化与导入导出往返。 */}
+                <td>
+                  <input
+                    value={row.description ?? ''}
+                    placeholder="描述"
+                    aria-label={`描述 ${index}`}
+                    onChange={(event) =>
+                      update(index, { description: event.target.value === '' ? null : event.target.value })
+                    }
                   />
                 </td>
                 <td>
@@ -236,6 +259,22 @@ function KeyValueTable({
                 }}
               />
             </td>
+            <td>
+              <input
+                value={ghost.description ?? ''}
+                placeholder="描述"
+                aria-label="新增行的描述"
+                onChange={(event) =>
+                  editGhost({ description: event.target.value === '' ? null : event.target.value })
+                }
+                onBlur={leaveGhost}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return;
+                  event.preventDefault();
+                  submitGhost();
+                }}
+              />
+            </td>
             <td />
           </tr>
           {/* 正在编辑（owned 已置位）时，紧邻下方再铺一行空白：键入第一个字符后
@@ -268,6 +307,17 @@ function KeyValueTable({
                   onChange={(event) => editGhost({ value: event.target.value })}
                 />
               </td>
+              <td>
+                <input
+                  placeholder="描述"
+                  aria-label="下一行的描述"
+                  onFocus={() => {
+                    releaseGhost();
+                    ghostKeyRef.current?.focus();
+                  }}
+                  onChange={(event) => editGhost({ description: event.target.value || null })}
+                />
+              </td>
               <td />
             </tr>
           )}
@@ -277,12 +327,15 @@ function KeyValueTable({
   );
 }
 
-export function RequestEditor(props: RequestEditorProps) {
+/**
+ * 通栏请求带（spec: 请求面板头的身份与操作 / 地址栏与解析预览条）：请求身份行 +
+ * 地址栏 + 解析预览条。它由主区作为独立网格项渲染、横跨整宽，位于左右分栏之上，
+ * 因此地址栏不再被分栏切成半宽。
+ */
+export function RequestBand(props: RequestBandProps) {
   const {
     draft,
-    tab,
     busy,
-    onTab,
     onChange,
     onSend,
     preview,
@@ -292,12 +345,15 @@ export function RequestEditor(props: RequestEditorProps) {
     onDuplicate,
     onDelete,
     nameRef,
+    onCurl,
   } = props;
 
   const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
+  /** cURL 快照（spec: 请求带上的 cURL 快照）：在请求带上生成、就地可编辑、不回写请求。 */
+  const curl = useCurlSnapshot(onCurl);
 
   return (
-    <div className="request-editor">
+    <div className="request-band">
       {/* 请求面板头（spec: 请求面板头的身份与操作）：所属集合面包屑 + 可就地编辑的
           请求名 + 请求级操作。身份随请求区一同出现与消失，不再占用会话标签行；
           方法由紧邻其下的地址栏选择框承载，这里 SHALL NOT 重复方法徽标。 */}
@@ -340,6 +396,18 @@ export function RequestEditor(props: RequestEditorProps) {
             删除
           </button>
         </span>
+
+        {/* cURL 快照入口（spec: 请求带上的 cURL 快照）：常驻可见——另存为/删除是按需
+            显现的次要操作，而这个是功能入口，藏起来就找不到了。 */}
+        <button
+          className="ghost curl-toggle"
+          type="button"
+          aria-expanded={curl.open}
+          data-testid="curl-toggle"
+          onClick={curl.toggle}
+        >
+          cURL
+        </button>
       </div>
 
       <div className="request-toolbar">
@@ -379,8 +447,36 @@ export function RequestEditor(props: RequestEditorProps) {
         </button>
       </div>
 
-      {preview}
+      {/* 命令文本块展开在地址栏下方（spec: 请求带上的 cURL 快照） */}
+      {curl.open && <CurlPanel {...curl.panel} />}
 
+      {preview}
+    </div>
+  );
+}
+
+/**
+ * 请求区的列内容：内层标签与正文。请求带（身份、地址栏、预览）已抬到主区顶部，
+ * 不再属于这里——本组件只负责分栏以下的那一列。
+ */
+export function RequestEditor({ draft, tab, onTab, onChange }: RequestEditorProps) {
+  const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
+
+  /** 切换请求体类型：清掉其它类型的残留内容（既有行为，与控件形态无关）。 */
+  const patchBodyKind = (kind: BodyKind) => {
+    patch({
+      body: {
+        ...draft.body,
+        kind,
+        raw: kind === 'raw' ? draft.body.raw : null,
+        form: kind === 'form_data' ? draft.body.form : [],
+        urlencoded: kind === 'url_encoded' ? draft.body.urlencoded : [],
+      },
+    });
+  };
+
+  return (
+    <div className="request-editor">
       <div className="tabs request-tabs">
         {TABS.map((entry) => (
           <button
@@ -418,33 +514,25 @@ export function RequestEditor(props: RequestEditorProps) {
 
         {tab === 'body' && (
           <div className="stack">
-            <select
-              aria-label="请求体类型"
-              value={draft.body.kind}
-              onChange={(event) =>
-                patch({
-                  body: {
-                    ...draft.body,
-                    kind: event.target.value as BodyKind,
-                    // 切换类型时清掉其它类型的残留内容
-                    raw: event.target.value === 'raw' ? draft.body.raw : null,
-                    form: event.target.value === 'form_data' ? draft.body.form : [],
-                    urlencoded:
-                      event.target.value === 'url_encoded' ? draft.body.urlencoded : [],
-                  },
-                })
-              }
-            >
+            {/* 请求体类型（spec: 请求体类型的选择行）：同一行内的互斥单选；语言选择
+                内联在行尾，只在 raw 时出现。 */}
+            <div className="body-kind-row" role="radiogroup" aria-label="请求体类型">
               {BODY_KINDS.map((kind) => (
-                <option key={kind.value} value={kind.value}>
-                  {kind.label}
-                </option>
+                <label key={kind.value} className="body-kind">
+                  <input
+                    type="radio"
+                    name="body-kind"
+                    value={kind.value}
+                    checked={draft.body.kind === kind.value}
+                    onChange={() => patchBodyKind(kind.value)}
+                  />
+                  <span>{kind.label}</span>
+                </label>
               ))}
-            </select>
 
-            {draft.body.kind === 'raw' && (
-              <div className="stack">
+              {draft.body.kind === 'raw' && (
                 <select
+                  className="raw-language"
                   aria-label="raw 语言"
                   value={draft.body.raw_language ?? 'json'}
                   onChange={(event) =>
@@ -459,15 +547,16 @@ export function RequestEditor(props: RequestEditorProps) {
                     </option>
                   ))}
                 </select>
-                <textarea
-                  aria-label="raw 正文"
-                  rows={10}
-                  value={draft.body.raw ?? ''}
-                  onChange={(event) =>
-                    patch({ body: { ...draft.body, raw: event.target.value } })
-                  }
-                />
-              </div>
+              )}
+            </div>
+
+            {draft.body.kind === 'raw' && (
+              <textarea
+                aria-label="raw 正文"
+                rows={10}
+                value={draft.body.raw ?? ''}
+                onChange={(event) => patch({ body: { ...draft.body, raw: event.target.value } })}
+              />
             )}
 
             {draft.body.kind === 'url_encoded' && (

@@ -565,6 +565,41 @@ mod tests {
         assert_eq!(urlencoded[1]["disabled"], true);
     }
 
+    /// 参数、请求头与 urlencoded 字段的描述随导入导出往返
+    /// （spec: 键值表的列与描述列——界面上的描述列是这次新开的入口，
+    /// 但往返能力在互换层早已存在，这条用例把它钉住，避免以后有人顺手删掉）。
+    #[test]
+    fn key_value_descriptions_round_trip_through_import_and_export() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let ws = workspace_id(&db);
+
+        const DOCUMENT: &str = r#"{
+            "info": { "name": "描述往返", "schema": "collection/v2.1.0/collection.json" },
+            "item": [{
+                "name": "带描述的请求",
+                "request": {
+                    "method": "GET",
+                    "url": { "raw": "https://api.test/users?a=1",
+                             "query": [{ "key": "a", "value": "1", "description": "查询说明" }] },
+                    "header": [{ "key": "Accept", "value": "application/json",
+                                 "description": "头说明" }],
+                    "body": { "mode": "urlencoded",
+                              "urlencoded": [{ "key": "f", "value": "1",
+                                               "description": "字段说明" }] }
+                }
+            }]
+        }"#;
+
+        let collection_id = seed_collection(&db, &ws, DOCUMENT);
+        let exported = export_collection(&db, &collection_id, &key()).expect("导出");
+        let document: Value = serde_json::from_str(&exported).expect("导出结果是合法 JSON");
+
+        let request = &document["item"][0]["request"];
+        assert_eq!(request["url"]["query"][0]["description"], "查询说明");
+        assert_eq!(request["header"][0]["description"], "头说明");
+        assert_eq!(request["body"]["urlencoded"][0]["description"], "字段说明");
+    }
+
     // ---- 5.2 环境与全局变量导出 ----
 
     #[test]

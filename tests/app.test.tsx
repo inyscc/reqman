@@ -654,6 +654,96 @@ describe('前端数据流骨架', () => {
     expect(screen.getByText('删除')).toBeTruthy();
   });
 
+  it('请求身份与地址栏落在主区顶部的通栏带内，且先于提示块渲染（spec: 请求面板头的身份与操作）', async () => {
+    const { client } = harness();
+    client.sendRequest = vi.fn(async () => {
+      throw { code: 'dns_failure', message: 'failed to lookup address' };
+    });
+    const { container } = render(<App client={client} />);
+
+    const band = container.querySelector('[data-testid="request-top"]') as HTMLElement;
+    expect(band).toBeTruthy();
+    // 通栏项是主区的直接子元素，且不在请求区那一列里
+    expect(band.parentElement?.className).toContain('main');
+    expect(band.className).not.toContain('request-region');
+    // 未选中请求时，请求带里既没有身份行也没有地址栏
+    expect(within(band).queryByTestId('request-panel-header')).toBeNull();
+    expect(within(band).queryByLabelText('请求地址')).toBeNull();
+
+    await openRequest();
+
+    const header = within(band).getByTestId('request-panel-header');
+    const address = within(band).getByLabelText('请求地址');
+    const region = container.querySelector('.request-region') as HTMLElement;
+    // 身份行与地址栏都属于请求带，不属于分栏以下的那一列
+    expect(region.contains(header)).toBe(false);
+    expect(region.contains(address)).toBe(false);
+
+    // 提示块与请求带同处通栏项，且排在请求带之后
+    fireEvent.click(screen.getByText('发送'));
+    const notice = await screen.findByTestId('app-error');
+    expect(band.contains(notice)).toBe(true);
+    const children = Array.from(band.children);
+    expect(children.indexOf(container.querySelector('.request-band') as Element)).toBeLessThan(
+      children.indexOf(notice),
+    );
+  });
+
+  it('描述随请求保存，只写描述的行也被保留（spec: 键值表的列与描述列）', async () => {
+    const { client, requestSave } = harness({
+      request: makeRequest({
+        params: [{ key: 'a', value: '1', enabled: true, description: null }],
+      }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.change(screen.getByLabelText('描述 0'), { target: { value: '查询说明' } });
+    fireEvent.change(screen.getByLabelText('新增行的描述'), {
+      target: { value: '还没填名称的说明' },
+    });
+    fireEvent.click(await screen.findByTestId('save-request'));
+
+    await waitFor(() => expect(requestSave).toHaveBeenCalled());
+    const saved = requestSave.mock.calls.at(-1)?.[0] as SavedRequest;
+
+    expect(saved.params).toEqual([
+      { key: 'a', value: '1', enabled: true, description: '查询说明' },
+      { key: '', value: '', enabled: true, description: '还没填名称的说明' },
+    ]);
+  });
+
+  it('只写描述的参数行：地址栏编辑后仍在，但不出现在发送载荷里（spec: URL 与查询参数）', async () => {
+    const { client, sendRequest } = harness({
+      request: makeRequest({
+        params: [{ key: 'a', value: '1', enabled: true, description: null }],
+      }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.change(screen.getByLabelText('新增行的描述'), {
+      target: { value: '还没填名称的说明' },
+    });
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/users?a=1&b=2' },
+    });
+
+    // 地址栏编辑按查询串重建参数表：只写描述的那一行被追回，排在重建结果之后
+    expect((screen.getByLabelText('描述 2') as HTMLInputElement).value).toBe('还没填名称的说明');
+
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1));
+    expect(sendRequest.mock.calls[0][0]).toMatchObject({
+      inline: expect.objectContaining({
+        params: [
+          { key: 'a', value: '1', enabled: true, description: null },
+          { key: 'b', value: '2', enabled: true },
+        ],
+      }),
+    });
+  });
+
   it('响应栏只在选中请求时出现，并与请求区左右并排（rework-app-layout）', async () => {
     const { client } = harness();
     const { container } = render(<App client={client} />);
@@ -900,6 +990,29 @@ describe('前端数据流骨架', () => {
     const warnings = await screen.findByTestId('curl-warnings');
     expect(warnings.textContent).toContain('apiKey');
     expect(curlExport).toHaveBeenCalledTimes(1);
+  });
+
+  it('cURL 快照：未选中请求时没有入口；请求带与模态里的入口共用一个生成口径（spec: 请求带上的 cURL 快照）', async () => {
+    const { client, curlExport } = harness();
+    render(<App client={client} />);
+
+    // 未选中请求：请求带不存在，入口也就不存在
+    await screen.findByText('我的集合');
+    expect(screen.queryByTestId('curl-toggle')).toBeNull();
+
+    await openRequest();
+    fireEvent.click(screen.getByTestId('curl-toggle'));
+    await screen.findByTestId('curl-block');
+
+    expect(curlExport).toHaveBeenCalledTimes(1);
+    const fromBand = curlExport.mock.calls[0][0];
+
+    // 模态里的既有入口用的是同一份输入，因此两处命令必然一致
+    fireEvent.click(await screen.findByText('导入/导出'));
+    fireEvent.click(screen.getByText('导出 curl'));
+
+    await waitFor(() => expect(curlExport).toHaveBeenCalledTimes(2));
+    expect(curlExport.mock.calls[1][0]).toEqual(fromBand);
   });
 
   it('没有脚本输出也没有断言时不出现「脚本」标签页（6.4）', async () => {
@@ -1978,7 +2091,38 @@ describe('环境管理与全局选择器（add-collection-search-and-env-managem
     // 激活态落到存储上（跨重启保留靠这条写入 + 启动时的读回）
     await waitFor(() => expect(environmentSetActive).toHaveBeenCalledWith('w1', 'e1'));
     expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1');
-    expect(envList().getByText('使用中')).toBeTruthy();
+    // 激活态以行首勾选标记 + 整行浅底表达，不再用文字徽标（spec: 列表观感）
+    const activeRow = envList().getByText('测试环境').closest('button') as HTMLButtonElement;
+    expect(activeRow.className).toContain('active');
+    expect(activeRow.textContent).toContain('✓');
+    expect(envList().queryByText('使用中')).toBeNull();
+  });
+
+  it('环境列表按名称过滤：命中、无命中空态、清空恢复，且激活态不受影响（spec: 列表观感与搜索）', async () => {
+    const { client, environmentSetActive } = harness({
+      environments: [environment(), environment({ id: 'e2', name: '生产环境' })],
+    });
+    render(<App client={client} />);
+    await tree().findByText('我的请求');
+    await openEnvironments();
+
+    fireEvent.click(envList().getByText('测试环境'));
+    await waitFor(() => expect(environmentSetActive).toHaveBeenCalledWith('w1', 'e1'));
+
+    fireEvent.change(screen.getByLabelText('搜索环境'), { target: { value: '生产' } });
+    expect(envList().queryByText('测试环境')).toBeNull();
+    expect(envList().getByText('生产环境')).toBeTruthy();
+    // 过滤是纯视图态：不写后端、不改激活态
+    expect(environmentSetActive).toHaveBeenCalledTimes(1);
+    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1');
+
+    fireEvent.change(screen.getByLabelText('搜索环境'), { target: { value: '不存在的名字' } });
+    expect(await screen.findByTestId('env-search-empty')).toBeTruthy();
+    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1');
+
+    fireEvent.change(screen.getByLabelText('搜索环境'), { target: { value: '' } });
+    expect(envList().getByText('测试环境')).toBeTruthy();
+    expect(envList().getByText('生产环境')).toBeTruthy();
   });
 
   it('点击 Globals 与选择「无环境」都取消激活并写入 null', async () => {
@@ -3950,5 +4094,151 @@ describe('URL 与参数表同步（spec: URL 与参数表保持同步）', () =>
         params: [{ key: 'page', value: '2', enabled: true }],
       }),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 环境变量的只读浮层（change: rework-request-band-env-and-tables）
+// ---------------------------------------------------------------------------
+
+describe('环境变量的只读浮层（spec: 环境变量的只读浮层）', () => {
+  function peekVariable(overrides: Partial<Variable> = {}): Variable {
+    return {
+      id: 'v-base',
+      scope: 'global',
+      owner_id: 'w1',
+      name: 'baseUrl',
+      is_secret: false,
+      initial: { state: 'value', value: 'https://api.test' },
+      current: { state: 'value', value: 'https://api.test' },
+      ...overrides,
+    };
+  }
+
+  const secret = peekVariable({
+    id: 'v-key',
+    name: 'apiKey',
+    is_secret: true,
+    initial: { state: 'value', value: '******' },
+    current: { state: 'value', value: '******' },
+  });
+
+  async function openPeek() {
+    fireEvent.click(screen.getByTestId('env-peek-button'));
+    return screen.findByTestId('env-peek');
+  }
+
+  it('入口是带可访问名称的图标控件，浮层锚在环境选择器里且不改动任何栏', async () => {
+    const { client } = harness({ variables: [peekVariable()] });
+    const { container } = render(<App client={client} />);
+    await openRequest();
+
+    const button = screen.getByTestId('env-peek-button');
+    expect(button.getAttribute('aria-label')).toBe('查看变量');
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByTestId('env-peek')).toBeNull();
+
+    const region = container.querySelector('.request-region');
+    const response = container.querySelector('.response-region');
+    const sidebar = container.querySelector('.sidebar');
+
+    const panel = await openPeek();
+
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.closest('.env-select')).toBeTruthy();
+    // 覆盖式：主区与侧栏的节点没有因为打开浮层而变化
+    expect(container.querySelector('.request-region')).toBe(region);
+    expect(container.querySelector('.response-region')).toBe(response);
+    expect(container.querySelector('.sidebar')).toBe(sidebar);
+  });
+
+  it('分两段：本请求用到的变量（区分未解析）与当前作用域的全部变量', async () => {
+    const { client } = harness({
+      variables: [peekVariable(), secret],
+      previewResult: preview({ used: ['baseUrl', 'apiKey', 'missing'], unresolved: ['missing'] }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+    await openPeek();
+
+    // 解析预览是防抖的：等它回来之后，第一段才拿得到 used
+    expect((await screen.findByTestId('peek-used-baseUrl')).textContent).toContain(
+      'https://api.test',
+    );
+    expect(screen.getByTestId('peek-used-apiKey').textContent).toContain('******');
+    expect(screen.getByTestId('peek-used-missing').textContent).toContain('未解析');
+
+    const scopeList = await screen.findByTestId('peek-scope-list');
+    expect(scopeList.textContent).toContain('baseUrl');
+    expect(scopeList.textContent).toContain('apiKey');
+  });
+
+  it('secret 只以掩码呈现，浮层里既没有揭示入口也没有可编辑控件', async () => {
+    const { client, secretReveal } = harness({
+      variables: [secret],
+      previewResult: preview({ used: ['apiKey'] }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+    await openPeek();
+
+    const panel = screen.getByTestId('env-peek');
+    expect((await screen.findByTestId('peek-used-apiKey')).textContent).toContain('******');
+    expect(within(panel).queryByText('揭示')).toBeNull();
+    expect(panel.querySelectorAll('input, textarea, select')).toHaveLength(0);
+    expect(secretReveal).not.toHaveBeenCalled();
+  });
+
+  it('未选中请求时请求段呈现空态说明，当前作用域的变量照常可见', async () => {
+    const { client } = harness({ variables: [peekVariable()] });
+    render(<App client={client} />);
+    await screen.findByText('我的集合');
+
+    await openPeek();
+
+    expect(screen.getByTestId('env-peek').textContent).toContain('当前没有打开的请求');
+    expect(await screen.findByTestId('peek-scope-list')).toBeTruthy();
+  });
+
+  it('Esc 与点击外部都关闭，且不改变激活环境', async () => {
+    const { client, environmentSetActive } = harness({
+      environments: [environment()],
+      variables: [peekVariable()],
+    });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.change(screen.getByLabelText('环境'), { target: { value: 'e1' } });
+    await waitFor(() => expect(environmentSetActive).toHaveBeenCalledWith('w1', 'e1'));
+
+    await openPeek();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByTestId('env-peek')).toBeNull();
+
+    await openPeek();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByTestId('env-peek')).toBeNull();
+
+    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1');
+    expect(environmentSetActive).toHaveBeenCalledTimes(1);
+  });
+
+  it('经浮层进入环境编辑器：侧栏切过去，打开的请求与未保存草稿保留', async () => {
+    const { client } = harness({ variables: [peekVariable()] });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/edited' },
+    });
+
+    await openPeek();
+    fireEvent.click(screen.getByTestId('peek-open-editor'));
+
+    expect(await screen.findByTestId('environment-editor')).toBeTruthy();
+    expect(screen.queryByTestId('env-peek')).toBeNull();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Collections' }));
+    const address = await screen.findByLabelText('请求地址');
+    expect((address as HTMLInputElement).value).toBe('https://api.test/edited');
   });
 });

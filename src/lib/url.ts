@@ -12,6 +12,7 @@
 // 地址，构造器会规范化（甚至拒绝解析）这些输入，而用户看到的应当是原文（与
 // Rust 侧 `compose_url` 的注释同一条理由）。
 
+import { hasRequestData, isDescriptionOnlyRow } from './rows';
 import type { KeyValue, SavedRequest } from './types';
 
 export interface SplitUrl {
@@ -48,7 +49,10 @@ export function splitUrlQuery(url: string): SplitUrl {
  */
 export function composeUrl(url: string, params: KeyValue[]): string {
   const { base } = splitUrlQuery(url);
-  if (params.length === 0) return base;
+  // 不构成请求数据的行（例如只写了描述的那一行）不进查询串：它们没有名称与值，
+  // 写进去只会得到 `?=` 这种残迹。
+  const writable = params.filter(hasRequestData);
+  if (writable.length === 0) return base;
 
   // 查询串要插在 fragment 之前：`base` 里 fragment 是保留的（`#top`）
   const hashIndex = base.indexOf('#');
@@ -56,7 +60,7 @@ export function composeUrl(url: string, params: KeyValue[]): string {
   const fragment = hashIndex >= 0 ? base.slice(hashIndex) : '';
 
   const search = new URLSearchParams();
-  for (const param of params) search.append(param.key, param.value);
+  for (const param of writable) search.append(param.key, param.value);
 
   return `${head}?${search.toString().replace(/%7B%7B/gi, '{{').replace(/%7D%7D/gi, '}}')}${fragment}`;
 }
@@ -64,9 +68,13 @@ export function composeUrl(url: string, params: KeyValue[]): string {
 /** 编辑地址栏：URL 为准，参数表跟随。URL 里没有查询串即视为参数表为空。 */
 export function withUrl(request: SavedRequest, url: string): SavedRequest {
   const split = splitUrlQuery(url);
-  if (!split.hasQuery) return { ...request, url, params: [] };
+  if (!split.hasQuery) return { ...request, url, params: keepNotes([], request.params) };
 
-  return { ...request, url, params: carryRowMeta(split.params, request.params) };
+  return {
+    ...request,
+    url,
+    params: keepNotes(carryRowMeta(split.params, request.params), request.params),
+  };
 }
 
 /** 编辑参数表：参数表为准，URL 的查询串跟随。 */
@@ -86,12 +94,25 @@ export function alignUrlAndParams(request: SavedRequest): SavedRequest {
   const split = splitUrlQuery(request.url);
 
   if (split.hasQuery) {
-    const params = carryRowMeta(split.params, request.params);
+    const params = keepNotes(carryRowMeta(split.params, request.params), request.params);
     return sameRows(params, request.params) ? request : { ...request, params };
   }
 
   if (request.params.length === 0) return request;
   return { ...request, url: composeUrl(request.url, request.params) };
+}
+
+/**
+ * 把「只带描述」的行追回重建结果里（spec: URL 与查询参数——同步不得丢弃没有对应
+ * 查询串的行）。
+ *
+ * `carryRowMeta` 按名称匹配，只带描述的行名称为空，永远匹配不到任何查询串；不加
+ * 这一步，用户在表格里写下的说明会在地址栏每敲一个字符时被顺手清掉。这类行不参与
+ * 请求（发出判定），因此追回它们不影响实际发出的内容。
+ */
+function keepNotes(rebuilt: KeyValue[], previous: KeyValue[]): KeyValue[] {
+  const notes = previous.filter(isDescriptionOnlyRow);
+  return notes.length === 0 ? rebuilt : [...rebuilt, ...notes];
 }
 
 /**

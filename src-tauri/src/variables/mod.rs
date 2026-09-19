@@ -478,6 +478,12 @@ pub struct RequestPreview {
     pub auth_key: Option<String>,
     pub proxy_url: Option<String>,
     pub unresolved: Vec<String>,
+    /// 本请求实际用到的变量名（含路径变量与动态变量）。
+    ///
+    /// 与发送使用同一份解析结果（[`ResolvedRequest::used`]），因此界面上列出的就是
+    /// 真正生效的那些名字——只读浮层靠它回答「这个请求用了哪些变量」。
+    #[serde(default)]
+    pub used: Vec<String>,
     /// 是否有取值因 secret 被掩码。
     pub masked: bool,
     /// 证书校验被关闭时的显著警示（spec: 请求级网络设置）。
@@ -580,6 +586,7 @@ pub fn preview_request(
             .and_then(|proxy| proxy.url.clone())
             .map(|url| mask(&url)),
         unresolved: resolved.unresolved.clone(),
+        used: resolved.used.clone(),
         masked: masked_any,
         insecure_warning: request.settings.needs_insecure_warning(),
         cookies: Vec::new(),
@@ -795,6 +802,9 @@ mod tests {
         assert_eq!(preview.url, resolved.url);
         assert_eq!(preview.params, resolved.params);
         assert_eq!(preview.unresolved, resolved.unresolved);
+        // 「用到哪些变量」与发送同源：只读浮层列出的就是实际生效的那些名字
+        assert_eq!(preview.used, resolved.used);
+        assert!(!preview.used.is_empty(), "sample_request 应当用到变量");
         // secret 字段：预览被掩码，实际发送用明文
         assert_eq!(resolved.headers[0].1, "s3cr3t-value");
         assert_eq!(preview.headers[0].1, MASK);

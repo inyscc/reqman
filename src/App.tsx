@@ -9,11 +9,12 @@ import { CollectionIcon, FolderIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
 import { PreviewStrip } from './components/PreviewStrip';
-import { RequestEditor } from './components/RequestEditor';
+import { RequestBand, RequestEditor } from './components/RequestEditor';
 import { ResizeStrips, isInteractiveSessionBarTarget } from './components/ResizeStrips';
 import { ResponsePanel } from './components/ResponsePanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SplitHandle } from './components/SplitHandle';
+import { VariablesPeek } from './components/VariablesPeek';
 import { VariablesPanel } from './components/VariablesPanel';
 import { WorkspaceTree, type EntitySelection } from './components/WorkspaceTree';
 import { commands as defaultCommands, describeError, type Commands } from './lib/commands';
@@ -1662,6 +1663,18 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 </option>
               ))}
             </select>
+
+            {/* 只读变量浮层（spec: 环境变量的只读浮层）：锚在选择器下方、覆盖在内容
+                之上，不改变任何栏的布局；「去环境编辑器」把改动量交回主区。 */}
+            <VariablesPeek
+              client={client}
+              workspaceId={workspaceId ?? ''}
+              environmentId={environmentId}
+              collectionId={draft?.collection_id ?? null}
+              used={draft ? (preview?.used ?? []) : null}
+              unresolved={preview?.unresolved ?? []}
+              onOpenEditor={() => setSidebarTab('environments')}
+            />
           </span>
 
           {/* 窗口控制按钮（window-chrome spec）：最小化、最大化/还原、关闭。
@@ -1701,7 +1714,31 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           </span>
         </div>
 
-        <div className="request-region">
+        {/* 通栏请求带（spec: 请求面板头的身份与操作）：请求身份行 + 地址栏 +
+            解析预览条横跨整宽，位于左右分栏之上；提示块与它同处这一行，因此也通栏。
+            主区让给环境编辑器或实体脚本面板时，请求带不存在。 */}
+        <div className="request-top" data-testid="request-top">
+          {draft && !showEnvironmentEditor && (
+            <RequestBand
+              draft={draft}
+              busy={busy}
+              onChange={editDraft}
+              onSend={() => void send()}
+              preview={<PreviewStrip preview={preview} error={previewError} />}
+              collectionName={crumbCollectionName}
+              dirty={dirty}
+              onSave={() => void saveRequestTab(requestTabId(draft.id))}
+              onDuplicate={() => void duplicateRequest()}
+              onDelete={() => removeRequest()}
+              nameRef={requestNameRef}
+              onCurl={() => {
+                // 与发送共用同一份输入（未保存时走内联载荷），因此两处命令必然一致
+                if (!exportSendInput) throw new Error('没有可导出的请求');
+                return client.curlExport(exportSendInput);
+              }}
+            />
+          )}
+
           {error && (
             <div className="notice danger" role="alert" data-testid="app-error">
               {error}
@@ -1730,7 +1767,11 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               </div>
             </div>
           )}
+        </div>
 
+        {/* 分栏区（spec: 主区左右分栏与可调比例）：请求带以下的这一块才参与分栏，
+            左为请求区、右为响应区。 */}
+        <div className="request-region">
           {showEnvironmentEditor ? (
             /* 环境编辑器占主区（design D8）：变量表格需要宽度，侧栏只放列表 */
             <div className="pane" data-testid="environment-editor">
@@ -1764,17 +1805,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             <RequestEditor
               draft={draft}
               tab={tab}
-              busy={busy}
               onTab={setInnerTab}
               onChange={editDraft}
-              onSend={() => void send()}
-              preview={<PreviewStrip preview={preview} error={previewError} />}
-              collectionName={crumbCollectionName}
-              dirty={dirty}
-              onSave={() => void saveRequestTab(requestTabId(draft.id))}
-              onDuplicate={() => void duplicateRequest()}
-              onDelete={() => removeRequest()}
-              nameRef={requestNameRef}
             />
           ) : (
             <div className="pane-body muted">从左侧选择一个请求，或新建一个。</div>

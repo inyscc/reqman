@@ -160,6 +160,8 @@ export interface RequestPreview {
   auth_key?: string | null;
   proxy_url?: string | null;
   unresolved: string[];
+  /** 本请求实际用到的变量名（与发送同源）；只读浮层据此列出「用到」的那一段。 */
+  used?: string[];
   masked: boolean;
   insecure_warning: boolean;
   /** 该目标当前会自动携带的 Cookie（Cookie 的可见性，spec: 自动附带）。 */
