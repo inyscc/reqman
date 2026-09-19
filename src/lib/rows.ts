@@ -56,3 +56,24 @@ export function withoutEmptyRows(request: SavedRequest): SavedRequest {
     body: { ...request.body, urlencoded, form },
   };
 }
+
+/**
+ * 发送 / 预览 / 导出时用的清洗：在「剔空行」基础上再排除被停用的行。
+ *
+ * 注意：只在发送出口调用，**不要**在落库（保存）路径使用——停用的行要带着
+ * `enabled:false` 持久化，不能被删掉（见 `App.tsx` 的保存分支）。库内存储的请求
+ * 仍可能含 `enabled:false` 的行，由这里在真正发出前剥掉。
+ */
+export function cleanForSend(request: SavedRequest): SavedRequest {
+  const cleaned = withoutEmptyRows(request);
+  return {
+    ...cleaned,
+    params: cleaned.params.filter((row) => row.enabled),
+    headers: cleaned.headers.filter((row) => row.enabled),
+    body: {
+      ...cleaned.body,
+      urlencoded: cleaned.body.urlencoded.filter((row) => row.enabled),
+      form: cleaned.body.form.filter((row) => row.enabled),
+    },
+  };
+}

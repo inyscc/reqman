@@ -71,13 +71,26 @@ fn capabilities_grant_no_file_shell_or_network_ability() {
     // 拦截到关闭请求后若还有未保存的编辑，先 preventDefault 问用户，确认后才自行
     // destroy 窗口。`core:window:default` 并不包含它，而 `onCloseRequested` 在不
     // preventDefault 时会自行 destroy——不授予它反而会让窗口关不掉。
-    // 这条权限不读文件、不发网络、不执行命令，且只用在窗口关闭这一条路径上。
+    //
+    // `add-in-page-window-controls` 新增四项，全部只驱动窗口本身，不读文件、
+    // 不发网络、不执行命令：
+    // - allow-minimize / allow-toggle-maximize：页面内的最小化与最大化 / 还原按钮
+    //   （toggleMaximize 一个入口覆盖两个方向，不需要 allow-maximize / allow-unmaximize 拆分）；
+    // - allow-start-dragging：会话标签行的手动拖拽移动（`data-tauri-drag-region`
+    //   对子元素不继承，行内空白是子元素，只能手动触发 startDragging）；
+    // - allow-start-resize-dragging：decorations(false) 丢掉原生边缘缩放后，
+    //   由窗口边缘的透明窄条经 startResizeDragging 恢复八方向缩放。
+    // isMaximized 查询已由 core:window:default 覆盖（见 gen/schemas/desktop-schema.json）。
     let allowed = [
         "core:app:default",
         "core:event:default",
         "core:window:default",
         "core:webview:default",
         "core:window:allow-destroy",
+        "core:window:allow-minimize",
+        "core:window:allow-toggle-maximize",
+        "core:window:allow-start-dragging",
+        "core:window:allow-start-resize-dragging",
     ];
     for permission in &permissions {
         assert!(

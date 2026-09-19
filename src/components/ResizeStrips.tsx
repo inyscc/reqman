@@ -1,0 +1,49 @@
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
+import type { ResizeDirection, WindowCloser } from '../lib/window';
+
+/** 八个方向的缩放边条：类名即方位缩写。 */
+const STRIPS: ReadonlyArray<{ direction: ResizeDirection; className: string }> = [
+  { direction: 'North', className: 'n' },
+  { direction: 'South', className: 's' },
+  { direction: 'East', className: 'e' },
+  { direction: 'West', className: 'w' },
+  { direction: 'NorthWest', className: 'nw' },
+  { direction: 'NorthEast', className: 'ne' },
+  { direction: 'SouthWest', className: 'sw' },
+  { direction: 'SouthEast', className: 'se' },
+];
+
+/**
+ * 自绘边缘缩放（change: add-in-page-window-controls，design D6）。
+ *
+ * decorations(false) 会连带丢掉 Windows 的原生边缘缩放手柄，用贴窗口内沿的
+ * 透明窄条补回：pointerdown 交给原生的 startResizeDragging，自己不做逐帧移动。
+ * 纯视图组件，窗口控制口可注入（与 App 的 windowCloser 同一份）。
+ */
+export function ResizeStrips({ windowApi }: { windowApi: WindowCloser }) {
+  const onPointerDown = (direction: ResizeDirection) => (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    // 阻止默认行为，避免边条获得焦点或触发文本选择
+    event.preventDefault();
+    void windowApi.startResizeDragging(direction);
+  };
+
+  return (
+    <>
+      {STRIPS.map((strip) => (
+        <div
+          key={strip.direction}
+          className={`resize-strip ${strip.className}`}
+          aria-hidden="true"
+          onPointerDown={onPointerDown(strip.direction)}
+        />
+      ))}
+    </>
+  );
+}
+
+/** 判定一个 pointer/mouse 事件是否落在会话标签行的交互控件上（拖拽与双击最大化都要排除）。 */
+export function isInteractiveSessionBarTarget(event: ReactMouseEvent<HTMLElement>): boolean {
+  const target = event.target as HTMLElement | null;
+  return Boolean(target?.closest('button, select, .env-select, .window-controls'));
+}

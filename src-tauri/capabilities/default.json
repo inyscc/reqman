@@ -1,13 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口的最小权限集。仅保留驱动界面所必需的核心能力；不授予文件系统读写、shell 执行或任意 HTTP 能力。dialog 插件在 Rust 侧注册，但不向前端授权——文件选择只能经 pick_upload_file 命令进入。core:window:allow-destroy 用于退出应用前的未保存确认（确认后自行关闭窗口），不读文件、不发网络。",
+  "description": "主窗口的最小权限集。仅保留驱动界面所必需的核心能力；不授予文件系统读写、shell 执行或任意 HTTP 能力。dialog 插件在 Rust 侧注册，但不向前端授权——文件选择只能经 pick_upload_file 命令进入。core:window:allow-destroy 用于退出应用前的未保存确认（确认后自行关闭窗口）。core:window:allow-minimize / allow-toggle-maximize / allow-start-dragging / allow-start-resize-dragging 四项用于页面内窗口控制（add-in-page-window-controls）：最小化与最大化/还原按钮、会话标签行拖拽移动、decorations(false) 后的自绘边缘缩放——全部只驱动窗口本身，不读文件、不发网络、不执行命令。",
   "windows": ["main"],
   "permissions": [
     "core:app:default",
     "core:event:default",
     "core:window:default",
     "core:webview:default",
-    "core:window:allow-destroy"
+    "core:window:allow-destroy",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging"
   ]
 }

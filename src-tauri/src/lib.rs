@@ -52,9 +52,12 @@ pub fn run() {
             app.manage(state::AppState::initialize(&data_dir)?);
 
             // 窗口在代码中创建，以便挂上导航守卫；tauri.conf.json 的 windows 为空。
+            // decorations(false)：去掉原生标题栏，窗口 chrome 由页面承载
+            // （change: add-in-page-window-controls）。
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("reqman")
                 .inner_size(1280.0, 800.0)
+                .decorations(false)
                 .on_navigation(is_allowed_navigation)
                 .build()?;
             Ok(())

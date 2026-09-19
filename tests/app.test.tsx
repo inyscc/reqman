@@ -2875,7 +2875,8 @@ describe('Ctrl+S', () => {
 describe('退出应用前的未保存处置', () => {
   /**
    * 假窗口控制口：抓住 App 挂上的关闭回调，测试里模拟「用户点了窗口关闭」。
-   * 回调的返回值就是「这次关闭是否被允许」。
+   * 回调的返回值就是「这次关闭是否被允许」。其余窗口方法补 no-op——
+   * App 挂载即查询 / 订阅最大化状态，缺了它们会直接崩。
    */
   function fakeWindow() {
     let handler: (() => Promise<boolean>) | null = null;
@@ -2886,6 +2887,13 @@ describe('退出应用前的未保存处置', () => {
           handler = null;
         };
       },
+      close: async () => {},
+      minimize: async () => {},
+      toggleMaximize: async () => {},
+      startDragging: async () => {},
+      startResizeDragging: async (_direction: string) => {},
+      isMaximized: async () => false,
+      onResized: async (_next: () => void) => () => {},
     };
     return {
       closer,
@@ -3005,6 +3013,196 @@ describe('退出应用前的未保存处置', () => {
     const dirty = new Event('beforeunload', { cancelable: true });
     window.dispatchEvent(dirty);
     expect(dirty.defaultPrevented).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 页面内窗口控制（change: add-in-page-window-controls）
+// ---------------------------------------------------------------------------
+
+describe('页面内窗口控制', () => {
+  /** 完整的假窗口控制口：记录 close / minimize / toggleMaximize 等调用，
+   * 最大化状态在 toggleMaximize 时翻转并触发 resize 订阅，供图标跟随断言。 */
+  function fullFakeWindow() {
+    let handler: (() => Promise<boolean>) | null = null;
+    let resizeHandler: (() => void) | null = null;
+    let maximized = false;
+    const calls = {
+      close: 0,
+      minimize: 0,
+      toggleMaximize: 0,
+      startDragging: 0,
+      resizeDirections: [] as string[],
+    };
+    const closer = {
+      onCloseRequested: async (next: () => Promise<boolean>) => {
+        handler = next;
+        return () => {
+          handler = null;
+        };
+      },
+      close: async () => {
+        calls.close += 1;
+      },
+      minimize: async () => {
+        calls.minimize += 1;
+      },
+      toggleMaximize: async () => {
+        calls.toggleMaximize += 1;
+        maximized = !maximized;
+        resizeHandler?.();
+      },
+      startDragging: async () => {
+        calls.startDragging += 1;
+      },
+      startResizeDragging: async (direction: string) => {
+        calls.resizeDirections.push(direction);
+      },
+      isMaximized: async () => maximized,
+      onResized: async (next: () => void) => {
+        resizeHandler = next;
+        return () => {
+          resizeHandler = null;
+        };
+      },
+    };
+    return {
+      closer,
+      calls,
+      requestClose: (): Promise<boolean> => handler?.() ?? Promise.resolve(true),
+    };
+  }
+
+  it('会话标签行最右端渲染三个窗口控制按钮并接通窗口调用', async () => {
+    const { client } = harness();
+    const win = fullFakeWindow();
+    render(<App client={client} windowCloser={win.closer as never} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByRole('button', { name: '最小化' }));
+    await waitFor(() => expect(win.calls.minimize).toBe(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '最大化' }));
+    await waitFor(() => expect(win.calls.toggleMaximize).toBe(1));
+    // 最大化后按钮跟随真实状态变成「还原」，再点一次切回
+    fireEvent.click(await screen.findByRole('button', { name: '还原' }));
+    await waitFor(() => expect(win.calls.toggleMaximize).toBe(2));
+    expect(await screen.findByRole('button', { name: '最大化' })).toBeTruthy();
+  });
+
+  it('窗口控制按钮在各会话状态（空态 / 请求 / 实体 / 环境）下均完整可见', async () => {
+    const { client } = harness({ folder: makeFolder() });
+    const win = fullFakeWindow();
+    render(<App client={client} windowCloser={win.closer as never} />);
+    const allPresent = () =>
+      ['最小化', '最大化', '关闭'].every((name) => Boolean(screen.getByRole('button', { name })));
+
+    // 空态：没有选中任何请求 / 实体
+    expect(allPresent()).toBe(true);
+
+    // 请求
+    await openRequest();
+    expect(allPresent()).toBe(true);
+
+    // 集合 / 文件夹实体脚本面板
+    fireEvent.click(tree().getByText('我的文件夹'));
+    await screen.findByLabelText('文件夹前置脚本');
+    expect(allPresent()).toBe(true);
+
+    // 环境（主区为环境编辑器）
+    fireEvent.click(screen.getByRole('tab', { name: 'Environments' }));
+    await screen.findByRole('listbox', { name: '环境列表' });
+    expect(allPresent()).toBe(true);
+  });
+
+  it('页面内关闭按钮：没有未保存改动时直接关窗', async () => {
+    const { client } = harness();
+    const win = fullFakeWindow();
+    render(<App client={client} windowCloser={win.closer as never} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+
+    await waitFor(() => expect(win.calls.close).toBe(1));
+    expect(screen.queryByTestId('unsaved-guard')).toBeNull();
+  });
+
+  it('页面内关闭按钮与原生关闭走同一守卫：有改动先问，不保存后关窗', async () => {
+    const { client } = harness();
+    const win = fullFakeWindow();
+    render(<App client={client} windowCloser={win.closer as never} />);
+    await openRequest();
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/edited' },
+    });
+    await screen.findByText('未保存');
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+
+    expect(screen.getByTestId('unsaved-guard')).toBeTruthy();
+    expect(win.calls.close).toBe(0);
+
+    fireEvent.click(screen.getByText('不保存'));
+    await waitFor(() => expect(win.calls.close).toBe(1));
+  });
+
+  it('页面内关闭按钮：取消则不关窗', async () => {
+    const { client } = harness();
+    const win = fullFakeWindow();
+    render(<App client={client} windowCloser={win.closer as never} />);
+    await openRequest();
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/edited' },
+    });
+    await screen.findByText('未保存');
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    fireEvent.click(screen.getByText('取消'));
+
+    await waitFor(() => expect(screen.queryByTestId('unsaved-guard')).toBeNull());
+    expect(win.calls.close).toBe(0);
+  });
+
+  it('标签行拖拽：非交互区域触发 startDragging，交互控件不触发，双击切换最大化', async () => {
+    const { client } = harness();
+    const win = fullFakeWindow();
+    render(<App client={client} windowCloser={win.closer as never} />);
+    await openRequest();
+
+    const bar = screen.getByTestId('session-bar');
+    // 行内空白（grow 弹性区）：拖拽
+    fireEvent.mouseDown(bar.querySelector('.grow')!, { button: 0 });
+    // 双击（detail === 2）：切换最大化
+    fireEvent.mouseDown(bar.querySelector('.grow')!, { button: 0, detail: 2 });
+    // 交互控件不触发拖拽
+    fireEvent.mouseDown(document.querySelector('.env-select select')!, { button: 0 });
+    fireEvent.mouseDown(screen.getByRole('button', { name: '最小化' }), { button: 0 });
+
+    await waitFor(() => expect(win.calls.startDragging).toBe(1));
+    await waitFor(() => expect(win.calls.toggleMaximize).toBe(1));
+  });
+
+  it('缩放边条：八个方向各自映射到 startResizeDragging', async () => {
+    const { client } = harness();
+    const win = fullFakeWindow();
+    render(<App client={client} windowCloser={win.closer as never} />);
+    await openRequest();
+
+    const directions = ['n', 's', 'e', 'w', 'nw', 'ne', 'sw', 'se'];
+    for (const direction of directions) {
+      fireEvent.pointerDown(document.querySelector(`.resize-strip.${direction}`)!, { button: 0 });
+    }
+
+    expect(win.calls.resizeDirections).toEqual([
+      'North',
+      'South',
+      'East',
+      'West',
+      'NorthWest',
+      'NorthEast',
+      'SouthWest',
+      'SouthEast',
+    ]);
   });
 });
 

@@ -186,7 +186,7 @@ function KeyValueTable({
                 </td>
                 <td>
                   <button
-                    className="ghost"
+                    className="ghost row-delete"
                     aria-label="删除该行"
                     onClick={() => onChange(rows.filter((_, i) => i !== index))}
                   >
@@ -229,6 +229,39 @@ function KeyValueTable({
             </td>
             <td />
           </tr>
+          {/* 正在编辑（owned 已置位）时，紧邻下方再铺一行空白：键入第一个字符后
+           * editGhost 已把内容提交成真实行、owned 置位，这一行随之出现，对齐
+           * Postman「在空白行键入就自动新增一行」——不必等失焦。这行是视觉占位 /
+           * 快速跳板：点进去会先把当前行落定、再把焦点交回底部空白行。它不占用
+           * ghost 的 aria-label，否则测试按 label 会取到两个元素。 */}
+          {owned !== null && (
+            <tr className="ghost-row">
+              <td />
+              <td>
+                <input
+                  placeholder={keyPlaceholder}
+                  aria-label="下一行的名称"
+                  onFocus={() => {
+                    releaseGhost();
+                    ghostKeyRef.current?.focus();
+                  }}
+                  onChange={(event) => editGhost({ key: event.target.value })}
+                />
+              </td>
+              <td>
+                <input
+                  placeholder={valuePlaceholder}
+                  aria-label="下一行的值"
+                  onFocus={() => {
+                    releaseGhost();
+                    ghostKeyRef.current?.focus();
+                  }}
+                  onChange={(event) => editGhost({ value: event.target.value })}
+                />
+              </td>
+              <td />
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
@@ -506,6 +539,7 @@ function FormDataEditor({
       <table>
         <thead>
           <tr>
+            <th style={{ width: 28 }} />
             <th>字段</th>
             <th>类型</th>
             <th>内容 / 文件</th>
@@ -516,6 +550,15 @@ function FormDataEditor({
           {rows.map((row, index) =>
             index === owned ? null : (
               <tr key={index}>
+                <td>
+                  <input
+                    className="checkbox"
+                    type="checkbox"
+                    aria-label={`启用字段 ${index}`}
+                    checked={row.enabled}
+                    onChange={(event) => update(index, { enabled: event.target.checked })}
+                  />
+                </td>
                 <td>
                   <input
                     value={row.key}
@@ -550,7 +593,7 @@ function FormDataEditor({
                 </td>
                 <td>
                   <button
-                    className="ghost"
+                    className="ghost row-delete"
                     aria-label="删除该字段"
                     onClick={() => onChange(rows.filter((_, i) => i !== index))}
                   >

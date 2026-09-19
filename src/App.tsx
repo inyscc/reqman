@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import './App.css';
 import { BottomBar, type ModalKind } from './components/BottomBar';
 import { CookiePanel } from './components/CookiePanel';
@@ -8,6 +9,7 @@ import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
 import { PreviewStrip } from './components/PreviewStrip';
 import { RequestEditor } from './components/RequestEditor';
+import { ResizeStrips, isInteractiveSessionBarTarget } from './components/ResizeStrips';
 import { ResponsePanel } from './components/ResponsePanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { VariablesPanel } from './components/VariablesPanel';
@@ -21,7 +23,7 @@ import {
   runScriptPhase,
 } from './lib/scriptRuntime';
 import type { ConsoleEntry, TestAssertion, VisualizerResult } from './lib/scriptRuntime';
-import { withoutEmptyRows } from './lib/rows';
+import { withoutEmptyRows, cleanForSend } from './lib/rows';
 import { createEntityStore } from './lib/store';
 import type {
   Collection,
@@ -127,7 +129,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const requestStore = useMemo(() => createEntityStore<SavedRequest>(), []);
   /** 编辑面注册表：Ctrl+S 与未保存守卫共用它（见 lib/editing.ts）。 */
   const editingRegistry = useMemo(() => createEditingRegistry(), []);
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [trees, setTrees] = useState<CollectionTree[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -170,6 +172,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const savingRef = useRef(false);
   /** 窗口关闭请求挂起时，用它把「要不要关」的答案还给 Tauri 的关闭回调。 */
   const closeResolverRef = useRef<((allow: boolean) => void) | null>(null);
+  /** 窗口是否处于最大化：最大化 / 还原按钮的图标跟随这个真实状态（window-chrome spec）。 */
+  const [maximized, setMaximized] = useState(false);
 
   const storeVersion = useStoreValue(requestStore, (store) => store.version());
   const optimisticErrors = useStoreValue(requestStore, (store) => store.errors().length);
@@ -299,7 +303,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         try {
           const next = await client.variablesPreview({
             saved_id: dirty ? null : draft.id,
-            inline: dirty ? withoutEmptyRows(draft) : null,
+            inline: cleanForSend(draft),
             environment_id: environmentId,
           });
           if (sequence === previewSequence.current) {
@@ -332,15 +336,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       draft
         ? {
             saved_id: dirty ? null : draft.id,
-            inline: dirty ? withoutEmptyRows(draft) : null,
+            inline: cleanForSend(draft),
             environment_id: environmentId,
           }
         : null,
     [draft, dirty, environmentId],
   );
 
-  /** 只读展示当前工作区名；工作区切换界面已移除（design D8）。 */
-  const activeWorkspace = workspaces.find((item) => item.id === workspaceId) ?? null;
 
   /** 面包屑左段：当前请求所属集合名（design D6）。 */
   const crumbCollectionName = draft
@@ -508,6 +510,29 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   }, [windowCloser, editingRegistry]);
 
   /**
+   * 最大化 / 还原图标跟随窗口的真实状态（window-chrome spec）：
+   * 初始查询一次，之后订阅尺寸变化（最大化 / 还原都会触发 resize）重查。
+   */
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+
+    void (async () => {
+      setMaximized(await windowCloser.isMaximized());
+      const off = await windowCloser.onResized(() => {
+        void windowCloser.isMaximized().then(setMaximized);
+      });
+      if (cancelled) off();
+      else unlisten = off;
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [windowCloser]);
+
+  /**
    * 页面重载不走 CloseRequested，只能用 beforeunload 兜底。它只能唤起运行环境自己的
    * 确认提示（文案不可控、没有「保存」选项），因此 spec 只承诺「不静默丢弃」。
    */
@@ -583,7 +608,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         // 引用 secret 变量的极端情形会以掩码形态出现，属已知限制。
         const preview = await client.variablesPreview({
           saved_id: dirty ? null : draft.id,
-          inline: dirty ? withoutEmptyRows(draft) : null,
+          inline: cleanForSend(draft),
           environment_id: environmentId,
         });
         requestUrl = preview.url || null;
@@ -597,7 +622,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
       const payload = await client.sendRequest({
         saved_id: dirty ? null : draft.id,
-        inline: dirty ? withoutEmptyRows(draft) : null,
+        inline: cleanForSend(draft),
         environment_id: environmentId,
       });
       setResponse(payload);
@@ -825,9 +850,15 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         await createRequest(intent.collectionId, intent.folderId);
         return;
       case 'exit-app': {
+        // 双路径收尾（design D4）：有原生关闭请求挂起（Alt+F4）就把答案还给它的
+        // 回调（由其实现自行 destroy）；页面内按钮没有事件可 resolve，直接关窗。
         const resolve = closeResolverRef.current;
         closeResolverRef.current = null;
-        resolve?.(true);
+        if (resolve) {
+          resolve(true);
+        } else {
+          void windowCloser.close();
+        }
         return;
       }
     }
@@ -899,14 +930,26 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     }
   };
 
+  /**
+   * 会话标签行的手动拖拽与双击最大化（design D5）。
+   *
+   * `data-tauri-drag-region` 只对直接挂载元素生效、子元素不继承，而这一行最大的
+   * 空白区恰是 `.grow` 子元素，因此监听 mousedown 自行分发：交互控件（环境选择器、
+   * 窗口控制按钮、标签关闭按钮）不触发；双击（`detail === 2`）切换最大化。
+   */
+  const onSessionBarMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if (isInteractiveSessionBarTarget(event)) return;
+    if (event.detail === 2) {
+      void windowCloser.toggleMaximize();
+      return;
+    }
+    void windowCloser.startDragging();
+  };
+
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="sidebar-head">
-          <span className="badge">工作区</span>
-          <span className="grow">{activeWorkspace?.name ?? '未加载'}</span>
-        </div>
-
         <div className="sidebar-tabs" role="tablist" aria-label="侧栏">
           <button
             role="tab"
@@ -963,8 +1006,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       </aside>
 
       <main className={`main ${draft && !showEnvironmentEditor ? 'with-response' : ''}`}>
-        {/* 会话标签：视觉壳，始终最多一个（spec: 会话标签视觉壳） */}
-        <div className="session-bar">
+        {/* 会话标签：视觉壳，始终最多一个（spec: 会话标签视觉壳）。
+            这一行同时是事实上的标题栏：拖拽移动与双击最大化挂在这里。 */}
+        <div className="session-bar" data-testid="session-bar" onMouseDown={onSessionBarMouseDown}>
           {showEnvironmentEditor ? (
             <div className="session-tab" data-testid="session-tab">
               <span className="badge">环境</span>
@@ -1012,6 +1056,42 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 </option>
               ))}
             </select>
+          </span>
+
+          {/* 窗口控制按钮（window-chrome spec）：最小化、最大化/还原、关闭。
+              关闭与 Alt+F4 汇入同一条未保存守卫（design D4）。 */}
+          <span className="window-controls" role="group" aria-label="窗口控制">
+            <button aria-label="最小化" title="最小化" onClick={() => void windowCloser.minimize()}>
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <path d="M1 5h8" stroke="currentColor" strokeWidth="1" />
+              </svg>
+            </button>
+            <button
+              aria-label={maximized ? '还原' : '最大化'}
+              title={maximized ? '还原' : '最大化'}
+              onClick={() => void windowCloser.toggleMaximize()}
+            >
+              {maximized ? (
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                  <rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" />
+                  <path d="M2.5 2.5v-2h7v7h-2" fill="none" stroke="currentColor" />
+                </svg>
+              ) : (
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                  <rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" />
+                </svg>
+              )}
+            </button>
+            <button
+              className="close"
+              aria-label="关闭"
+              title="关闭"
+              onClick={() => guard({ kind: 'exit-app' })}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" />
+              </svg>
+            </button>
           </span>
         </div>
 
@@ -1199,6 +1279,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         onOpenModal={setModal}
         importExportDisabled={!workspaceId}
       />
+
+      {/* 自绘边缘缩放边条（design D6）：贴窗口内沿的透明窄条 */}
+      <ResizeStrips windowApi={windowCloser} />
 
       {modal === 'cookies' && (
         <Modal title="Cookie" onClose={() => setModal(null)}>

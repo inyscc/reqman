@@ -144,8 +144,19 @@ textarea {
 .sidebar-body {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 10px;
+  overflow: hidden;
+  padding: 0;
+  /* 必须建成 flex 列容器，子节点（.stack / .env-panel）的 flex:1;min-height:0
+   * 才能生效，进而让内层 .tree-root / .env-list 的 overflow:auto 拿到有界高度。
+   * 否则它们高度塌成内容高度，被本元素的 overflow:hidden 裁掉且无法滚动。 */
+  display: flex;
+  flex-direction: column;
+}
+
+/* 仅侧栏树容器滚动，工具栏钉在顶部（change: polish-sidebar-and-tables） */
+.sidebar-body > .stack {
+  flex: 1;
+  min-height: 0;
 }
 
 .main {
@@ -218,6 +229,121 @@ textarea {
   max-width: 180px;
   padding: 2px 4px;
   font-size: 12px;
+}
+
+/*
+ * 页面内窗口控制（change: add-in-page-window-controls）：
+ * 会话标签行最右端的最小化 / 最大化 / 关闭。关闭按钮悬停用危险色，贴近惯例。
+ */
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.window-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.window-controls button:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.window-controls button.close:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* 会话标签行是事实上的标题栏（design D5）：行内文字不可选中，
+ * 避免拖拽 / 双击手势带出浏览器原生文本选择 */
+.session-tab,
+.session-tab .badge,
+.session-tab .name {
+  user-select: none;
+}
+
+/* 自绘边缘缩放边条（design D6）：贴窗口内沿的透明窄条，默认不可见。
+ * 宽度 5px（边）/12px（角），低于模态（z-index 20）与节点菜单（20），
+ * 高于常规内容；z 序设计保证弹层出现时弹层优先接收点击。 */
+.resize-strip {
+  position: fixed;
+  z-index: 10;
+}
+
+.resize-strip.n {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 5px;
+  cursor: n-resize;
+}
+
+.resize-strip.s {
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 5px;
+  cursor: s-resize;
+}
+
+.resize-strip.e {
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 5px;
+  cursor: e-resize;
+}
+
+.resize-strip.w {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 5px;
+  cursor: w-resize;
+}
+
+.resize-strip.nw {
+  top: 0;
+  left: 0;
+  width: 12px;
+  height: 12px;
+  cursor: nw-resize;
+}
+
+.resize-strip.ne {
+  top: 0;
+  right: 0;
+  width: 12px;
+  height: 12px;
+  cursor: ne-resize;
+}
+
+.resize-strip.sw {
+  bottom: 0;
+  left: 0;
+  width: 12px;
+  height: 12px;
+  cursor: sw-resize;
+}
+
+.resize-strip.se {
+  bottom: 0;
+  right: 0;
+  width: 12px;
+  height: 12px;
+  cursor: se-resize;
 }
 
 .crumb-bar {
@@ -421,6 +547,8 @@ textarea {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  flex: 1;
+  padding: 10px;
 }
 
 /* 环境变量编辑器现在铺在主区（design D8）：VariablesPanel 原先是给 260px 侧栏写的，
@@ -476,7 +604,9 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  flex: none;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .env-item {
@@ -624,7 +754,10 @@ textarea {
 }
 
 .tree-root {
-  padding-left: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 10px 10px;
 }
 
 /* Collections tab 的工具栏（change: add-collection-search-and-env-management）：
@@ -634,6 +767,13 @@ textarea {
   align-items: center;
   gap: 4px;
   min-width: 0;
+  flex: none;
+  padding-top: 8px;
+}
+
+/* 树行禁选：双击递归折叠不再选中名称文字（change: polish-sidebar-and-tables） */
+.node {
+  user-select: none;
 }
 
 .tree-toolbar > .tree-search {
@@ -969,8 +1109,8 @@ table {
 th,
 td {
   text-align: left;
-  padding: 3px 6px;
-  border-bottom: 1px solid var(--border);
+  padding: 4px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   vertical-align: top;
   font-size: 12px;
 }
@@ -978,12 +1118,70 @@ td {
 th {
   color: var(--muted);
   font-weight: 500;
+  text-align: left;
+}
+
+/* 全局细滚动条：纤细、透明轨道，贴近悬浮观感（change: polish-sidebar-and-tables） */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(16, 24, 40, 0.28);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(16, 24, 40, 0.28) transparent;
+}
+
+/* Postman 风格表格：表头吸顶 + 行 hover 高亮 */
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+
+tbody tr:hover {
+  background: var(--panel-2);
+}
+
+/* 行操作按钮（删除 / 变量揭示）按需显现：hover 或行内焦点时显示，默认隐藏 */
+tbody tr .row-delete,
+tbody tr .var-actions {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+tbody tr:hover .row-delete,
+tbody tr:focus-within .row-delete,
+tbody tr:hover .var-actions,
+tbody tr:focus-within .var-actions {
+  opacity: 1;
 }
 
 td input,
 td select,
 td button {
   padding: 3px 6px;
+}
+
+/* 编辑单元格时的焦点态：用细的强调色焦点环替代浏览器默认的粗黑轮廓
+ * （浏览器默认 outline 在 Windows/Chrome 下是一圈粗黑边，不是我们想要的风格）。
+ * box-shadow 不占布局，避免焦点出现时输入框跳动。 */
+td input:focus,
+td select:focus,
+td textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 /* 幽灵行：表格末尾常驻的空行，用户一输入就变成普通行。
@@ -1008,6 +1206,8 @@ td button {
 .ghost-row select:hover,
 .ghost-row select:focus {
   border-bottom-color: var(--accent);
+  /* 否则默认焦点轮廓会和这条虚线下划线一起出现，变成一圈粗黑边 */
+  outline: none;
 }
 
 .ghost-row input::placeholder {
