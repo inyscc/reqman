@@ -1107,7 +1107,7 @@ textarea {
   padding-top: var(--space-4);
 }
 
-/* 树行禁选：双击递归折叠不再选中名称文字（change: polish-sidebar-and-tables） */
+/* 树行禁选：单击 / 双击行名都不会选中名称文字（change: polish-sidebar-and-tables） */
 .node {
   user-select: none;
 }

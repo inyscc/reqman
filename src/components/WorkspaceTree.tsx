@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { FolderIcon } from './icons';
 import { NodeMenu, type MenuItem } from './NodeMenu';
 import type { CollectionTree, TreeNode } from '../lib/types';
@@ -41,8 +41,8 @@ interface TreeActions {
   onRenameEntity: (entity: EntitySelection) => void;
   onRenameRequest: (id: string) => void;
   onToggle: (id: string) => void;
-  /** 双击目录名：对当前节点及其全部后代目录做递归折叠/展开。 */
-  onToggleRecursive: (id: string, childNodes: TreeNode[]) => void;
+  /** 把该目录置为展开（已展开则无变化）：新建子条目之前调用，保证新条目落在可见层级。 */
+  onExpand: (id: string) => void;
 }
 
 /** 树的视图态：折叠、hover/聚焦、菜单与删除确认，全部不写入后端。 */
@@ -116,15 +116,25 @@ export function filterTrees(trees: CollectionTree[], query: string): CollectionT
 
 /** 行在指针悬停或获得键盘焦点时才亮出「⋯」，默认界面上没有常驻按钮。 */
 function useRowReveal(id: string, view: TreeView) {
+  /**
+   * 指针或焦点在**行内**换元素（行容器 → 行内的「⋯」按钮）同样会冒泡出
+   * mouseleave / focusout。若把它当成「离开本行」，行容器会在 mousedown 与
+   * mouseup 之间把「⋯」卸载掉，随后的 click 只能落到共同祖先（行容器）上——
+   * 菜单就会永远打不开。只有真的出去了才熄灯。
+   *
+   * 这个坑 jsdom 看不出来：`fireEvent.click` 不产生 mousedown、也不移动焦点。
+   */
+  const leaveRow = (event: { currentTarget: HTMLElement; relatedTarget: EventTarget | null }) => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && event.currentTarget.contains(next)) return;
+    if (view.menuId !== id) view.setActive(null);
+  };
+
   return {
     onMouseEnter: () => view.setActive(id),
-    onMouseLeave: () => {
-      if (view.menuId !== id) view.setActive(null);
-    },
+    onMouseLeave: leaveRow,
     onFocus: () => view.setActive(id),
-    onBlur: () => {
-      if (view.menuId !== id) view.setActive(null);
-    },
+    onBlur: leaveRow,
   };
 }
 
@@ -144,17 +154,21 @@ function MoreButton({ id, view }: { id: string; view: TreeView }) {
   );
 }
 
-/** 单击选中实体的延迟阈值（毫秒）：用于把「单击」和「双击」区分开，双击时不选中。 */
-const SELECT_DEBOUNCE_MS = 200;
-
-/** 收集子树里所有文件夹节点 id（不含请求叶子），深度优先遍历其 children。 */
-function collectFolderIds(nodes: TreeNode[]): string[] {
+/** 收集整棵树里全部目录 id（集合根 + 全部后代文件夹），供工具栏「全部折叠」一次写入。 */
+function collectDirectoryIds(trees: CollectionTree[]): string[] {
   const ids: string[] = [];
-  for (const node of nodes) {
-    if (node.kind === 'folder') {
-      ids.push(node.id);
-      ids.push(...collectFolderIds(node.children));
+  const walk = (nodes: TreeNode[]) => {
+    for (const node of nodes) {
+      if (node.kind === 'folder') {
+        ids.push(node.id);
+        walk(node.children);
+      }
     }
+  };
+
+  for (const tree of trees) {
+    ids.push(tree.collection.id);
+    walk(tree.children);
   }
   return ids;
 }
@@ -168,7 +182,6 @@ function EntryRow({
   selected,
   actions,
   view,
-  childNodes,
   children,
 }: {
   id: string;
@@ -178,8 +191,6 @@ function EntryRow({
   selected: boolean;
   actions: TreeActions;
   view: TreeView;
-  /** 子节点（仅用于双击时计算后代目录 id）。 */
-  childNodes: TreeNode[];
   children?: ReactNode;
 }) {
   // 搜索态下强制展开：命中项被折叠藏起来就没有搜索可言
@@ -188,37 +199,23 @@ function EntryRow({
   const entity: EntitySelection = { kind, id, collectionId };
   const reveal = useRowReveal(id, view);
 
-  // 单击选中走去抖：双击发生时取消待提交的选中，使双击只做递归折叠/展开（不切主区）。
-  const selectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (selectTimer.current) clearTimeout(selectTimer.current);
-    },
-    [],
-  );
-  const scheduleSelect = () => {
-    if (selectTimer.current) clearTimeout(selectTimer.current);
-    selectTimer.current = setTimeout(() => {
-      selectTimer.current = null;
-      actions.onSelectEntity(entity);
-    }, SELECT_DEBOUNCE_MS);
-  };
-  const cancelSelect = () => {
-    if (selectTimer.current) {
-      clearTimeout(selectTimer.current);
-      selectTimer.current = null;
-    }
-  };
-
+  // 新建的条目落在这一行下面，所以先确保这一行是展开的（否则新条目生出来就被折叠藏住）。
   const menu: MenuItem[] = [
     {
       label: '新建请求',
-      onSelect: () => actions.onNewRequest(collectionId, kind === 'folder' ? id : null),
+      onSelect: () => {
+        actions.onExpand(id);
+        actions.onNewRequest(collectionId, kind === 'folder' ? id : null);
+      },
     },
     {
       label: kind === 'folder' ? '新建子文件夹' : '新建文件夹',
-      onSelect: () => actions.onNewFolder(collectionId, kind === 'folder' ? id : null),
+      onSelect: () => {
+        actions.onExpand(id);
+        actions.onNewFolder(collectionId, kind === 'folder' ? id : null);
+      },
     },
+    { label: '编辑脚本', onSelect: () => actions.onSelectEntity(entity) },
     { label: '重命名', onSelect: () => actions.onRenameEntity(entity) },
     {
       label: kind === 'folder' ? '删除文件夹' : '删除集合',
@@ -234,17 +231,17 @@ function EntryRow({
         className={`node ${selected ? 'selected' : ''}`}
         role="button"
         tabIndex={0}
-        title={`编辑${kind === 'collection' ? '集合' : '文件夹'}脚本`}
-        onClick={() => scheduleSelect()}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') actions.onSelectEntity(entity);
+        title={`${expanded ? '折叠' : '展开'} ${name}`}
+        onClick={(event) => {
+          // 双击的第二击不重复切换，否则会「展开后又立刻折回」地闪一下
+          if (event.detail === 2) return;
+          actions.onToggle(id);
         }}
-        onDoubleClick={(event) => {
-          if (view.searching) return;
-          const target = event.target as HTMLElement;
-          if (target.closest('.tree-toggle') || target.closest('.node-more')) return;
-          cancelSelect();
-          actions.onToggleRecursive(id, childNodes);
+        onKeyDown={(event) => {
+          // Enter 只归行容器自己。行内还有折叠箭头、「⋯」与菜单项，它们的 keydown 会
+          // 冒泡到这里，而浏览器对聚焦的按钮按 Enter 还会再补一次 click——不拦住就会
+          // 出现「在箭头上按 Enter 净零无效」「在「⋯」上按 Enter 把目录折叠掉」。
+          if (event.key === 'Enter' && event.target === event.currentTarget) actions.onToggle(id);
         }}
         {...reveal}
       >
@@ -255,6 +252,8 @@ function EntryRow({
           disabled={view.searching}
           onClick={(event) => {
             event.stopPropagation();
+            // 双击箭头也只算一次，避免「折了又展开」的往返闪烁
+            if (event.detail === 2) return;
             actions.onToggle(id);
           }}
         >
@@ -324,7 +323,10 @@ function RequestRow({
         tabIndex={0}
         onClick={() => actions.onSelectRequest(node.id)}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') actions.onSelectRequest(node.id);
+          // 同 EntryRow：Enter 只归行容器自己，别让「⋯」与菜单项上的 Enter 顺带把请求打开
+          if (event.key === 'Enter' && event.target === event.currentTarget) {
+            actions.onSelectRequest(node.id);
+          }
         }}
         {...reveal}
       >
@@ -374,7 +376,6 @@ function TreeNodes({
             selected={selectedEntity?.kind === 'folder' && selectedEntity.id === node.id}
             actions={actions}
             view={view}
-            childNodes={node.children}
           >
             <TreeNodes
               nodes={node.children}
@@ -400,19 +401,24 @@ function TreeNodes({
 }
 
 /**
- * 工具栏（对齐 Postman）：搜索框 + 两个图标按钮。
+ * 工具栏：搜索框 + 三个图标按钮（全部折叠 / 新建集合 / 导入）。
  *
- * tab 名已经是 Collections，行内不再重复「集合」标题；新建与导入是图标按钮，
- * 文字只留在 `aria-label` / `title` 里（可访问性与悬停提示都不丢）。
+ * tab 名已经是 Collections，行内不再重复「集合」标题；三个按钮都只有图标，
+ * 文字留在 `aria-label` / `title` 里（可访问性与悬停提示都不丢）。
  */
 function TreeToolbar({
   query,
+  searching,
   onQuery,
+  onCollapseAll,
   onNewCollection,
   onImport,
 }: {
   query: string;
+  /** 搜索态：树被强制全展开，「全部折叠」与行内折叠箭头一样不可用。 */
+  searching: boolean;
   onQuery: (next: string) => void;
+  onCollapseAll: () => void;
   onNewCollection: () => void;
   onImport: () => void;
 }) {
@@ -444,6 +450,21 @@ function TreeToolbar({
           </button>
         )}
       </div>
+
+      <button
+        className="icon-button"
+        aria-label="全部折叠"
+        title="全部折叠"
+        disabled={searching}
+        onClick={onCollapseAll}
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path
+            d="M8 2 13 7 11.6 8.4 8 4.8 4.4 8.4 3 7ZM8 8.6 13 13.6 11.6 15 8 11.4 4.4 15 3 13.6Z"
+            fill="currentColor"
+          />
+        </svg>
+      </button>
 
       <button
         className="icon-button"
@@ -506,21 +527,29 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     onDeleteRequest,
     onRenameEntity,
     onRenameRequest,
-    onToggle: (id) =>
+    onToggle: (id) => {
+      // 搜索态强制全展开，此时改折叠集合只会污染用户原来记住的状态
+      if (searching) return;
       setCollapsed((previous) => {
         const next = new Set(previous);
         if (next.has(id)) next.delete(id);
         else next.add(id);
         return next;
-      }),
-    onToggleRecursive: (id, childNodes) =>
+      });
+    },
+    onExpand: (id) =>
       setCollapsed((previous) => {
+        if (!previous.has(id)) return previous;
         const next = new Set(previous);
-        const subtree = [id, ...collectFolderIds(childNodes)];
-        if (next.has(id)) subtree.forEach((nodeId) => next.delete(nodeId));
-        else subtree.forEach((nodeId) => next.add(nodeId));
+        next.delete(id);
         return next;
       }),
+  };
+
+  /** 「全部折叠」：把整棵树的展开状态一次归零；搜索态下与折叠控件一样不动折叠集合。 */
+  const collapseAll = () => {
+    if (searching) return;
+    setCollapsed(new Set(collectDirectoryIds(trees)));
   };
 
   const view: TreeView = {
@@ -538,7 +567,9 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     <div className="stack" data-testid="workspace-tree">
       <TreeToolbar
         query={query}
+        searching={searching}
         onQuery={setQuery}
+        onCollapseAll={collapseAll}
         onNewCollection={onNewCollection}
         onImport={onImport}
       />
@@ -564,7 +595,6 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
             }
             actions={actions}
             view={view}
-            childNodes={tree.children}
           >
             <TreeNodes
               nodes={tree.children}
