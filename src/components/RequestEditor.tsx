@@ -149,10 +149,10 @@ function KeyValueTable({
       <table>
         <thead>
           <tr>
-            <th style={{ width: 28 }} />
+            <th className="col-check" />
             <th>名称</th>
             <th>值</th>
-            <th style={{ width: 28 }} />
+            <th className="col-check" />
           </tr>
         </thead>
         <tbody>
@@ -277,8 +277,9 @@ export function RequestEditor(props: RequestEditorProps) {
     <div className="request-editor">
       <div className="request-toolbar">
         <select
+          className="method-select"
           aria-label="请求方法"
-          style={{ width: 120 }}
+          data-method={draft.method}
           value={draft.method}
           onChange={(event) => patch({ method: event.target.value })}
         >
@@ -312,7 +313,7 @@ export function RequestEditor(props: RequestEditorProps) {
 
       {preview}
 
-      <div className="tabs" style={{ padding: '4px 10px' }}>
+      <div className="tabs request-tabs">
         {TABS.map((entry) => (
           <button
             key={entry.value}
@@ -539,11 +540,11 @@ function FormDataEditor({
       <table>
         <thead>
           <tr>
-            <th style={{ width: 28 }} />
+            <th className="col-check" />
             <th>字段</th>
             <th>类型</th>
             <th>内容 / 文件</th>
-            <th style={{ width: 28 }} />
+            <th className="col-check" />
           </tr>
         </thead>
         <tbody>
@@ -753,8 +754,8 @@ function AuthEditor({
             }
           />
           <select
+            className="auth-location-select"
             aria-label="API Key 位置"
-            style={{ width: 120 }}
             value={auth.api_key?.location ?? 'header'}
             onChange={(event) =>
               onChange({
@@ -801,7 +802,7 @@ function SettingsEditor({
   return (
     <div className="stack">
       <div className="row">
-        <label className="row" style={{ width: 200 }}>
+        <label className="row auth-label-wide">
           <span className="muted">超时（毫秒）</span>
         </label>
         <input
@@ -821,7 +822,6 @@ function SettingsEditor({
         <input
           className="checkbox"
           type="checkbox"
-          style={{ width: 'auto' }}
           checked={settings.follow_redirects}
           onChange={(event) => onChange({ ...settings, follow_redirects: event.target.checked })}
         />
@@ -832,7 +832,6 @@ function SettingsEditor({
         <input
           className="checkbox"
           type="checkbox"
-          style={{ width: 'auto' }}
           checked={settings.verify_tls}
           onChange={(event) => onChange({ ...settings, verify_tls: event.target.checked })}
         />
@@ -846,7 +845,7 @@ function SettingsEditor({
       )}
 
       <div className="row">
-        <span className="muted" style={{ width: 90 }}>
+        <span className="muted auth-label">
           协议版本
         </span>
         <select
@@ -863,7 +862,7 @@ function SettingsEditor({
       </div>
 
       <div className="row">
-        <span className="muted" style={{ width: 90 }}>
+        <span className="muted auth-label">
           请求级代理
         </span>
         <select

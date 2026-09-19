@@ -629,14 +629,17 @@ describe('前端数据流骨架', () => {
     expect(await screen.findByText('https://api.test/{{missing}}/users')).toBeTruthy();
   });
 
-  it('面包屑显示所属集合与请求名，请求操作行承载保存（rework-app-layout）', async () => {
+  it('面包屑并入会话标签行，请求操作与保存都在这一行（rework-visual-system-and-app-chrome）', async () => {
     const { client } = harness();
-    const { container } = render(<App client={client} />);
+    render(<App client={client} />);
     await openRequest();
 
-    const crumb = container.querySelector('.crumb-bar') as HTMLElement;
-    expect(crumb.textContent).toContain('我的集合');
+    // 顶部只有一行：所属集合名与可编辑的请求名都在会话标签内部
+    const tab = screen.getByTestId('session-tab');
+    expect(tab.textContent).toContain('我的集合');
     expect((screen.getByLabelText('请求名称') as HTMLInputElement).value).toBe('我的请求');
+    // 原先那条独立的面包屑行已经不存在
+    expect(document.querySelector('.crumb-bar')).toBeNull();
     // 未改动时没有「未保存」标记
     expect(screen.queryByText('未保存')).toBeNull();
 
@@ -802,8 +805,11 @@ describe('前端数据流骨架', () => {
 
     await waitFor(() => expect(screen.getByTestId('status').textContent).toContain('201'));
     expect(screen.getByTestId('status').textContent).toContain('Created');
-    expect(screen.getByText('42 ms')).toBeTruthy();
-    expect(screen.getByText('HTTP/1.1')).toBeTruthy();
+    // 元信息收成一段紧凑文本，状态码仍单独着色（change:
+    // rework-visual-system-and-app-chrome，design D6）
+    const meta = screen.getByTestId('response-meta').textContent ?? '';
+    expect(meta).toContain('42 ms');
+    expect(meta).toContain('HTTP/1.1');
   });
 
   it('发送失败时把后端分类错误呈现给用户', async () => {
@@ -3180,6 +3186,66 @@ describe('页面内窗口控制', () => {
 
     await waitFor(() => expect(win.calls.startDragging).toBe(1));
     await waitFor(() => expect(win.calls.toggleMaximize).toBe(1));
+  });
+
+  it('分隔线只在选中请求时出现，拖动改比例、松手才落库（spec: 主区左右分栏与可调比例）', async () => {
+    const { client, settingsSet } = harness();
+    const { container } = render(<App client={client} />);
+
+    // 未选中请求：请求区独占整宽，不存在可拖的分隔线
+    expect(screen.queryByTestId('split-handle')).toBeNull();
+
+    await openRequest();
+    const handle = screen.getByTestId('split-handle');
+
+    // jsdom 不排版，几何要自己给：容器 1000px 宽、起点在 0
+    const main = container.querySelector('.main') as HTMLElement;
+    main.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        width: 1000,
+        top: 0,
+        right: 1000,
+        bottom: 800,
+        height: 800,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 500 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 620 });
+
+    await waitFor(() => expect(main.style.getPropertyValue('--split')).toBe('62%'));
+    // 拖动过程中不落库：每一帧都写一次存储没有意义
+    expect(settingsSet).not.toHaveBeenCalledWith('ui_layout', 'w1', expect.anything());
+
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 620 });
+    await waitFor(() => expect(settingsSet).toHaveBeenCalledWith('ui_layout', 'w1', '0.62'));
+  });
+
+  it('分栏比例按工作区记住（spec: 比例按工作区记住）', async () => {
+    const { client, settingsSet } = harness();
+    // 模拟该工作区此前调过比例
+    await settingsSet('ui_layout', 'w1', '0.7');
+
+    const { container } = render(<App client={client} />);
+    await openRequest();
+
+    const main = container.querySelector('.main') as HTMLElement;
+    await waitFor(() => expect(main.style.getPropertyValue('--split')).toBe('70%'));
+  });
+
+  it('读回越界或读不懂的比例时回落，不会把某一侧压没（spec: 比例存在下限）', async () => {
+    const { client, settingsSet } = harness();
+    await settingsSet('ui_layout', 'w1', '0.95');
+
+    const { container } = render(<App client={client} />);
+    await openRequest();
+
+    const main = container.querySelector('.main') as HTMLElement;
+    // 上限钳制：0.95 收到 0.75，响应区仍留有可读宽度
+    await waitFor(() => expect(main.style.getPropertyValue('--split')).toBe('75%'));
   });
 
   it('缩放边条：八个方向各自映射到 startResizeDragging', async () => {

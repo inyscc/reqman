@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { MouseEvent as ReactMouseEvent } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
 import './App.css';
 import { BottomBar, type ModalKind } from './components/BottomBar';
 import { CookiePanel } from './components/CookiePanel';
 import { EntityScriptPanel } from './components/EntityScriptPanel';
 import { EnvironmentsPanel } from './components/EnvironmentsPanel';
+import { CollectionIcon, FolderIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
 import { PreviewStrip } from './components/PreviewStrip';
@@ -12,10 +13,12 @@ import { RequestEditor } from './components/RequestEditor';
 import { ResizeStrips, isInteractiveSessionBarTarget } from './components/ResizeStrips';
 import { ResponsePanel } from './components/ResponsePanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { SplitHandle } from './components/SplitHandle';
 import { VariablesPanel } from './components/VariablesPanel';
 import { WorkspaceTree, type EntitySelection } from './components/WorkspaceTree';
 import { commands as defaultCommands, describeError, type Commands } from './lib/commands';
 import { createEditingRegistry, SURFACE_PRIORITY } from './lib/editing';
+import { readSplitRatio, SPLIT_DEFAULT, writeSplitRatio } from './lib/layout';
 import {
   allowScriptExecution,
   isScriptExecutionAllowed,
@@ -155,6 +158,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [environmentId, setEnvironmentId] = useState<string | null>(null);
   const [variables, setVariables] = useState<Variable[]>([]);
+  /** 请求区与响应区的分栏比例（design D7）；以工作区为单位持久化。 */
+  const [splitRatio, setSplitRatio] = useState(SPLIT_DEFAULT);
   /** 侧栏内部 tab：Collections / Environments（design D2）。 */
   const [sidebarTab, setSidebarTab] = useState<'collections' | 'environments'>('collections');
   /** 低频面板的单例模态（design D5）：非空时打开对应弹窗，同一时间至多一个。 */
@@ -273,6 +278,25 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       }
     })();
   }, [workspaceId, loadTree, loadEnvironments]);
+
+  // 分栏比例：切换工作区时读回该工作区上次调整的值（design D7）。
+  // 读不到就回落默认——一条显示偏好不该把界面拖进错误态。
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+
+    void readSplitRatio(client, workspaceId)
+      .then((value) => {
+        if (!cancelled) setSplitRatio(value);
+      })
+      .catch(() => {
+        if (!cancelled) setSplitRatio(SPLIT_DEFAULT);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceId]);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -930,6 +954,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     }
   };
 
+  /** 松手才落库：拖动过程中每一帧都写一次存储没有意义（design D7）。 */
+  const commitSplit = (ratio: number) => {
+    if (!workspaceId) return;
+    void writeSplitRatio(client, workspaceId, ratio);
+  };
+
   /**
    * 会话标签行的手动拖拽与双击最大化（design D5）。
    *
@@ -1005,10 +1035,16 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         </div>
       </aside>
 
-      <main className={`main ${draft && !showEnvironmentEditor ? 'with-response' : ''}`}>
+      {/* 分栏比例通过 --split 传给 CSS：拖动时只改这一个变量（design D7） */}
+      <main
+        className={`main ${draft && !showEnvironmentEditor ? 'with-response' : ''}`}
+        style={{ '--split': `${splitRatio * 100}%` } as CSSProperties}
+      >
         {/* 会话标签：视觉壳，始终最多一个（spec: 会话标签视觉壳）。
             这一行同时是事实上的标题栏：拖拽移动与双击最大化挂在这里。 */}
         <div className="session-bar" data-testid="session-bar" onMouseDown={onSessionBarMouseDown}>
+          {/* 标签 + 面包屑合成同一个元素（design D3）：主区顶部只有这一行，
+              当前请求名在全界面只渲染这一次（原先标签与面包屑各渲染一次）。 */}
           {showEnvironmentEditor ? (
             <div className="session-tab" data-testid="session-tab">
               <span className="badge">环境</span>
@@ -1016,8 +1052,22 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             </div>
           ) : draft ? (
             <div className="session-tab" data-testid="session-tab">
-              <span className="badge">{draft.method}</span>
-              <span className="name">{draft.name}</span>
+              {crumbCollectionName && (
+                <>
+                  <span className="crumb">{crumbCollectionName}</span>
+                  <span className="crumb-sep">›</span>
+                </>
+              )}
+              <span className="method-badge" data-method={draft.method}>
+                {draft.method}
+              </span>
+              <input
+                ref={requestNameRef}
+                className="crumb-name"
+                aria-label="请求名称"
+                value={draft.name}
+                onChange={(event) => editDraft({ ...draft, name: event.target.value })}
+              />
               <button
                 className="ghost"
                 aria-label="关闭标签"
@@ -1026,12 +1076,26 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 ×
               </button>
             </div>
-          ) : selectedEntity ? (
+          ) : selectedEntity && entityDraft ? (
             <div className="session-tab" data-testid="session-tab">
-              <span className="badge">
-                {selectedEntity.kind === 'collection' ? '集合' : '文件夹'}
-              </span>
-              <span className="name">{entityDraft?.name ?? ''}</span>
+              {/* 种类用图标标注，不用「集合」「文件夹」两个汉字——那两个词
+                  和名称抢同一行的横向空间，而图标一眼就能分辨（design D3）。 */}
+              {selectedEntity.kind === 'collection' ? (
+                <CollectionIcon className="tab-kind-icon" role="img" aria-label="集合" />
+              ) : (
+                <FolderIcon className="tab-kind-icon" role="img" aria-label="文件夹" />
+              )}
+              <input
+                ref={entityNameRef}
+                className="crumb-name"
+                aria-label={selectedEntity.kind === 'collection' ? '集合名称' : '文件夹名称'}
+                value={entityDraft.name}
+                onChange={(event) => setEntityDraft({ ...entityDraft, name: event.target.value })}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void saveEntityName();
+                }}
+                onBlur={() => void saveEntityName()}
+              />
             </div>
           ) : (
             <span className="muted">没有打开的请求</span>
@@ -1041,6 +1105,35 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               与侧栏 Environments tab 的激活态共用同一份状态；属于工作区级而非请求级，
               因此没有选中请求时同样可见。它自带「无环境 / 环境名」，不再另加标签。 */}
           <span className="grow" />
+
+          {/* 请求级操作（spec: 面包屑与请求操作行）。未保存标记与保存入口只在有改动时
+              出现——默认界面上不存在「保存」按钮。 */}
+          {draft && dirty && (
+            <>
+              <span className="badge warn">未保存</span>
+              <button
+                data-testid="save-request"
+                title="保存（Ctrl+S）"
+                onClick={() => void saveDraft()}
+                disabled={busy}
+              >
+                保存
+              </button>
+            </>
+          )}
+          {/* 另存为 / 删除：保留文字标签，指针悬停或行内键盘聚焦时显现（见 App.css）。
+             它们与标签、环境选择器、窗口控制按钮同在会话标签行。 */}
+          {draft && (
+            <span className="session-actions">
+              <button onClick={() => duplicate()} disabled={busy}>
+                另存为
+              </button>
+              <button onClick={() => removeRequest()} disabled={busy}>
+                删除
+              </button>
+            </span>
+          )}
+
           <span className="env-select">
             <select
               aria-label="环境"
@@ -1093,67 +1186,6 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               </svg>
             </button>
           </span>
-        </div>
-
-        {/* 面包屑 + 请求级操作（spec: 面包屑与请求操作行） */}
-        <div className="crumb-bar">
-          {showEnvironmentEditor ? (
-            <>
-              <span className="crumb">环境</span>
-              <span className="crumb-sep">/</span>
-              <span className="crumb">{environmentName}</span>
-            </>
-          ) : draft ? (
-            <>
-              {crumbCollectionName && <span className="crumb">{crumbCollectionName}</span>}
-              {crumbCollectionName && <span className="crumb-sep">/</span>}
-              <input
-                ref={requestNameRef}
-                className="crumb-name"
-                aria-label="请求名称"
-                value={draft.name}
-                onChange={(event) => editDraft({ ...draft, name: event.target.value })}
-              />
-              <span className="grow" />
-              {/* 未保存标记与保存入口只在有改动时出现：默认界面上没有「保存」按钮 */}
-              {dirty && (
-                <>
-                  <span className="badge warn">未保存</span>
-                  <button
-                    data-testid="save-request"
-                    title="保存（Ctrl+S）"
-                    onClick={() => void saveDraft()}
-                    disabled={busy}
-                  >
-                    保存
-                  </button>
-                </>
-              )}
-              <button onClick={() => duplicate()} disabled={busy}>
-                另存为
-              </button>
-              <button onClick={() => removeRequest()} disabled={busy}>
-                删除
-              </button>
-            </>
-          ) : selectedEntity && entityDraft ? (
-            <>
-              <input
-                ref={entityNameRef}
-                className="crumb-name"
-                aria-label={selectedEntity.kind === 'collection' ? '集合名称' : '文件夹名称'}
-                value={entityDraft.name}
-                onChange={(event) => setEntityDraft({ ...entityDraft, name: event.target.value })}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') void saveEntityName();
-                }}
-                onBlur={() => void saveEntityName()}
-              />
-              <span className="grow" />
-            </>
-          ) : (
-            <span className="crumb">未选择请求</span>
-          )}
         </div>
 
         <div className="request-region">
@@ -1248,23 +1280,27 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           )}
         </div>
 
-        {/* 响应栏只在选中请求时出现（spec: 主区左右分栏与响应栏可见性）；
-            主区被环境编辑器占用时不出现——响应属于请求，不属于环境 */}
+        {/* 响应栏只在选中请求时出现（spec: 主区左右分栏与可调比例）；
+            主区被环境编辑器占用时不出现——响应属于请求，不属于环境。
+            分隔线的命中区与响应区同生同灭：请求区独占整宽时不存在可拖的分隔线。 */}
         {draft && !showEnvironmentEditor && (
-          <div className="response-region">
-            <ResponsePanel
-              response={response}
-              busy={busy}
-              error={null}
-              onSaveFull={() => void saveFullResponse()}
-              scriptConsole={scriptReport?.console}
-              scriptAssertions={scriptReport?.assertions}
-              scriptError={scriptReport?.error ?? null}
-              visualizerHtml={
-                scriptReport?.visualizer ? renderVisualizer(scriptReport.visualizer) : null
-              }
-            />
-          </div>
+          <>
+            <SplitHandle ratio={splitRatio} onRatio={setSplitRatio} onCommit={commitSplit} />
+            <div className="response-region">
+              <ResponsePanel
+                response={response}
+                busy={busy}
+                error={null}
+                onSaveFull={() => void saveFullResponse()}
+                scriptConsole={scriptReport?.console}
+                scriptAssertions={scriptReport?.assertions}
+                scriptError={scriptReport?.error ?? null}
+                visualizerHtml={
+                  scriptReport?.visualizer ? renderVisualizer(scriptReport.visualizer) : null
+                }
+              />
+            </div>
+          </>
         )}
       </main>
 

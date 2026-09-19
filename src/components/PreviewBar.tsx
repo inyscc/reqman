@@ -20,7 +20,7 @@ export function UnresolvedWarning({ names }: { names: string[] }) {
   return (
     <div className="notice warn" role="alert" data-testid="unresolved-warning">
       以下变量未能解析，请求中会保留 <code>{'{{name}}'}</code> 原文：
-      <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+      <ul className="warn-list">
         {names.map((name) => (
           <li key={name} className="mono">
             {name}
@@ -52,7 +52,7 @@ export function PreviewBar({ preview, error, showUnresolved = true }: PreviewBar
     <div className="stack">
       <div className="row">
         <span className="badge">{preview.method}</span>
-        <span className="mono grow" style={{ wordBreak: 'break-all' }}>
+        <span className="mono grow break-all">
           {preview.url}
         </span>
         {preview.masked && <span className="badge">secret 已掩码</span>}
@@ -66,7 +66,7 @@ export function PreviewBar({ preview, error, showUnresolved = true }: PreviewBar
       {preview.cookies && preview.cookies.length > 0 && (
         <div className="row" data-testid="preview-cookies">
           <span className="badge">Cookie</span>
-          <span className="mono" style={{ wordBreak: 'break-all' }}>
+          <span className="mono break-all">
             {preview.cookies.map(([name, value]) => `${name}=${value}`).join('; ')}
           </span>
         </div>

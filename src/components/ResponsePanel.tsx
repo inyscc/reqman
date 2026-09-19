@@ -113,10 +113,18 @@ export function ResponsePanel({
             >
               {response.status} {response.status_text}
             </span>
-            <span className="badge">{response.elapsed_ms} ms</span>
-            <span className="badge">{humanBytes(response.size_bytes)}</span>
-            <span className="badge">{response.http_version}</span>
-            {response.via_proxy && <span className="badge">经代理</span>}
+            {/* 元信息收成一段紧凑文本：原先 4–5 个并列徽章会把头部挤到折行，
+                折行又让头部高度不可预测（design D6）。 */}
+            <span className="response-meta mono" data-testid="response-meta">
+              {[
+                `${response.elapsed_ms} ms`,
+                humanBytes(response.size_bytes),
+                response.http_version,
+                response.via_proxy ? '经代理' : null,
+              ]
+                .filter((part): part is string => part !== null)
+                .join(' · ')}
+            </span>
           </>
         )}
         <span className="grow" />
@@ -171,11 +179,11 @@ export function ResponsePanel({
           <div className="stack" data-testid="visualizer">
             <strong>可视化</strong>
             <iframe
+              className="preview visualizer-frame"
               title="可视化结果"
               data-testid="visualizer-frame"
               sandbox=""
               srcDoc={visualizerHtml}
-              style={{ minHeight: 120, border: '1px solid #ddd', width: '100%' }}
             />
           </div>
         )}
@@ -192,7 +200,7 @@ export function ResponsePanel({
               {response.headers.map(([name, value], index) => (
                 <tr key={`${name}-${index}`}>
                   <td className="mono">{name}</td>
-                  <td className="mono" style={{ wordBreak: 'break-all' }}>
+                  <td className="mono break-all">
                     {value}
                   </td>
                 </tr>
@@ -229,22 +237,28 @@ export function ResponsePanel({
               </div>
             )}
 
-            <div className="row">
-              <button
-                className={`tab ${!pretty ? 'active' : ''}`}
-                onClick={() => setPretty(false)}
-              >
-                原始
-              </button>
-              <button
-                className={`tab ${pretty ? 'active' : ''}`}
-                onClick={() => setPretty(true)}
-                disabled={!response.pretty_available}
-              >
-                格式化
-              </button>
+            <div className="response-view-bar">
+              {/* 与头部那组标签分属不同维度（容器视图 vs 呈现方式），因此不合并，
+                  只把它收紧成一行紧凑工具条（design D6）。 */}
+              <span className="tabs">
+                <button
+                  className={`tab ${!pretty ? 'active' : ''}`}
+                  onClick={() => setPretty(false)}
+                >
+                  原始
+                </button>
+                <button
+                  className={`tab ${pretty ? 'active' : ''}`}
+                  onClick={() => setPretty(true)}
+                  disabled={!response.pretty_available}
+                >
+                  格式化
+                </button>
+              </span>
               <span className="grow" />
-              <span className="muted mono">{response.content_type ?? '未知内容类型'}</span>
+              <span className="muted mono response-content-type">
+                {response.content_type ?? '未知内容类型'}
+              </span>
             </div>
 
             {plan?.kind === 'iframe' && response.body_text != null && (

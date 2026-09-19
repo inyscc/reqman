@@ -313,10 +313,9 @@ export function VariablesPanel({
               />
             </td>
             <td className="var-actions">
-              <label className="row" style={{ width: 'auto' }}>
+              <label className="row width-auto">
                 <input
                   className="checkbox"
-                  style={{ width: 'auto' }}
                   type="checkbox"
                   aria-label="新增变量标记为 secret"
                   checked={ghost.secret}

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { FolderIcon } from './icons';
 import { NodeMenu, type MenuItem } from './NodeMenu';
 import type { CollectionTree, TreeNode } from '../lib/types';
 
@@ -111,26 +112,6 @@ export function filterTrees(trees: CollectionTree[], query: string): CollectionT
   }
 
   return kept;
-}
-
-/** 文件夹图标：小号实心轮廓，与请求的方法标签形成区分。 */
-function FolderIcon() {
-  return (
-    <svg
-      className="tree-icon"
-      width="12"
-      height="12"
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        d="M1.5 3.5A1 1 0 0 1 2.5 2.5h3.2a1 1 0 0 1 .7.3l1 1h5.1a1 1 0 0 1 1 1v7.7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"
-        fill="currentColor"
-        opacity="0.55"
-      />
-    </svg>
-  );
 }
 
 /** 行在指针悬停或获得键盘焦点时才亮出「⋯」，默认界面上没有常驻按钮。 */
@@ -279,7 +260,7 @@ function EntryRow({
         >
           {expanded ? '▾' : '▸'}
         </button>
-        {kind === 'folder' && <FolderIcon />}
+        {kind === 'folder' && <FolderIcon className="tree-icon" aria-hidden="true" />}
         <span className="tree-name">{name}</span>
         <span className="grow" />
         {revealed && <MoreButton id={id} view={view} />}
@@ -348,7 +329,7 @@ function RequestRow({
         {...reveal}
       >
         <span className="tree-toggle-space" aria-hidden="true" />
-        <span className="tree-method" data-method={node.request?.method ?? 'GET'}>
+        <span className="method-badge" data-method={node.request?.method ?? 'GET'}>
           {node.request?.method ?? 'GET'}
         </span>
         <span className="tree-name">{node.name}</span>

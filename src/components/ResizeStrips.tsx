@@ -42,8 +42,16 @@ export function ResizeStrips({ windowApi }: { windowApi: WindowCloser }) {
   );
 }
 
-/** 判定一个 pointer/mouse 事件是否落在会话标签行的交互控件上（拖拽与双击最大化都要排除）。 */
+/**
+ * 判定一个 pointer/mouse 事件是否落在会话标签行的交互控件上（拖拽与双击最大化都要排除）。
+ *
+ * `input` / `textarea` 用通配而不是枚举具体的名称框类名：合并面包屑行之后
+ * （change: rework-visual-system-and-app-chrome，design D4），请求名与实体名两个
+ * 输入框都落进了这一行，而且将来再加输入控件也不会漏。
+ */
 export function isInteractiveSessionBarTarget(event: ReactMouseEvent<HTMLElement>): boolean {
   const target = event.target as HTMLElement | null;
-  return Boolean(target?.closest('button, select, .env-select, .window-controls'));
+  return Boolean(
+    target?.closest('button, select, input, textarea, .env-select, .window-controls'),
+  );
 }

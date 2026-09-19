@@ -1,19 +1,93 @@
 /*
- * 浅色单主题（change: rework-app-layout，design D9）。
- * 不提供深色变体；承载响应文档的沙箱 iframe 用自身白底，与此无关。
+ * 设计 token（change: rework-visual-system-and-app-chrome，design D0 / D1）。
+ *
+ * 浅色单主题：不提供深色变体（ui-layout「浅色配色」）；承载响应文档的沙箱
+ * iframe 用自身白底，与此无关。
+ *
+ * 命名约定：--bg / --panel / --panel-2 / --border / --text / --muted / --accent /
+ * --accent-fg / --danger / --warn / --ok 沿用既有名字——它们已被全文引用，改名
+ * 只会淹没 diff。新增的量按用途加前缀：--space-* / --radius-* / --shadow-* /
+ * --text-* / --ease-*。
  */
 :root {
-  --bg: #f6f7f9;
+  /* 冷中性色阶（design D0）：偏蓝的灰，而不是纯灰 */
+  --bg: #f7f8fa;
   --panel: #ffffff;
-  --panel-2: #f1f3f5;
-  --border: #e3e6ea;
-  --text: #1f2329;
-  --muted: #6b7280;
-  --accent: #1a73e8;
+  --panel-2: #f1f3f6;
+  --border: #e4e7ec;
+  --border-strong: #d3d8e0;
+  --text: #1c2024;
+  --muted: #667085;
+
+  /* 主色：靛蓝。--accent-soft 专供选中底，取代原先 color-mix 兑出来的褪色态 */
+  --accent: #4c6ef5;
   --accent-fg: #ffffff;
+  --accent-soft: #eef1fe;
+  --accent-strong: #3f5ce0;
+
+  /* 语义色 */
   --danger: #d92d20;
   --warn: #b54708;
   --ok: #067647;
+
+  /* 实底之上的前景色（强调色按钮、危险色按钮的悬停态） */
+  --fg-on-solid: #ffffff;
+
+  /* 凹陷表面（代码块等）与浮层之外的中性面 */
+  --surface-sunken: #f6f8fa;
+
+  /* 滚动条 */
+  --scrollbar-thumb: rgba(16, 24, 40, 0.28);
+
+  /* 模态遮罩 */
+  --scrim: rgba(16, 24, 40, 0.42);
+
+  /* 方法色：按是否幂等分两组（ui-layout「集合树的外观与密度」）。
+     颜色只表达「这个请求会不会改数据」，方法之间的区分由文字承担。 */
+  --method-safe: #067647;
+  --method-write: #b54708;
+
+  /* 顶部两行 chrome（侧栏 tab 行 / 会话标签行）的统一高度。
+     两行分处 .app 网格的两个格子，高度各自由内容撑，所以必须显式取同一个值——
+     否则侧栏那条下边线与主区那条下边线不在一条水平线上。 */
+  --chrome-row: 40px;
+
+  /* 侧栏的统一横向基线：工具栏、树、环境列表都从这里起，切 tab 时不横跳 */
+  --sidebar-inset: var(--space-4);
+
+  /* 间距：4 的倍数，首档 2px 是缝合值（原文里大量 1 / 3 / 5px 需要落点） */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 12px;
+  --space-6: 16px;
+
+  /* 圆角：2 档；徽章的 pill 直接写 999px，不占档位 */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  /* 浮起层次（design D0）：描边用 inset 阴影表达——不占布局、贴合圆角、
+     叠在任意背景上都不脏。真正的阴影只留给浮层。 */
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --shadow-2: 0 4px 12px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.04);
+  --shadow-3: 0 18px 48px rgba(16, 24, 40, 0.16);
+
+  /* 字号 4 档 */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-lg: 15px;
+
+  /* 缓动（design D0） */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+  /* 字体：纯系统栈。应用离线优先，不引入字体文件、不挂 CDN */
+  --font-ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  --font-mono: 'Cascadia Mono', Consolas, ui-monospace, SFMono-Regular, Menlo, monospace;
+
   color-scheme: light;
 }
 
@@ -31,21 +105,39 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
-  font: 13px/1.5 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: 1.5;
 }
 
 button {
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-5);
   cursor: pointer;
   font: inherit;
+  /* 悬停与按下都走 120ms（design D0 动效基线）：日常操作不给长动画 */
+  transition:
+    border-color 120ms var(--ease-out),
+    background 120ms var(--ease-out),
+    transform 120ms var(--ease-out);
+}
+
+/* 按下反馈：让按钮听起来见用户。scale 走合成层，不触发重排 */
+button:not(:disabled):active {
+  transform: scale(0.97);
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--accent);
+  border-color: var(--border-strong);
+}
+
+/* 统一焦点环，替代浏览器默认的粗黑轮廓（design D0 / 1.6） */
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 button:disabled {
@@ -60,6 +152,11 @@ button.primary {
   font-weight: 600;
 }
 
+button.primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
 button.ghost {
   background: transparent;
 }
@@ -70,21 +167,28 @@ textarea {
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
   font: inherit;
   width: 100%;
 }
 
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 textarea {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   resize: vertical;
 }
 
 /*
- * 布局（change: rework-app-layout，见 design.md D1）：
+ * 布局（change: rework-visual-system-and-app-chrome，design D3）：
  *   侧栏 280px + 主区，底栏横跨两列。
- *   主区四行：会话标签 / 面包屑 / 请求区 45fr / 响应区 55fr。
+ *   主区两行：会话标签行（同时承载面包屑与请求级操作）/ 请求区 + 响应区。
  */
 .app {
   display: grid;
@@ -105,20 +209,12 @@ textarea {
   overflow: hidden;
 }
 
-.sidebar-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-  flex: none;
-}
-
 .sidebar-tabs {
   display: flex;
-  gap: 4px;
-  padding: 6px 8px;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--chrome-row);
+  padding: 0 var(--sidebar-inset);
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   flex: none;
@@ -126,26 +222,29 @@ textarea {
 
 .sidebar-tab {
   flex: 1;
-  padding: 5px 8px;
-  border-radius: 6px;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
   font-weight: 500;
 }
 
+/* 活动态（design D0 三态之一）：靠浮起表达，不靠着色 */
 .sidebar-tab.active {
   background: var(--panel);
   border-color: var(--border);
   color: var(--text);
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  box-shadow: var(--shadow-1);
 }
 
 .sidebar-body {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  padding: 0;
+  /* 横向基线收在这一层：工具栏与列表因此共用同一条左基线，
+     切 Collections / Environments 时不再横跳。 */
+  padding: 0 var(--sidebar-inset);
   /* 必须建成 flex 列容器，子节点（.stack / .env-panel）的 flex:1;min-height:0
    * 才能生效，进而让内层 .tree-root / .env-list 的 overflow:auto 拿到有界高度。
    * 否则它们高度塌成内容高度，被本元素的 overflow:hidden 裁掉且无法滚动。 */
@@ -165,16 +264,56 @@ textarea {
   display: grid;
   /* 未选中请求时只有一列：请求区独占整宽（design D1） */
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  /* 两行：会话标签行 / 内容区。面包屑行已并入会话标签行（design D3） */
+  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   background: var(--panel);
   overflow: hidden;
 }
 
-/* 选中请求后才追加响应列 */
+/* 选中请求后主区变成三列：请求区 / 分隔线命中区 / 响应区（design D7）。
+   比例由 --split 承载（App 写成百分比），拖动时只改这一个变量。 */
 .main.with-response {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, var(--split, 50%)) 5px minmax(0, 1fr);
+}
+
+/* 分隔线的命中区：5px 是可点区域，可见的线只有 1px（伪元素画），
+   免得为了好点而把这条线画粗。 */
+.split-handle {
+  grid-column: 2;
+  grid-row: 2;
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.split-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-0.5px);
+  background: var(--border);
+}
+
+.split-handle:hover::after {
+  width: 2px;
+  background: var(--accent);
+}
+
+/* 拖动期间关掉两侧 pane 的指针事件：响应区里的沙箱 iframe 会吞掉 pointermove，
+   不关掉就没法把分隔线拖过它上方（design D7 的风险项）。 */
+.main[data-dragging='true'] .request-region,
+.main[data-dragging='true'] .response-region {
+  pointer-events: none;
+}
+
+.main[data-dragging='true'] {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .session-bar {
@@ -182,25 +321,36 @@ textarea {
   grid-row: 1;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  min-height: 34px;
+  gap: var(--space-3);
+  /* 与 .sidebar-tabs 取同一个高度：两行分处网格的两个格子，
+     显式等高才能让侧栏与主区的下边线连成一条。 */
+  height: var(--chrome-row);
+  padding: 0 var(--sidebar-inset);
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   overflow: hidden;
 }
 
+/* chrome 行里的按钮必须紧凑：全局 button 的内边距是给独立按钮设计的，
+   放进这一行会把行撑高（关闭按钮曾把会话标签行顶到 55.5px）。 */
+.session-bar .session-tab button,
+.session-bar .session-actions button,
+.session-bar > button {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+}
+
 .session-tab {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   /* 与右侧的环境选择器同排：允许收缩，避免把选择器挤出这一行 */
   flex: 0 1 auto;
   min-width: 0;
   max-width: 420px;
-  padding: 4px 8px;
+  padding: var(--space-2) var(--space-4);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--panel-2);
 }
 
@@ -210,25 +360,33 @@ textarea {
   text-overflow: ellipsis;
 }
 
+/* 会话标签头里标注当前面种类的小图标（集合 / 文件夹）。
+   它取代了原先「集合」「文件夹」两个汉字徽标——那两个词与名称抢同一行的宽度，
+   而图标本身就能分辨，且与树中的绘制是同一份（components/icons.tsx）。 */
+.tab-kind-icon {
+  flex: none;
+  color: var(--muted);
+}
+
 /* 会话标签行右侧的全局环境选择器（change: add-collection-search-and-env-management）。
- * 它属于工作区级状态，因此没有打开请求时同样显示。 */
+* 它属于工作区级状态，因此没有打开请求时同样显示。 */
 .env-select {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   flex: none;
   min-width: 0;
   max-width: 46%;
 }
 
 .env-select select {
-  /* 全局 select 是 5px 内边距的表单控件；这一行是密集工具条，
+  /* 全局 select 是常规内边距的表单控件；这一行是密集工具条，
    * 收紧到与标签同高，避免把会话标签行撑高 */
   width: auto;
   min-width: 0;
   max-width: 180px;
-  padding: 2px 4px;
-  font-size: 12px;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-sm);
 }
 
 /*
@@ -238,7 +396,7 @@ textarea {
 .window-controls {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-1);
   flex: none;
 }
 
@@ -250,7 +408,7 @@ textarea {
   height: 22px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
 }
@@ -263,7 +421,7 @@ textarea {
 
 .window-controls button.close:hover:not(:disabled) {
   background: var(--danger);
-  color: #fff;
+  color: var(--fg-on-solid);
 }
 
 /* 会话标签行是事实上的标题栏（design D5）：行内文字不可选中，
@@ -346,36 +504,61 @@ textarea {
   cursor: se-resize;
 }
 
-.crumb-bar {
-  grid-column: 1 / -1;
-  grid-row: 2;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
-  min-width: 0;
-}
-
+/* 面包屑（所属集合 › 方法 名称）已经是会话标签行的一部分（design D3）：
+   .crumb-bar 那个独立行不复存在，这些规则现在服务于会话标签内部。 */
 .crumb {
   color: var(--muted);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .crumb-sep {
-  color: var(--muted);
+  color: var(--border-strong);
 }
 
-.crumb-bar input.crumb-name {
+/* 名称输入框：就地编辑请求名 / 实体名（spec: 集合与文件夹的重命名）。
+   平时看起来就是文字（透明边与透明底），悬停给出可编辑的暗示，聚焦才落成输入框。
+   min-width 必须是 0：这一行不可收缩的成员（环境选择器、窗口控制按钮）必须始终
+   完整可见（window-chrome），所以让标签先缩。 */
+.session-tab input.crumb-name {
   width: auto;
-  min-width: 160px;
+  min-width: 0;
   max-width: 320px;
+  flex: 1 1 auto;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  font: inherit;
+}
+
+.session-tab input.crumb-name:hover:not(:disabled) {
+  border-color: var(--border);
+}
+
+.session-tab input.crumb-name:focus {
+  background: var(--panel);
+}
+
+/* 请求级操作（另存为 / 删除）：保留文字标签，指针悬停或行内键盘聚焦时显现。
+   用 visibility 而不是条件渲染或 display:none —— 它保留布局占位，使显现与隐藏
+   SHALL NOT 引起水平跳动（ui-layout「显现不引起水平跳动」）。 */
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   flex: none;
+  visibility: hidden;
+}
+
+.session-bar:hover .session-actions,
+.session-bar:focus-within .session-actions {
+  visibility: visible;
 }
 
 .request-region {
   grid-column: 1;
-  grid-row: 3;
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -384,14 +567,13 @@ textarea {
 }
 
 .response-region {
-  grid-column: 2;
-  grid-row: 3;
+  grid-column: 3;
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-  border-left: 1px solid var(--border);
 }
 
 /* ResponsePanel / EntityScriptPanel 的根节点仍沿用 .pane，嵌入分区后需要撑满一圈 */
@@ -412,8 +594,8 @@ textarea {
 .request-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px 4px;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) var(--space-2);
   flex: none;
 }
 
@@ -426,7 +608,7 @@ textarea {
   display: flex;
   align-items: center;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--panel-2);
   overflow: hidden;
 }
@@ -446,13 +628,15 @@ textarea {
   color: var(--muted);
 }
 
+/* 内边距必须与 .url-field 里的 input 完全一致（全局 input 规则给的
+ * --space-3 / --space-4），否则高亮文本会和输入框里的字错位。 */
 .url-overlay {
   position: absolute;
   inset: 0;
   z-index: 0;
   display: flex;
   align-items: center;
-  padding: 5px 8px;
+  padding: var(--space-3) var(--space-4);
   white-space: pre;
   overflow: hidden;
   pointer-events: none;
@@ -467,22 +651,22 @@ textarea {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 4px 10px 0;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4) 0;
 }
 
 .preview-toggle {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 4px;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-2);
   border: none;
   color: var(--muted);
   align-self: flex-start;
 }
 
 .preview-body {
-  padding-bottom: 4px;
+  padding-bottom: var(--space-2);
 }
 
 .modal-backdrop {
@@ -492,8 +676,8 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background: rgba(16, 24, 40, 0.42);
+  padding: var(--space-6);
+  background: var(--scrim);
 }
 
 .modal {
@@ -502,25 +686,39 @@ textarea {
   width: min(720px, 100%);
   max-height: 100%;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--panel);
-  box-shadow: 0 18px 48px rgba(16, 24, 40, 0.18);
+  box-shadow: var(--shadow-3);
   overflow: hidden;
+  /* 浮层入场（design D0）：模态是"偶尔发生"的操作，配得上一次过渡；
+     键盘与高频操作一律不加动效。 */
+  transition:
+    opacity 180ms var(--ease-out),
+    transform 180ms var(--ease-out);
+
+  @starting-style {
+    opacity: 0;
+    transform: scale(0.98);
+  }
 }
 
 .modal-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: var(--space-4);
+  padding: var(--space-4);
   border-bottom: 1px solid var(--border);
+}
+
+.modal-header strong {
+  font-size: var(--text-lg);
 }
 
 .modal-body {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 10px;
+  padding: var(--space-4);
 }
 
 .status-bar {
@@ -528,11 +726,19 @@ textarea {
   grid-row: 2;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
+  gap: var(--space-4);
+  padding: 0 var(--sidebar-inset);
   border-top: 1px solid var(--border);
   background: var(--panel);
   overflow: hidden;
+}
+
+/* 底栏是固定 32px 的一行（.app 的 grid-template-rows: … 32px）。
+   全局 button 的内边距是给独立按钮设计的，放进这里会把 32px 塞满甚至溢出，
+   所以与顶部 chrome 行一样要紧凑化。 */
+.status-bar button {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
 }
 
 .status-text {
@@ -545,10 +751,11 @@ textarea {
 .env-panel {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-4);
   min-height: 0;
   flex: 1;
-  padding: 10px;
+  /* 横向基线由 .sidebar-body 统一给，这里只补纵向的 */
+  padding: var(--space-4) 0;
 }
 
 /* 环境变量编辑器现在铺在主区（design D8）：VariablesPanel 原先是给 260px 侧栏写的，
@@ -579,12 +786,12 @@ textarea {
 }
 
 .var-editor .var-edit {
-  margin-left: 6px;
-  padding: 1px 6px;
+  margin-left: var(--space-3);
+  padding: var(--space-1) var(--space-3);
   border: none;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .var-editor .var-edit:hover:not(:disabled) {
@@ -596,33 +803,50 @@ textarea {
 .env-toolbar {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   min-width: 0;
 }
 
 .env-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   flex: 1;
   min-height: 0;
   overflow: auto;
 }
 
 .env-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 5px;
+  gap: var(--space-3);
+  /* 与 .node 取同一组内缩与最小高度：两个 tab 的列表行因此等高同宽 */
+  min-height: 22px;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   text-align: left;
 }
 
+/* 选中态（design D0 三态）：实底浅色 + 左侧主色标。
+   左标用伪元素画，不需要改 DOM。 */
 .env-item.active {
-  background: color-mix(in srgb, var(--accent) 25%, transparent);
-  border-color: var(--border);
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.env-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: var(--space-1);
+  bottom: var(--space-1);
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
 }
 
 /* 环境行：选项按钮 + 行内「⋯」按钮 + 就地改名输入（change:
@@ -632,7 +856,7 @@ textarea {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 2px;
+  gap: var(--space-1);
 }
 
 .env-row > .env-item {
@@ -649,19 +873,19 @@ textarea {
 }
 
 .env-item.editing {
-  padding: 1px 4px;
+  padding: var(--space-1) var(--space-2);
 }
 
 .env-name-input {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 /* 删除确认条占满整行，落在选项行下方 */
 .env-row > .node-confirm {
   flex: 1 0 100%;
-  margin: 2px 0 4px;
+  margin: var(--space-1) 0 var(--space-2);
 }
 
 .pane {
@@ -679,29 +903,39 @@ textarea {
 .pane-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: var(--space-4);
+  padding: var(--space-4);
   border-bottom: 1px solid var(--border);
   background: var(--panel);
-  flex-wrap: wrap;
+  /* 不再允许折行：折行会让头部高度不可预测（design D6）。次要项自己截断。 */
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+/* 头部里固定尺寸的部分不参与收缩；可收缩的只有标题旁的元信息 */
+.pane-header > strong,
+.pane-header > .badge,
+.pane-header > .tabs,
+.pane-header > button {
+  flex: none;
 }
 
 .pane-body {
   flex: 1;
   overflow: auto;
-  padding: 10px;
+  padding: var(--space-4);
 }
 
 .stack {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .row > .grow {
@@ -719,28 +953,32 @@ textarea {
 }
 
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .tabs {
   display: flex;
-  gap: 4px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
 .tab {
-  padding: 4px 9px;
-  border-radius: 6px;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
 }
 
+/* 活动态（design D0 三态）：= 比所在托盘高一档的表面。标签页的托盘是白底，
+ * 所以往上浮到 --panel-2；.sidebar-tab 的托盘是 --bg 灰底，所以浮到 --panel。
+ * 同一原则，落在不同底色上。 */
 .tab.active {
   background: var(--panel-2);
   border-color: var(--border);
   color: var(--text);
+  font-weight: 500;
 }
 
 /* 集合树（change: rework-collection-tree-and-scripts）：紧凑、小字号，
@@ -748,16 +986,17 @@ textarea {
 .tree {
   list-style: none;
   margin: 0;
-  padding-left: 14px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 1.45;
+  /* 左右内缩不写在这里：根层由 .tree-root 给（与工具栏、tab 同一条基线），
+     嵌套层由 .tree .tree 给。 */
 }
 
 .tree-root {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0 10px 10px;
+  padding: 0 0 var(--space-4);
 }
 
 /* Collections tab 的工具栏（change: add-collection-search-and-env-management）：
@@ -765,10 +1004,12 @@ textarea {
 .tree-toolbar {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   min-width: 0;
   flex: none;
-  padding-top: 8px;
+  /* 左右内缩由 .sidebar-body 给——它与下面的树行、以及 Environments 面板
+     共用同一条基线，这是「切 tab 不横跳」的前提。 */
+  padding-top: var(--space-4);
 }
 
 /* 树行禁选：双击递归折叠不再选中名称文字（change: polish-sidebar-and-tables） */
@@ -791,7 +1032,7 @@ textarea {
   height: 22px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
 }
@@ -806,11 +1047,11 @@ textarea {
 .tree-search {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   min-width: 0;
-  padding: 0 6px;
+  padding: 0 var(--space-3);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--panel);
 }
 
@@ -827,10 +1068,10 @@ textarea {
 .tree-search-input {
   flex: 1;
   min-width: 0;
-  padding: 3px 0;
+  padding: var(--space-2) 0;
   border: none;
   background: transparent;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .tree-search-input:focus {
@@ -839,7 +1080,7 @@ textarea {
 
 .tree-search-clear {
   flex: none;
-  padding: 0 4px;
+  padding: 0 var(--space-2);
   border: none;
   background: transparent;
   color: var(--muted);
@@ -851,9 +1092,11 @@ textarea {
   opacity: 0.35;
 }
 
-/* 层级参考线：每深入一级就多一条竖线，可据此数出嵌套深度 */
+/* 层级参考线：每深入一级就多一条竖线，可据此数出嵌套深度。
+   一级缩进 = margin 8 + 参考线 1 + padding 6 = 15px。 */
 .tree .tree {
-  margin-left: 5px;
+  margin-left: var(--space-4);
+  padding-left: var(--space-3);
   border-left: 1px solid var(--border);
 }
 
@@ -865,19 +1108,33 @@ textarea {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   min-height: 22px;
-  padding: 1px 4px;
-  border-radius: 4px;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
+/* 悬停态（design D0 三态）：中性浅灰，不掺主色 */
 .node:hover {
   background: var(--panel-2);
 }
 
+/* 选中态（design D0 三态）：实底浅色 + 左侧主色标（伪元素画，不改 DOM） */
 .node.selected {
-  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.node.selected::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: var(--space-1);
+  bottom: var(--space-1);
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
 }
 
 .tree-toggle {
@@ -911,38 +1168,56 @@ textarea {
   text-overflow: ellipsis;
 }
 
-/* 方法标签：小号彩色文字，视觉权重轻于名称 */
-.tree-method {
+/* 方法徽章（ui-layout「集合树的外观与密度」）：集合树、会话标签行、请求编辑器的
+   方法选择框三处共用同一形态与同一组颜色语义。
+   配色按「是否幂等」分两组——颜色只表达这个请求会不会改数据，方法之间的区分由
+   文字承担。形态是轻量的彩色大写文字，不加深色底：它 SHALL NOT 比名称更重。 */
+.method-badge {
   flex: none;
   min-width: 42px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
-  color: var(--muted);
+  letter-spacing: 0.02em;
+  color: var(--method-write);
 }
 
-.tree-method[data-method='GET'] {
-  color: #067647;
+.method-badge[data-method='GET'],
+.method-badge[data-method='HEAD'],
+.method-badge[data-method='OPTIONS'] {
+  color: var(--method-safe);
 }
 
-.tree-method[data-method='POST'] {
-  color: #b54708;
+/* 请求编辑器的方法选择框：与集合树、会话标签行共用同一组配色。
+   保持原生 <select> 的下拉与键盘行为，只把外观交给 appearance: none，
+   并用两条渐变画一个随文字着色的 caret（不引入图片、不写死颜色）。 */
+select.method-select {
+  width: 120px;
+  flex: none;
+  appearance: none;
+  padding-right: var(--space-6);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--method-write);
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    right var(--space-4) center,
+    right var(--space-4) center;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
 }
 
-.tree-method[data-method='PUT'] {
-  color: #1a73e8;
-}
-
-.tree-method[data-method='PATCH'] {
-  color: #7048e8;
-}
-
-.tree-method[data-method='DELETE'] {
-  color: #d92d20;
+select.method-select[data-method='GET'],
+select.method-select[data-method='HEAD'],
+select.method-select[data-method='OPTIONS'] {
+  color: var(--method-safe);
 }
 
 .node-more {
   flex: none;
-  padding: 0 4px;
+  padding: 0 var(--space-2);
   border: none;
   background: transparent;
   color: var(--muted);
@@ -952,26 +1227,28 @@ textarea {
 .node-menu {
   position: absolute;
   top: 100%;
-  right: 2px;
+  right: var(--space-1);
   z-index: 20;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: var(--space-1);
   min-width: 132px;
-  padding: 3px;
+  padding: var(--space-2);
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  /* 弹出层从触发器方向生长（design D0 的 origin-aware） */
+  transform-origin: top right;
 }
 
 .node-menu button {
-  padding: 4px 8px;
+  padding: var(--space-2) var(--space-4);
   border: none;
   background: transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   text-align: left;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .node-menu button:hover {
@@ -985,22 +1262,22 @@ textarea {
 .node-confirm {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 2px 4px 4px 18px;
-  padding: 5px 8px;
+  gap: var(--space-4);
+  margin: var(--space-1) var(--space-2) var(--space-2) var(--space-6);
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--danger);
   border-left-width: 3px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--panel);
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 /* 脚本编辑区：左栏切换、右栏编辑（change: rework-collection-tree-and-scripts） */
 .script-pane {
   display: flex;
   flex: 1;
-  gap: 10px;
+  gap: var(--space-4);
   min-height: 0;
 }
 
@@ -1008,30 +1285,32 @@ textarea {
   display: flex;
   flex: none;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   width: 168px;
-  padding-right: 8px;
+  padding-right: var(--space-4);
   border-right: 1px solid var(--border);
 }
 
 .script-pane-list button {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
   border: none;
   background: transparent;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   text-align: left;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .script-pane-list button:hover {
   background: var(--panel-2);
 }
 
+/* 选中态（design D0 三态）：实底浅色 + 字重，与其它选中态同一套语言 */
 .script-pane-list button.active {
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  background: var(--accent-soft);
+  color: var(--text);
   font-weight: 600;
 }
 
@@ -1047,7 +1326,7 @@ textarea {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-3);
   min-width: 0;
 }
 
@@ -1057,11 +1336,12 @@ textarea {
 }
 
 .badge {
-  font-size: 11px;
-  padding: 1px 6px;
+  font-size: var(--text-xs);
+  padding: var(--space-1) var(--space-3);
   border-radius: 999px;
   border: 1px solid var(--border);
   color: var(--muted);
+  white-space: nowrap;
 }
 
 .badge.warn {
@@ -1079,12 +1359,14 @@ textarea {
   border-color: var(--ok);
 }
 
+/* 通知条是浮在内容之上的提示：给一档阴影，与平面内容分层（design D0） */
 .notice {
   border: 1px solid var(--border);
   border-left-width: 3px;
-  border-radius: 6px;
-  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
   background: var(--panel);
+  box-shadow: var(--shadow-1);
 }
 
 .notice.warn {
@@ -1109,10 +1391,10 @@ table {
 th,
 td {
   text-align: left;
-  padding: 4px 6px;
+  padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   vertical-align: top;
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 th {
@@ -1128,7 +1410,7 @@ th {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(16, 24, 40, 0.28);
+  background: var(--scrollbar-thumb);
   border-radius: 3px;
 }
 
@@ -1138,7 +1420,7 @@ th {
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(16, 24, 40, 0.28) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 /* Postman 风格表格：表头吸顶 + 行 hover 高亮 */
@@ -1157,7 +1439,7 @@ tbody tr:hover {
 tbody tr .row-delete,
 tbody tr .var-actions {
   opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: opacity 120ms var(--ease-out);
 }
 
 tbody tr:hover .row-delete,
@@ -1170,7 +1452,7 @@ tbody tr:focus-within .var-actions {
 td input,
 td select,
 td button {
-  padding: 3px 6px;
+  padding: var(--space-2) var(--space-3);
 }
 
 /* 编辑单元格时的焦点态：用细的强调色焦点环替代浏览器默认的粗黑轮廓
@@ -1231,31 +1513,126 @@ td textarea:focus {
 
 pre.body {
   margin: 0;
-  padding: 8px;
-  background: #f6f8fa;
+  padding: var(--space-4);
+  background: var(--surface-sunken);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow: auto;
   max-height: 100%;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
 }
 
 iframe.preview {
   width: 100%;
   min-height: 320px;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fff;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
 }
 
 .secret-row {
   display: flex;
-  gap: 6px;
+  gap: var(--space-3);
   align-items: center;
 }
 
 .scroll-y {
   overflow-y: auto;
+}
+
+/* ---------------------------------------------------------------------------
+ * 内联样式的落点（change: rework-visual-system-and-app-chrome，design D9）。
+ * 静态几何与配色一律进类；内联 style 只保留运行时才知道的值（例如拖动中的 --split）。
+ * ------------------------------------------------------------------------- */
+
+.col-check {
+  width: 28px;
+}
+
+.request-tabs {
+  padding: var(--space-4);
+}
+
+.auth-location-select {
+  width: 120px;
+}
+
+.auth-label-wide {
+  width: 200px;
+}
+
+.auth-label {
+  width: 90px;
+}
+
+.width-auto {
+  width: auto;
+}
+
+.break-all {
+  word-break: break-all;
+}
+
+.warn-list {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-6);
+}
+
+/* 响应区的元信息：由一组并列徽章收成一段紧凑文本（design D6）。
+   它排在最后、允许收缩，头部空间不够时先由它截断。 */
+.response-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 正文区上方的「原始 / 格式化」工具条。它与头部那组标签分属不同维度
+   （容器视图 vs 呈现方式），所以不合并进同一组，只把它收紧成一行（design D6）。 */
+.response-view-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.response-content-type {
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 响应正文的竖排间距比通用 .stack 紧一档 */
+.response-body {
+  gap: var(--space-2);
+}
+
+/* 可视化结果的承载框复用 iframe.preview 的外观，只是矮一些 */
+iframe.visualizer-frame {
+  min-height: 120px;
+}
+
+/*
+ * 减少动态效果（design D0 动效基线 / 任务 1.6）。
+ * 保留颜色与透明度的过渡——它们帮助理解状态；去掉位移与缩放。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+
+  button:not(:disabled):active {
+    transform: none;
+  }
 }
