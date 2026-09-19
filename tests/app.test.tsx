@@ -577,7 +577,6 @@ describe('前端数据流骨架', () => {
     const panel = screen.getByTestId('environments-panel');
     expect(within(panel).queryByText('baseUrl')).toBeNull();
     expect(within(screen.getByTestId('environment-editor')).getByText('baseUrl')).toBeTruthy();
-    expect(within(screen.getByTestId('session-tab')).getByText('环境')).toBeTruthy();
 
     // 侧栏不再重复 tab 名：工具栏只有图标按钮
     expect(within(panel).queryByText('环境')).toBeNull();
@@ -634,9 +633,14 @@ describe('前端数据流骨架', () => {
     render(<App client={client} />);
     await openRequest();
 
-    // 顶部只有一行：所属集合名与可编辑的请求名都在会话标签内部
+    // 身份已下沉到请求面板头：会话标签行只放方法徽标 + 请求名，不放集合名
     const tab = screen.getByTestId('session-tab');
-    expect(tab.textContent).toContain('我的集合');
+    expect(tab.textContent).toContain('我的请求');
+    expect(within(tab).getByText('GET')).toBeTruthy();
+    expect(tab.textContent).not.toContain('我的集合');
+    // 面包屑（集合名）落在请求面板头，而非会话标签行
+    const header = screen.getByTestId('request-panel-header');
+    expect(within(header).getByText('我的集合')).toBeTruthy();
     expect((screen.getByLabelText('请求名称') as HTMLInputElement).value).toBe('我的请求');
     // 原先那条独立的面包屑行已经不存在
     expect(document.querySelector('.crumb-bar')).toBeNull();
@@ -977,8 +981,10 @@ describe('前端数据流骨架', () => {
     fireEvent.click(await screen.findByText('不执行脚本，仍发送'));
 
     await waitFor(() => expect(sendRequest).toHaveBeenCalled());
-    // 没有记下确认：这次是跳过，不是授权，下一次发送仍会询问
-    expect(settingsSet).not.toHaveBeenCalled();
+    // 没有记下确认：这次是跳过，不是授权，下一次发送仍会询问。
+    // 注意 settingsSet 现在还承担标签持久化（scope=ui_tabs），所以只能断言
+    // 门禁键没被写入，而不能再断言「整个 settingsSet 没被调用」。
+    expect(settingsSet).not.toHaveBeenCalledWith('script_gate', 'c1', expect.anything());
   });
 
   it('前置脚本的写入先落库、后发送，解析才能取到脚本写入的值（3.3）', async () => {
@@ -1148,7 +1154,8 @@ describe('脚本编辑', () => {
     // 点集合名进入集合脚本面板
     fireEvent.click(tree().getByText('我的集合'));
     await screen.findByTestId('entity-script-panel');
-    expect(screen.getByText('集合 · 我的集合')).toBeTruthy();
+    // 实体面板头改为可编辑的名称输入框（design D2），不再渲染「集合 · 名称」静态文本
+    expect((screen.getByLabelText('集合名称') as HTMLInputElement).value).toBe('我的集合');
 
     fireEvent.change(screen.getByLabelText('集合前置脚本'), {
       target: { value: 'console.log("collection level");' },
@@ -1178,7 +1185,8 @@ describe('脚本编辑', () => {
 
     fireEvent.click(screen.getByText('我的文件夹'));
     await screen.findByTestId('entity-script-panel');
-    expect(screen.getByText('文件夹 · 我的文件夹')).toBeTruthy();
+    // 实体面板头改为可编辑的名称输入框（design D2），不再渲染「文件夹 · 名称」静态文本
+    expect((screen.getByLabelText('文件夹名称') as HTMLInputElement).value).toBe('我的文件夹');
 
     fireEvent.change(screen.getByLabelText('文件夹前置脚本'), {
       target: { value: 'console.log("folder level");' },
@@ -2506,35 +2514,68 @@ describe('未保存守卫', () => {
 
   const guard = () => screen.queryByTestId('unsaved-guard');
   const currentUrl = () => (screen.getByLabelText('请求地址') as HTMLInputElement).value;
+  /** 按名称取到对应的会话标签按钮（多标签后同一请求可能有多标签）。 */
+  const tabByName = (name: string): HTMLElement =>
+    (within(screen.getByTestId('session-tabs')).getByText(name).closest('.session-tab') ??
+      null) as HTMLElement;
 
-  it('切换到另一个请求先询问，选择前不切换主区', async () => {
+  it('切换到另一个请求不询问，编辑内容保留在标签里', async () => {
     const { client } = harness({ extraRequest: other });
     await openDirty(client);
 
     fireEvent.click(tree().getByText('另一个请求'));
 
-    expect(guard()).toBeTruthy();
-    expect(currentUrl()).toBe('https://api.test/edited');
+    // 多标签后切换不再丢东西：不弹守卫，直接切过去
+    expect(guard()).toBeNull();
+    expect(currentUrl()).toBe('https://api.test/other');
+    // 原请求的标签仍在，且带着未保存标记
+    const aTab = tabByName('我的请求');
+    expect(within(aTab).getByTestId('tab-unsaved-dot')).toBeTruthy();
+
+    // 切回去，编辑内容原样回来
+    fireEvent.click(aTab);
+    expect((await screen.findByLabelText('请求地址') as HTMLInputElement).value).toBe(
+      'https://api.test/edited',
+    );
     expect(screen.getByText('未保存')).toBeTruthy();
   });
 
-  it('选择不保存后继续，改动被丢弃', async () => {
+  it('多个脏标签各自草稿独立，来回切换互不询问', async () => {
     const { client } = harness({ extraRequest: other });
-    await openDirty(client);
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.change(screen.getByLabelText('请求地址'), { target: { value: 'https://api.test/a' } });
+    await screen.findByText('未保存');
 
     fireEvent.click(tree().getByText('另一个请求'));
-    fireEvent.click(screen.getByText('不保存'));
+    fireEvent.change(await screen.findByLabelText('请求地址'), {
+      target: { value: 'https://api.test/b' },
+    });
+    await screen.findByText('未保存');
 
-    await waitFor(() => expect(currentUrl()).toBe('https://api.test/other'));
     expect(guard()).toBeNull();
-    expect(screen.queryByText('未保存')).toBeNull();
+    fireEvent.click(tabByName('我的请求'));
+    expect((screen.getByLabelText('请求地址') as HTMLInputElement).value).toBe('https://api.test/a');
+    fireEvent.click(tabByName('另一个请求'));
+    expect((screen.getByLabelText('请求地址') as HTMLInputElement).value).toBe('https://api.test/b');
   });
 
-  it('取消后停在原地', async () => {
-    const { client } = harness({ extraRequest: other });
+  it('关闭脏标签才询问；不保存后标签关闭、改动丢弃', async () => {
+    const { client } = harness();
     await openDirty(client);
 
-    fireEvent.click(tree().getByText('另一个请求'));
+    fireEvent.click(screen.getByLabelText('关闭标签'));
+    expect(guard()).toBeTruthy();
+
+    fireEvent.click(screen.getByText('不保存'));
+    await waitFor(() => expect(screen.queryByLabelText('请求地址')).toBeNull());
+  });
+
+  it('关闭脏标签取消后停在原地', async () => {
+    const { client } = harness();
+    await openDirty(client);
+
+    fireEvent.click(screen.getByLabelText('关闭标签'));
     fireEvent.click(screen.getByText('取消'));
 
     await waitFor(() => expect(guard()).toBeNull());
@@ -2542,25 +2583,25 @@ describe('未保存守卫', () => {
     expect(screen.getByText('未保存')).toBeTruthy();
   });
 
-  it('保存并继续：先落库再执行原操作', async () => {
-    const { client, requestSave } = harness({ extraRequest: other });
+  it('关闭脏标签保存并继续：先落库再关闭', async () => {
+    const { client, requestSave } = harness();
     await openDirty(client);
 
-    fireEvent.click(tree().getByText('另一个请求'));
+    fireEvent.click(screen.getByLabelText('关闭标签'));
     fireEvent.click(screen.getByText('保存并继续'));
 
     await waitFor(() => expect(requestSave).toHaveBeenCalledTimes(1));
     expect(requestSave.mock.calls[0][0].url).toBe('https://api.test/edited');
-    await waitFor(() => expect(currentUrl()).toBe('https://api.test/other'));
+    await waitFor(() => expect(screen.queryByLabelText('请求地址')).toBeNull());
     expect(guard()).toBeNull();
   });
 
-  it('保存失败则不继续，并停在原地报错', async () => {
-    const { client, requestSave } = harness({ extraRequest: other });
+  it('关闭脏标签保存失败则不继续，并停在原地报错', async () => {
+    const { client, requestSave } = harness();
     requestSave.mockRejectedValueOnce({ code: 'io', message: '写不进去' });
     await openDirty(client);
 
-    fireEvent.click(tree().getByText('另一个请求'));
+    fireEvent.click(screen.getByLabelText('关闭标签'));
     fireEvent.click(screen.getByText('保存并继续'));
 
     await waitFor(() =>
@@ -3177,9 +3218,9 @@ describe('页面内窗口控制', () => {
 
     const bar = screen.getByTestId('session-bar');
     // 行内空白（grow 弹性区）：拖拽
-    fireEvent.mouseDown(bar.querySelector('.grow')!, { button: 0 });
+    fireEvent.mouseDown(bar.querySelector('.session-tabs')!, { button: 0 });
     // 双击（detail === 2）：切换最大化
-    fireEvent.mouseDown(bar.querySelector('.grow')!, { button: 0, detail: 2 });
+    fireEvent.mouseDown(bar.querySelector('.session-tabs')!, { button: 0, detail: 2 });
     // 交互控件不触发拖拽
     fireEvent.mouseDown(document.querySelector('.env-select select')!, { button: 0 });
     fireEvent.mouseDown(screen.getByRole('button', { name: '最小化' }), { button: 0 });
@@ -3456,5 +3497,292 @@ describe('集合树的双击递归折叠/展开（tree-recursive-collapse-expand
     // 子树未被递归折叠：箭头仍展开、后代请求仍可见
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(view.queryByText('深处的请求')).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 多标签会话（change: add-multi-tab-sessions）
+// ---------------------------------------------------------------------------
+
+describe('多标签会话（add-multi-tab-sessions）', () => {
+  /** 按名称取到对应的会话标签按钮。 */
+  const tabByName = (name: string): HTMLElement =>
+    within(screen.getByTestId('session-tabs')).getByText(name).closest('.session-tab') as HTMLElement;
+
+  it('同一请求重复打开只持有一个标签（去重，1.3）', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+    await openRequest();
+    expect(screen.getAllByTestId('session-tab')).toHaveLength(1);
+
+    // 再点一次同一个请求节点：不应多出标签
+    fireEvent.click(tree().getByText('我的请求'));
+    await screen.findByLabelText('请求地址');
+    expect(screen.getAllByTestId('session-tab')).toHaveLength(1);
+  });
+
+  it('新建请求追加一个标签且不过守卫（1.4）', async () => {
+    const { client, requestCreate } = harness();
+    requestCreate.mockResolvedValueOnce(makeRequest({ id: 'r-new', name: '新请求' }));
+    render(<App client={client} />);
+    await openRequest();
+    expect(screen.getAllByTestId('session-tab')).toHaveLength(1);
+
+    openNodeMenu('我的集合');
+    fireEvent.click(screen.getByText('新建请求'));
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
+    // 新建是前端动作，不经过「未保存守卫」
+    expect(screen.queryByTestId('unsaved-guard')).toBeNull();
+  });
+
+  it('另存为请求追加一个标签，原标签与草稿保留（1.4）', async () => {
+    const { client } = harness();
+    vi.spyOn(client, 'requestDuplicate').mockResolvedValueOnce(
+      makeRequest({ id: 'r-dup', name: '我的请求 副本' }),
+    );
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/draft' },
+    });
+    await screen.findByText('未保存');
+
+    fireEvent.click(screen.getByText('另存为'));
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
+    // 原标签与它的草稿都还在：切回原标签验证（另存为后激活的是新副本）
+    fireEvent.click(tabByName('我的请求'));
+    expect((screen.getByLabelText('请求地址') as HTMLInputElement).value).toBe(
+      'https://api.test/draft',
+    );
+  });
+
+  it('Ctrl+S 只作用于当前面：后台脏实体标签不被保存（2.2 / design D4）', async () => {
+    const { client, collectionSetScript } = harness();
+    render(<App client={client} />);
+    await openRequest();
+    // 打开集合脚本面板并制造脏改动
+    fireEvent.click(tree().getByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.change(screen.getByLabelText('集合前置脚本'), {
+      target: { value: 'console.log("c");' },
+    });
+    await screen.findByText('未保存');
+    // 切回请求标签：集合脚本退到后台（仍脏），但不再是当前面
+    fireEvent.click(tabByName('我的请求'));
+    await screen.findByLabelText('请求地址');
+
+    fireEvent.keyDown(window, { key: 's', ctrlKey: true });
+    // 当前面是干净的请求，后台的脏集合脚本不应被快捷键保存
+    expect(collectionSetScript).not.toHaveBeenCalled();
+  });
+
+  it('请求标签渲染成按钮并带方法徽标；实体标签带种类图标（3.2）', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+    await openRequest();
+    const reqTab = screen.getByTestId('session-tab');
+    expect(reqTab.tagName).toBe('BUTTON');
+    expect(within(reqTab).getByText('GET')).toBeTruthy();
+
+    fireEvent.click(tree().getByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    const entityTab = screen.getAllByTestId('session-tab')[1];
+    expect(entityTab.getAttribute('data-tab-kind')).toBe('entity');
+    expect(entityTab.querySelector('.tab-kind-icon')).toBeTruthy();
+  });
+
+  it('激活标签带 active 态，脏标签显示未保存圆点（3.3 / 4.1）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/x' },
+    });
+    await screen.findByText('未保存');
+    const aTab = tabByName('我的请求');
+    expect(aTab.className).toContain('active');
+    expect(within(aTab).getByTestId('tab-unsaved-dot')).toBeTruthy();
+  });
+
+  it('请求操作常驻于面板头，不依赖 hover 显隐（3.6）', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+    await openRequest();
+    // 另存为 / 删除 始终在 DOM 内（仅 CSS 显隐，不改布局宽度）
+    expect(screen.getByText('另存为')).toBeTruthy();
+    expect(screen.getByText('删除')).toBeTruthy();
+    // 保存入口在有改动时同屏出现
+    fireEvent.change(screen.getByLabelText('请求地址'), { target: { value: 'https://api.test/x' } });
+    await screen.findByText('未保存');
+    expect(screen.getByText('保存')).toBeTruthy();
+  });
+
+  it('请求面板头不放方法徽标（3.7）', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+    await openRequest();
+    const header = screen.getByTestId('request-panel-header');
+    expect(header.querySelector('.method-badge')).toBeNull();
+  });
+
+  it('关闭激活标签后激活态移交相邻标签（4.1）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+
+    const secondTab = tabByName('另一个请求');
+    fireEvent.click(within(secondTab).getByLabelText('关闭标签'));
+    await waitFor(() => expect(screen.queryByLabelText('请求地址')).toBeTruthy());
+    expect(tabByName('我的请求').className).toContain('active');
+  });
+
+  it('中键点击标签关闭它（4.1）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+
+    fireEvent(
+      tabByName('另一个请求'),
+      new MouseEvent('auxclick', { button: 1, bubbles: true }),
+    );
+    await waitFor(() =>
+      expect(within(screen.getByTestId('session-tabs')).queryByText('另一个请求')).toBeNull(),
+    );
+  });
+
+  it('删除当前打开的请求，其标签随之关闭（4.2）', async () => {
+    const { client } = harness();
+    const requestDeleteSpy = vi.spyOn(client, 'requestDelete');
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('删除'));
+    await waitFor(() => expect(screen.queryByLabelText('请求地址')).toBeNull());
+    expect(requestDeleteSpy).toHaveBeenCalled();
+  });
+
+  it('从集合树选中请求会打开并激活对应标签（4.4）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+    expect(tabByName('另一个请求').className).toContain('active');
+    expect(tabByName('我的请求').className).not.toContain('active');
+  });
+
+  it('loadTree 后对账：后端已消失的条目其标签被关闭，其余保留（4.3）', async () => {
+    const r2 = makeRequest({ id: 'r2', name: '另一个请求', url: 'https://api.test/other' });
+    const fullTree = treeWith(makeRequest(), undefined, r2);
+    const { client } = harness({ extraRequest: r2 });
+    let loads = 0;
+    client.workspaceTree = async () => {
+      loads += 1;
+      if (loads > 1) {
+        // 模拟 r2 从后端消失
+        return [
+          {
+            collection,
+            children: [
+              {
+                kind: 'request',
+                id: 'r1',
+                name: '我的请求',
+                sort_order: 0,
+                children: [],
+                request: makeRequest(),
+              },
+            ],
+          },
+        ];
+      }
+      return fullTree;
+    };
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+    expect(screen.getAllByTestId('session-tab')).toHaveLength(2);
+
+    // 触发一次全量重载（新建集合会重载树但不动标签）
+    fireEvent.click(screen.getByLabelText('新建集合'));
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(1));
+    expect(tabByName('我的请求')).toBeTruthy();
+  });
+
+  it('持久化只写标签身份、不含未保存草稿（5.3 / design D6）', async () => {
+    const { client, settingsSet } = harness();
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/secret-draft' },
+    });
+    await screen.findByText('未保存');
+
+    await waitFor(() =>
+      expect(settingsSet.mock.calls.some((call) => call[0] === 'ui_tabs')).toBe(true),
+    );
+    const uiTabCalls = settingsSet.mock.calls.filter((call) => call[0] === 'ui_tabs');
+    expect(uiTabCalls.length).toBeGreaterThan(0);
+    for (const call of uiTabCalls) {
+      // 草稿（含可能的 secret 明文）绝不应落进 settings 表
+      expect(JSON.stringify(call)).not.toContain('secret-draft');
+    }
+  });
+
+  it('Ctrl+W 关闭激活标签（6.1）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+
+    fireEvent.keyDown(window, { key: 'w', ctrlKey: true });
+    await waitFor(() =>
+      expect(within(screen.getByTestId('session-tabs')).queryByText('另一个请求')).toBeNull(),
+    );
+    expect(tabByName('我的请求').className).toContain('active');
+  });
+
+  it('Ctrl+Tab 在标签间环形切换（6.1）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+
+    // 从第二个（激活）按 Ctrl+Tab：环形跳回第一个
+    fireEvent.keyDown(window, { key: 'Tab', ctrlKey: true });
+    await waitFor(() => expect(tabByName('我的请求').className).toContain('active'));
+    // 再按一次：跳回第二个
+    fireEvent.keyDown(window, { key: 'Tab', ctrlKey: true });
+    await waitFor(() => expect(tabByName('另一个请求').className).toContain('active'));
+  });
+
+  it('Ctrl+Shift+Tab 反向环形切换（6.1）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+
+    fireEvent.keyDown(window, { key: 'Tab', ctrlKey: true, shiftKey: true });
+    await waitFor(() => expect(tabByName('我的请求').className).toContain('active'));
+  });
+
+  it('Ctrl+1..9 跳到第 N 个标签（6.1）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+
+    fireEvent.keyDown(window, { key: '2', ctrlKey: true });
+    await waitFor(() => expect(tabByName('另一个请求').className).toContain('active'));
+    fireEvent.keyDown(window, { key: '1', ctrlKey: true });
+    await waitFor(() => expect(tabByName('我的请求').className).toContain('active'));
   });
 });

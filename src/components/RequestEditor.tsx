@@ -1,4 +1,4 @@
-import { useRef, useState, type FocusEvent, type ReactNode } from 'react';
+import { useRef, useState, type FocusEvent, type ReactNode, type RefObject } from 'react';
 import { isEmptyFormField, isEmptyKeyValue } from '../lib/rows';
 import { ScriptPane } from './ScriptPane';
 import type {
@@ -24,6 +24,14 @@ export interface RequestEditorProps {
   onSend: () => void;
   /** 地址栏正下方的解析预览条（change: rework-app-layout，design D4）。 */
   preview?: ReactNode;
+  /** 请求面板头（spec: 请求面板头的身份与操作）——身份与请求级操作下沉到这里。 */
+  collectionName: string | null;
+  dirty: boolean;
+  onSave: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+  /** 面板头里的请求名输入框：树菜单的「重命名」把焦点交给它。 */
+  nameRef?: RefObject<HTMLInputElement | null>;
 }
 
 /** 请求标签的顺序与文案对齐 Postman（spec: 请求标签命名）。 */
@@ -269,12 +277,70 @@ function KeyValueTable({
 }
 
 export function RequestEditor(props: RequestEditorProps) {
-  const { draft, tab, busy, onTab, onChange, onSend, preview } = props;
+  const {
+    draft,
+    tab,
+    busy,
+    onTab,
+    onChange,
+    onSend,
+    preview,
+    collectionName,
+    dirty,
+    onSave,
+    onDuplicate,
+    onDelete,
+    nameRef,
+  } = props;
 
   const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
 
   return (
     <div className="request-editor">
+      {/* 请求面板头（spec: 请求面板头的身份与操作）：所属集合面包屑 + 可就地编辑的
+          请求名 + 请求级操作。身份随请求区一同出现与消失，不再占用会话标签行；
+          方法由紧邻其下的地址栏选择框承载，这里 SHALL NOT 重复方法徽标。 */}
+      <div className="request-pane-header" data-testid="request-panel-header">
+        {collectionName && (
+          <>
+            <span className="crumb">{collectionName}</span>
+            <span className="crumb-sep">›</span>
+          </>
+        )}
+        <input
+          ref={nameRef}
+          className="crumb-name request-name"
+          aria-label="请求名称"
+          value={draft.name}
+          onChange={(event) => patch({ name: event.target.value })}
+        />
+        <span className="grow" />
+        {/* 未保存标记与保存入口只在有改动时同时出现——默认界面上不存在「保存」按钮。 */}
+        {dirty && (
+          <>
+            <span className="badge warn">未保存</span>
+            <button
+              data-testid="save-request"
+              title="保存（Ctrl+S）"
+              onClick={onSave}
+              disabled={busy}
+            >
+              保存
+            </button>
+          </>
+        )}
+        {/* 另存为 / 删除：保留文字标签，指针悬停或面板头内键盘聚焦时显现（见 App.css），
+            且显现与隐藏不改变该行布局宽度。 */}
+        <span className="request-actions">
+          <button onClick={onDuplicate} disabled={busy}>
+            另存为
+          </button>
+          <button onClick={onDelete} disabled={busy}>
+            删除
+          </button>
+        </span>
+      </div>
+
       <div className="request-toolbar">
         <select
           className="method-select"

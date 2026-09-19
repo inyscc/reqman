@@ -333,31 +333,99 @@ textarea {
 
 /* chrome 行里的按钮必须紧凑：全局 button 的内边距是给独立按钮设计的，
    放进这一行会把行撑高（关闭按钮曾把会话标签行顶到 55.5px）。 */
-.session-bar .session-tab button,
-.session-bar .session-actions button,
-.session-bar > button {
+.session-bar .session-tab {
   padding: var(--space-1) var(--space-3);
   font-size: var(--text-sm);
+}
+
+/* 标签栏（spec: 会话标签栏）：这一行里唯一可收缩、可滚动的元素；
+   环境选择器与窗口控制按钮保持 flex: none，不被标签数量挤出（design D7）。 */
+.session-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.session-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .session-tab {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  /* 与右侧的环境选择器同排：允许收缩，避免把选择器挤出这一行 */
+  gap: var(--space-2);
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 420px;
-  padding: var(--space-2) var(--space-4);
+  max-width: 260px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
 }
 
-.session-tab .name {
+/* 激活态只换底色与描边，不改宽度：宽度随激活变化会让每次切换整条重排 */
+.session-tab.active {
+  background: var(--panel);
+  border-color: var(--border-strong);
+}
+
+.session-tab .session-tab-name {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* 关闭入口与未保存指示共用同一格（design D9）：绝对定位让二者重叠，
+   用 visibility 切换谁可见——占位不变，标签宽度不因悬停而跳动。 */
+.session-tab-close {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.session-tab-close-btn,
+.dirty-dot {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.session-tab-close-btn {
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  visibility: hidden;
+}
+
+.session-tab:hover .session-tab-close-btn,
+.session-tab.active .session-tab-close-btn,
+.session-tab:focus-visible .session-tab-close-btn {
+  visibility: visible;
+}
+
+.session-tab:hover .dirty-dot {
+  visibility: hidden;
+}
+
+.dirty-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 /* 会话标签头里标注当前面种类的小图标（集合 / 文件夹）。
@@ -427,8 +495,8 @@ textarea {
 /* 会话标签行是事实上的标题栏（design D5）：行内文字不可选中，
  * 避免拖拽 / 双击手势带出浏览器原生文本选择 */
 .session-tab,
-.session-tab .badge,
-.session-tab .name {
+.session-tab .session-tab-name,
+.session-tab .method-badge {
   user-select: none;
 }
 
@@ -521,7 +589,21 @@ textarea {
    平时看起来就是文字（透明边与透明底），悬停给出可编辑的暗示，聚焦才落成输入框。
    min-width 必须是 0：这一行不可收缩的成员（环境选择器、窗口控制按钮）必须始终
    完整可见（window-chrome），所以让标签先缩。 */
-.session-tab input.crumb-name {
+/* 请求面板头（spec: 请求面板头的身份与操作）：身份与请求级操作落在这里，
+   不再占用会话标签行。 */
+.request-pane-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-4) 0;
+  flex: none;
+}
+
+/* 名称输入框：就地编辑请求名 / 实体名（spec: 集合与文件夹的重命名）。
+   平时看起来就是文字（透明边与透明底），悬停给出可编辑的暗示，聚焦才落成输入框。 */
+.request-pane-header input.crumb-name,
+.pane-header input.crumb-name {
   width: auto;
   min-width: 0;
   max-width: 320px;
@@ -532,18 +614,20 @@ textarea {
   font: inherit;
 }
 
-.session-tab input.crumb-name:hover:not(:disabled) {
+.request-pane-header input.crumb-name:hover:not(:disabled),
+.pane-header input.crumb-name:hover:not(:disabled) {
   border-color: var(--border);
 }
 
-.session-tab input.crumb-name:focus {
+.request-pane-header input.crumb-name:focus,
+.pane-header input.crumb-name:focus {
   background: var(--panel);
 }
 
-/* 请求级操作（另存为 / 删除）：保留文字标签，指针悬停或行内键盘聚焦时显现。
+/* 请求级操作（另存为 / 删除）：保留文字标签，指针悬停或面板头内键盘聚焦时显现。
    用 visibility 而不是条件渲染或 display:none —— 它保留布局占位，使显现与隐藏
    SHALL NOT 引起水平跳动（ui-layout「显现不引起水平跳动」）。 */
-.session-actions {
+.request-actions {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -551,8 +635,8 @@ textarea {
   visibility: hidden;
 }
 
-.session-bar:hover .session-actions,
-.session-bar:focus-within .session-actions {
+.request-pane-header:hover .request-actions,
+.request-pane-header:focus-within .request-actions {
   visibility: visible;
 }
 
@@ -700,6 +784,17 @@ textarea {
     opacity: 0;
     transform: scale(0.98);
   }
+}
+
+/* 确认类弹框（未保存守卫等）：内容只是一句话加一行按钮，用满 720px 的信息
+   面板宽度会显得空——收窄到与这一档内容相称的体量。 */
+.modal.modal-confirm {
+  width: min(440px, 100%);
+}
+
+/* 正文已有 .modal-body 的内边距，段落的默认外边距会破坏 8px 的紧凑节奏 */
+.modal-confirm .modal-body p {
+  margin: 0;
 }
 
 .modal-header {

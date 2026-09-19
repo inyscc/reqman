@@ -19,6 +19,7 @@ import { WorkspaceTree, type EntitySelection } from './components/WorkspaceTree'
 import { commands as defaultCommands, describeError, type Commands } from './lib/commands';
 import { createEditingRegistry, SURFACE_PRIORITY } from './lib/editing';
 import { readSplitRatio, SPLIT_DEFAULT, writeSplitRatio } from './lib/layout';
+import { readTabs, writeTabs } from './lib/sessionTabs';
 import {
   allowScriptExecution,
   isScriptExecutionAllowed,
@@ -40,29 +41,160 @@ import type {
   Variable,
   Workspace,
 } from './lib/types';
-import { useEditingRegistryVersion, useEditingSurface } from './lib/useEditing';
+import { useEditingRegistryVersion } from './lib/useEditing';
 import { useStoreValue } from './lib/useStore';
 import { onBeforeUnload, tauriWindowCloser, type WindowCloser } from './lib/window';
 
 type Tab = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'scripts';
 
+type EntityKind = 'collection' | 'folder';
+
+interface ScriptReport {
+  console: ConsoleEntry[];
+  assertions: TestAssertion[];
+  error: string | null;
+  visualizer?: VisualizerResult | null;
+}
+
 /**
- * 用户已经表达「我要切走 / 关闭」，但被未保存改动挡住的意图。
+ * 请求编辑会话（design D1）：草稿、未保存标记、响应、内层标签与脚本报告
+ * 都按标签各持一份——切换标签不再覆盖任何东西，守卫因此收缩到「关闭」。
+ */
+interface RequestSessionTab {
+  kind: 'request';
+  /** `request:<requestId>`，同时是编辑面 id。 */
+  id: string;
+  requestId: string;
+  draft: SavedRequest;
+  dirty: boolean;
+  response: ResponsePayload | null;
+  innerTab: Tab;
+  scriptReport: ScriptReport | null;
+}
+
+/**
+ * 集合/文件夹脚本面板会话。实体草稿（含就地编辑的脚本与名称）放在标签里，
+ * 而不是面板组件的本地 state——否则切走标签就会把没存下的脚本丢掉。
+ */
+interface EntitySessionTab {
+  kind: 'entity';
+  /** `entity:<kind>:<id>`，同时是编辑面 id。 */
+  id: string;
+  entityKind: EntityKind;
+  entityId: string;
+  collectionId: string;
+  entity: Collection | Folder | null;
+  /** 已保存的脚本基线：保存成功后前移，未保存守卫据此判断。 */
+  baseline: { pre: string; test: string } | null;
+}
+
+type SessionTab = RequestSessionTab | EntitySessionTab;
+
+const requestTabId = (requestId: string): string => `request:${requestId}`;
+const entityTabId = (kind: EntityKind, id: string): string => `entity:${kind}:${id}`;
+
+const entityPre = (entity: Collection | Folder): string => entity.pre_request_script ?? '';
+const entityTest = (entity: Collection | Folder): string => entity.test_script ?? '';
+
+function isTabDirty(tab: SessionTab): boolean {
+  if (tab.kind === 'request') return tab.dirty;
+  if (!tab.entity || !tab.baseline) return false;
+  return entityPre(tab.entity) !== tab.baseline.pre || entityTest(tab.entity) !== tab.baseline.test;
+}
+
+function tabName(tab: SessionTab): string {
+  return tab.kind === 'request' ? tab.draft.name : (tab.entity?.name ?? '');
+}
+
+/**
+ * 用户已经表达「我要丢弃某些未保存改动」的意图。
  *
- * 意图是数据、执行是函数，两者分开之后守卫的语义就很清楚：先问、再决定要不要执行。
+ * 多标签把「切换」从这张清单上拿掉了（切换不丢东西）；剩下的只有真正的丢弃：
+ * 关脏标签、删除（含集合/文件夹的级联）与退出应用。
  */
 type PendingIntent =
-  | { kind: 'select-request'; id: string }
-  | { kind: 'select-entity'; entity: EntitySelection }
-  | { kind: 'rename-request'; id: string }
-  | { kind: 'rename-entity'; entity: EntitySelection }
-  | { kind: 'close-tab' }
+  | { kind: 'close-tab'; key: string }
   | { kind: 'delete-request'; id: string }
-  /** 另存为与新建请求都会把主区换成另一条请求，同样会丢掉当前草稿。 */
-  | { kind: 'duplicate-request' }
-  | { kind: 'new-request'; collectionId: string; folderId: string | null }
+  | { kind: 'delete-collection'; id: string }
+  | { kind: 'delete-folder'; id: string }
   /** 退出应用：答案要还回 Tauri 的关闭回调（见 closeResolverRef）。 */
   | { kind: 'exit-app' };
+
+/** 树里是否还存在某个集合/文件夹——标签对账的判据只用「条目是否仍存在」（design D5）。 */
+function entityExists(trees: CollectionTree[], kind: EntityKind, id: string): boolean {
+  if (kind === 'collection') {
+    return trees.some((tree) => tree.collection.id === id);
+  }
+
+  const search = (nodes: TreeNode[]): boolean => {
+    for (const node of nodes) {
+      if (node.kind === 'folder' && node.id === id) return true;
+      if (search(node.children)) return true;
+    }
+    return false;
+  };
+
+  return trees.some((tree) => search(tree.children));
+}
+
+function tabExistsInTrees(tab: SessionTab, trees: CollectionTree[]): boolean {
+  return tab.kind === 'request'
+    ? findRequest(trees, tab.requestId) !== null
+    : entityExists(trees, tab.entityKind, tab.entityId);
+}
+
+/** 收集某个文件夹及其全部后代文件夹的 id——删除文件夹的级联范围。 */
+function collectFolderSubtreeIds(trees: CollectionTree[], folderId: string): Set<string> {
+  const ids = new Set<string>();
+
+  const search = (nodes: TreeNode[]): boolean => {
+    for (const node of nodes) {
+      if (node.kind !== 'folder') continue;
+      if (node.id === folderId) {
+        ids.add(node.id);
+        const collect = (children: TreeNode[]) => {
+          for (const child of children) {
+            if (child.kind === 'folder') {
+              ids.add(child.id);
+              collect(child.children);
+            }
+          }
+        };
+        collect(node.children);
+        return true;
+      }
+      if (search(node.children)) return true;
+    }
+    return false;
+  };
+
+  for (const tree of trees) {
+    if (search(tree.children)) break;
+  }
+  return ids;
+}
+
+function collectionHasDirtyTab(tabs: SessionTab[], collectionId: string): boolean {
+  return tabs.some(
+    (item) =>
+      isTabDirty(item) &&
+      (item.kind === 'request'
+        ? item.draft.collection_id === collectionId
+        : item.entityKind === 'collection'
+          ? item.entityId === collectionId
+          : item.collectionId === collectionId),
+  );
+}
+
+function folderHasDirtyTab(tabs: SessionTab[], subtree: Set<string>): boolean {
+  return tabs.some(
+    (item) =>
+      isTabDirty(item) &&
+      (item.kind === 'request'
+        ? item.draft.folder_id != null && subtree.has(item.draft.folder_id)
+        : item.entityKind === 'folder' && subtree.has(item.entityId)),
+  );
+}
 
 export interface AppProps {
   /** 命令层可注入，测试用假的实现替换真实 IPC。 */
@@ -135,26 +267,22 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [trees, setTrees] = useState<CollectionTree[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<SavedRequest | null>(null);
-  const [tab, setTab] = useState<Tab>('params');
-  const [dirty, setDirty] = useState(false);
+  // ---------------------------------------------------------------------------
+  // 会话标签状态（design D1）：主区显示什么由 activeTabKey 唯一决定，
+  // 树的选中态由它派生（spec「标签激活态与树的选中一致」）。
+  // ---------------------------------------------------------------------------
+  const [tabs, setTabs] = useState<SessionTab[]>([]);
+  const [activeTabKey, setActiveTabKey] = useState<string | null>(null);
+  /** 标签集合是否已按当前工作区恢复完成；恢复前不写持久化，避免把空集合写回去。 */
+  const [tabsHydrated, setTabsHydrated] = useState(false);
   const [preview, setPreview] = useState<RequestPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [response, setResponse] = useState<ResponsePayload | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** 待确认的脚本门禁；非空时暂停发送，等用户在界面上做出选择（任务 9.3）。 */
   const [scriptGate, setScriptGate] = useState<{ collectionId: string; name: string } | null>(
     null,
   );
-  /** 上一次发送的脚本输出与断言结果，供响应区的「脚本」标签页呈现（任务 6.1 / 6.2）。 */
-  const [scriptReport, setScriptReport] = useState<{
-    console: ConsoleEntry[];
-    assertions: TestAssertion[];
-    error: string | null;
-    visualizer?: VisualizerResult | null;
-  } | null>(null);
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [environmentId, setEnvironmentId] = useState<string | null>(null);
   const [variables, setVariables] = useState<Variable[]>([]);
@@ -164,17 +292,16 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [sidebarTab, setSidebarTab] = useState<'collections' | 'environments'>('collections');
   /** 低频面板的单例模态（design D5）：非空时打开对应弹窗，同一时间至多一个。 */
   const [modal, setModal] = useState<ModalKind | null>(null);
-  /** 树中选中的集合/文件夹（脚本编辑入口，任务 5.2）；选中请求时清空。 */
-  const [selectedEntity, setSelectedEntity] = useState<EntitySelection | null>(null);
-  const [entityDraft, setEntityDraft] = useState<Collection | Folder | null>(null);
-  /** 菜单的「重命名」只负责把焦点交给面包屑里的名称框（design D3）。 */
-  const [pendingRenameFocus, setPendingRenameFocus] = useState(false);
   /** 被未保存改动挡下的意图；非空时界面给出三选一提示。 */
   const [pendingIntent, setPendingIntent] = useState<PendingIntent | null>(null);
+  /** 菜单的「重命名」只负责把焦点交给面板头里的名称框（design D3）。 */
+  const [pendingRenameFocus, setPendingRenameFocus] = useState(false);
   const entityNameRef = useRef<HTMLInputElement>(null);
   const requestNameRef = useRef<HTMLInputElement>(null);
   /** Ctrl+S 的一次保存尚未结束时，不再重复提交。 */
   const savingRef = useRef(false);
+  /** 关闭标签的实现声明在组件靠后处；全局快捷键 effect 经 ref 引用，避免「声明前使用」。 */
+  const requestCloseTabRef = useRef<(key: string) => void>(() => {});
   /** 窗口关闭请求挂起时，用它把「要不要关」的答案还给 Tauri 的关闭回调。 */
   const closeResolverRef = useRef<((allow: boolean) => void) | null>(null);
   /** 窗口是否处于最大化：最大化 / 还原按钮的图标跟随这个真实状态（window-chrome spec）。 */
@@ -186,6 +313,153 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const editingVersion = useEditingRegistryVersion(editingRegistry);
 
   const previewSequence = useRef(0);
+
+  // ---------------------------------------------------------------------------
+  // 派生值：单槽位时代的 draft/dirty/tab/response/scriptReport/selectedEntity
+  // 全部从激活标签读出（design D1）。
+  // ---------------------------------------------------------------------------
+  const activeTab = tabs.find((item) => item.id === activeTabKey) ?? null;
+  const activeRequestTab = activeTab?.kind === 'request' ? activeTab : null;
+  const activeEntityTab = activeTab?.kind === 'entity' ? activeTab : null;
+  const draft = activeRequestTab?.draft ?? null;
+  const dirty = activeRequestTab?.dirty ?? false;
+  const tab: Tab = activeRequestTab?.innerTab ?? 'params';
+  const response = activeRequestTab?.response ?? null;
+  const scriptReport = activeRequestTab?.scriptReport ?? null;
+  const entityDraft = activeEntityTab?.entity ?? null;
+  /** 树中选中的集合/文件夹（脚本编辑入口）；选中请求时为 null。 */
+  const selectedEntity: EntitySelection | null = activeEntityTab
+    ? {
+        kind: activeEntityTab.entityKind,
+        id: activeEntityTab.entityId,
+        collectionId: activeEntityTab.collectionId,
+      }
+    : null;
+
+  // 命令式编辑面注册需要读取「最新」值，因此维护一组镜像 ref。
+  const tabsRef = useRef<SessionTab[]>(tabs);
+  tabsRef.current = tabs;
+  const treesRef = useRef<CollectionTree[]>(trees);
+  treesRef.current = trees;
+  const activeKeyRef = useRef<string | null>(activeTabKey);
+  activeKeyRef.current = activeTabKey;
+  const workspaceIdRef = useRef<string | null>(workspaceId);
+  workspaceIdRef.current = workspaceId;
+  const showEnvironmentEditorRef = useRef(sidebarTab === 'environments');
+  showEnvironmentEditorRef.current = sidebarTab === 'environments';
+  const modalRef = useRef(modal);
+  modalRef.current = modal;
+
+  const patchRequestTab = useCallback(
+    (key: string, patch: (item: RequestSessionTab) => RequestSessionTab) => {
+      setTabs((previous) =>
+        previous.map((item) =>
+          item.id === key && item.kind === 'request' ? patch(item) : item,
+        ),
+      );
+    },
+    [],
+  );
+
+  const patchEntityTab = useCallback(
+    (key: string, patch: (item: EntitySessionTab) => EntitySessionTab) => {
+      setTabs((previous) =>
+        previous.map((item) =>
+          item.id === key && item.kind === 'entity' ? patch(item) : item,
+        ),
+      );
+    },
+    [],
+  );
+
+  /**
+   * 移除满足条件的标签，并在被移除的正是激活标签时把激活态移交给相邻标签
+   * （spec「关闭激活标签后激活态移交」；没有标签则回空态）。
+   */
+  const removeTabsWhere = useCallback((predicate: (item: SessionTab) => boolean) => {
+    const current = tabsRef.current;
+    const kept = current.filter((item) => !predicate(item));
+    if (kept.length === current.length) return;
+
+    const removedActiveIndex = current.findIndex(
+      (item) => predicate(item) && item.id === activeKeyRef.current,
+    );
+    setTabs(kept);
+    if (removedActiveIndex >= 0) {
+      setActiveTabKey(
+        kept.length > 0 ? kept[Math.min(removedActiveIndex, kept.length - 1)].id : null,
+      );
+    }
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // 唯一的打开入口（design D1）：同一 id 至多一个标签是硬约束。
+  // 已在册则只聚焦既有标签，SHALL NOT 重载其草稿。
+  // ---------------------------------------------------------------------------
+  const openRequest = useCallback(
+    async (id: string) => {
+      const key = requestTabId(id);
+      setError(null);
+
+      if (tabsRef.current.some((item) => item.id === key)) {
+        setActiveTabKey(key);
+        return;
+      }
+
+      const optimistic = requestStore.get(id);
+      const loaded =
+        optimistic ?? findRequest(treesRef.current, id) ?? (await client.requestGet(id));
+      const next: RequestSessionTab = {
+        kind: 'request',
+        id: key,
+        requestId: id,
+        // 打开时清一次历史空行：此前存进去的空行不该在表格里占位
+        draft: withoutEmptyRows(loaded),
+        dirty: false,
+        response: null,
+        innerTab: 'params',
+        scriptReport: null,
+      };
+      setTabs((previous) =>
+        previous.some((item) => item.id === key) ? previous : [...previous, next],
+      );
+      setActiveTabKey(key);
+    },
+    [client, requestStore],
+  );
+
+  const openEntity = useCallback(
+    async (kind: EntityKind, id: string, collectionId: string) => {
+      const key = entityTabId(kind, id);
+      setError(null);
+
+      if (tabsRef.current.some((item) => item.id === key)) {
+        setActiveTabKey(key);
+        return;
+      }
+
+      try {
+        const loaded =
+          kind === 'collection' ? await client.collectionGet(id) : await client.folderGet(id);
+        const next: EntitySessionTab = {
+          kind: 'entity',
+          id: key,
+          entityKind: kind,
+          entityId: id,
+          collectionId,
+          entity: loaded,
+          baseline: { pre: entityPre(loaded), test: entityTest(loaded) },
+        };
+        setTabs((previous) =>
+          previous.some((item) => item.id === key) ? previous : [...previous, next],
+        );
+        setActiveTabKey(key);
+      } catch (caught) {
+        setError(describeError(caught).message);
+      }
+    },
+    [client],
+  );
 
   const loadTree = useCallback(
     async (id: string) => {
@@ -200,8 +474,11 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           return walk(tree.children);
         }),
       );
+      // 对账（design D5）：必须在条目写回 store 之后跑（先 seed 再对账），
+      // 丢弃指向已不存在条目的标签；判据只用「条目是否仍存在」，不看标签是否脏。
+      removeTabsWhere((item) => !tabExistsInTrees(item, loaded));
     },
-    [client, requestStore],
+    [client, requestStore, removeTabsWhere],
   );
 
   const loadEnvironments = useCallback(
@@ -267,17 +544,97 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     })();
   }, [client]);
 
+  /**
+   * 加载工作区：先 `loadTree` 把条目写回 store（seed，内部已含对账）→ 再恢复
+   * 标签集合。三者必须串好，否则恢复出的标签会被「指向不存在」误杀（design D6
+   * 的恢复顺序）。
+   */
   useEffect(() => {
     if (!workspaceId) return;
+    let cancelled = false;
+    setTabsHydrated(false);
+
     void (async () => {
       try {
         await loadTree(workspaceId);
         await loadEnvironments(workspaceId);
+        if (cancelled) return;
+
+        // 恢复标签集合（spec「会话标签集合的持久化」）：指向已不存在的条目被丢弃。
+        const persisted = await readTabs(client, workspaceId);
+        if (cancelled) return;
+
+        const restored: SessionTab[] = [];
+        for (const entry of persisted.tabs) {
+          if (entry.kind === 'request') {
+            const request =
+              requestStore.get(entry.id) ?? findRequest(treesRef.current, entry.id);
+            if (!request) continue;
+            restored.push({
+              kind: 'request',
+              id: requestTabId(entry.id),
+              requestId: entry.id,
+              draft: withoutEmptyRows(request),
+              dirty: false,
+              response: null,
+              innerTab: 'params',
+              scriptReport: null,
+            });
+            continue;
+          }
+
+          if (!entityExists(treesRef.current, entry.entityKind, entry.id)) continue;
+          try {
+            const loaded =
+              entry.entityKind === 'collection'
+                ? await client.collectionGet(entry.id)
+                : await client.folderGet(entry.id);
+            restored.push({
+              kind: 'entity',
+              id: entityTabId(entry.entityKind, entry.id),
+              entityKind: entry.entityKind,
+              entityId: entry.id,
+              collectionId: 'collection_id' in loaded ? loaded.collection_id : entry.id,
+              entity: loaded,
+              baseline: { pre: entityPre(loaded), test: entityTest(loaded) },
+            });
+          } catch {
+            // 取不回的实体按「已删除」处理：丢弃而不是进入错误态
+          }
+        }
+
+        if (cancelled) return;
+        setTabs(restored);
+        setActiveTabKey(
+          persisted.activeId && restored.some((item) => item.id === persisted.activeId)
+            ? persisted.activeId
+            : (restored[0]?.id ?? null),
+        );
+        setTabsHydrated(true);
       } catch (caught) {
-        setError(describeError(caught).message);
+        if (!cancelled) setError(describeError(caught).message);
       }
     })();
-  }, [workspaceId, loadTree, loadEnvironments]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, loadTree, loadEnvironments, client, requestStore]);
+
+  // 标签集合持久化：只在开/关/切时写（design D6），不在每次编辑时写；
+  // 恢复完成之前不写，避免用空集合覆盖上次的记录。
+  useEffect(() => {
+    if (!workspaceId || !tabsHydrated) return;
+    const value = {
+      tabs: tabs.map((item) =>
+        item.kind === 'request'
+          ? ({ kind: 'request', id: item.requestId } as const)
+          : ({ kind: 'entity', entityKind: item.entityKind, id: item.entityId } as const),
+      ),
+      activeId: activeTabKey,
+    };
+    void writeTabs(client, workspaceId, value);
+  }, [client, workspaceId, tabsHydrated, tabs, activeTabKey]);
 
   // 分栏比例：切换工作区时读回该工作区上次调整的值（design D7）。
   // 读不到就回落默认——一条显示偏好不该把界面拖进错误态。
@@ -380,11 +737,6 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
    */
   const showEnvironmentEditor = sidebarTab === 'environments';
 
-  /** 环境编辑器标题用的名字：未激活环境时就是 Globals。 */
-  const environmentName =
-    (environmentId ? environments.find((item) => item.id === environmentId)?.name : null) ??
-    'Globals';
-
   const reloadAfterImport = useCallback(async () => {
     if (!workspaceId) return;
     await loadTree(workspaceId);
@@ -392,54 +744,27 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     await loadVariables(workspaceId, environmentId);
   }, [workspaceId, environmentId, loadTree, loadEnvironments, loadVariables]);
 
-  /** 打开集合/文件夹的脚本编辑面板（5.2）——真正执行，不经过守卫。 */
-  const activateEntity = async (entity: EntitySelection) => {
-    setError(null);
-    setSelectedEntity(entity);
-    setDraft(null);
-    setSelectedId(null);
-    try {
-      const loaded =
-        entity.kind === 'collection'
-          ? await client.collectionGet(entity.id)
-          : await client.folderGet(entity.id);
-      setEntityDraft(loaded);
-    } catch (caught) {
-      setEntityDraft(null);
-      setError(describeError(caught).message);
-    }
-  };
-
-  /** 实体脚本保存后：刷新树（脚本随条目持久化，5.3）。 */
-  const entitySaved = () => {
-    setBusy(false);
-    if (workspaceId) void loadTree(workspaceId);
-  };
-
-  /** 切换主区到某个请求——真正执行，不经过守卫。 */
-  const activateRequest = async (id: string) => {
-    setError(null);
-    setResponse(null);
-    setSelectedId(id);
-    setDirty(false);
-    setSelectedEntity(null);
-    setEntityDraft(null);
-    const optimistic = requestStore.get(id);
-    const loaded = optimistic ?? findRequest(trees, id) ?? (await client.requestGet(id));
-    // 打开时清一次历史空行：此前存进去的空行不该在表格里占位
-    setDraft(withoutEmptyRows(loaded));
-  };
-
   const editDraft = (next: SavedRequest) => {
-    setDraft(next);
-    setDirty(true);
+    const key = activeKeyRef.current;
+    if (!key) return;
+    patchRequestTab(key, (item) => ({ ...item, draft: next, dirty: true }));
     requestStore.markDirty(next.id);
   };
 
-  const saveDraft = async (): Promise<boolean> => {
-    if (!draft) return false;
+  /** 切换请求编辑器的内层标签（Params/Body/…）：只动当前标签。 */
+  const setInnerTab = (next: Tab) => {
+    const key = activeKeyRef.current;
+    if (!key) return;
+    patchRequestTab(key, (item) => ({ ...item, innerTab: next }));
+  };
+
+  /** 保存某个请求标签：只动那一个标签的 dirty，不影响其他标签的草稿。 */
+  const saveRequestTab = async (key: string): Promise<boolean> => {
+    const current = tabsRef.current.find((item) => item.id === key);
+    if (!current || current.kind !== 'request') return false;
+
     // 空行不进存储：清洗只发生在出口，用户编辑过程中清空的行照旧留在表格里
-    const payload = withoutEmptyRows(draft);
+    const payload = withoutEmptyRows(current.draft);
     setBusy(true);
     setError(null);
     try {
@@ -451,8 +776,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         await allowScriptExecution(client, payload.collection_id);
       }
 
-      setDirty(false);
-      if (workspaceId) await loadTree(workspaceId);
+      patchRequestTab(key, (item) => ({ ...item, dirty: false }));
+      const id = workspaceIdRef.current;
+      if (id) await loadTree(id);
       return true;
     } catch (caught) {
       setError(describeError(caught).message);
@@ -460,6 +786,52 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     } finally {
       setBusy(false);
     }
+  };
+
+  /** 保存某个实体脚本标签：基线前移后 dirty 归零。 */
+  const saveEntityTab = async (key: string): Promise<boolean> => {
+    const current = tabsRef.current.find((item) => item.id === key);
+    if (!current || current.kind !== 'entity' || !current.entity) return false;
+
+    const pre = entityPre(current.entity).trim() ? entityPre(current.entity) : null;
+    const test = entityTest(current.entity).trim() ? entityTest(current.entity) : null;
+
+    setBusy(true);
+    setError(null);
+    try {
+      if (current.entityKind === 'collection') {
+        await client.collectionSetScript(current.entityId, pre, test);
+      } else {
+        await client.folderSetScript(current.entityId, pre, test);
+      }
+
+      if (pre || test) {
+        await allowScriptExecution(client, current.collectionId);
+      }
+
+      patchEntityTab(key, (item) => ({
+        ...item,
+        baseline: {
+          pre: item.entity ? entityPre(item.entity) : '',
+          test: item.entity ? entityTest(item.entity) : '',
+        },
+      }));
+      const id = workspaceIdRef.current;
+      if (id) await loadTree(id);
+      return true;
+    } catch (caught) {
+      setError(describeError(caught).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 保存任意一个标签（编辑面注册表经由它保存各自的面）。 */
+  const saveTab = async (key: string): Promise<boolean> => {
+    const current = tabsRef.current.find((item) => item.id === key);
+    if (!current) return false;
+    return current.kind === 'request' ? saveRequestTab(key) : saveEntityTab(key);
   };
 
   /**
@@ -486,13 +858,51 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     }
   }, [busy, editingRegistry]);
 
+  /**
+   * 全局快捷键（任务 6.1），全部挂在 window 层、不依赖焦点位置（与 Ctrl+S 一致）：
+   * - Ctrl+S：保存当前生效的编辑面
+   * - Ctrl+W：关闭激活标签（走守卫；交由 requestCloseTab，脏则先问）
+   * - Ctrl+Tab / Ctrl+Shift+Tab：前后切换标签（环形）
+   * - Ctrl+1..9：跳到第 N 个标签
+   *
+   * Ctrl+W 是否被 WebView2 交给页面，是 design 的 Open Question（任务 6.2）——若宿主
+   * 吞掉它，快捷键清单只保留中键与关闭按钮，不影响其余逻辑。
+   */
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-      if (event.key.toLowerCase() !== 's') return;
-      // 拦掉运行环境自己的「保存网页」
-      event.preventDefault();
-      void saveCurrentSurface();
+
+      if (event.key.toLowerCase() === 's') {
+        // 拦掉运行环境自己的「保存网页」
+        event.preventDefault();
+        void saveCurrentSurface();
+        return;
+      }
+
+      if (event.key.toLowerCase() === 'w') {
+        event.preventDefault();
+        const active = activeKeyRef.current;
+        if (active) requestCloseTabRef.current(active);
+        return;
+      }
+
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        const list = tabsRef.current;
+        if (list.length === 0) return;
+        const currentIndex = list.findIndex((item) => item.id === activeKeyRef.current);
+        const delta = event.shiftKey ? -1 : 1;
+        const nextIndex = (currentIndex + delta + list.length) % list.length;
+        setActiveTabKey(list[nextIndex].id);
+        return;
+      }
+
+      if (/^[1-9]$/.test(event.key)) {
+        event.preventDefault();
+        const target = tabsRef.current[Number(event.key) - 1];
+        if (target) setActiveTabKey(target.id);
+        return;
+      }
     };
 
     window.addEventListener('keydown', onKeyDown);
@@ -562,16 +972,56 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
    */
   useEffect(() => onBeforeUnload(() => editingRegistry.dirty().length > 0), [editingRegistry]);
 
-  useEditingSurface(editingRegistry, {
-    id: 'request',
-    priority: SURFACE_PRIORITY.request,
-    label: `请求「${draft?.name ?? ''}」`,
-    // 主区让给环境编辑器、或模态盖住主区时，它不再是「当前面」，
-    // 但仍然是需要守卫的脏面（关窗时照样要提示）
-    isActive: () => !showEnvironmentEditor && modal === null,
-    isDirty: () => dirty && draft !== null,
-    save: saveDraft,
-  });
+  // ---------------------------------------------------------------------------
+  // 编辑面按标签注册（design D4）：每个打开的标签一个面，未激活的标签同样注册，
+  // 因此它照样进入 dirty()，关窗时会被守卫提示——这正是「另一个标签里有没存下
+  // 的东西」要保住的。
+  //
+  // 钩子数量不能随标签数变化，因此不走 useEditingSurface，而是在一个 effect 里
+  // 命令式注册；isDirty/save/label 经 ref 读最新值，注册只随标签集合变化重建。
+  // 实体面同样带 isActive（否则 top() 会选中后台实体标签，Ctrl+S 就会去保存
+  // 用户没在看的脚本——本次改动引入的新缺陷面，必测）。
+  // ---------------------------------------------------------------------------
+  const saveTabRef = useRef(saveTab);
+  saveTabRef.current = saveTab;
+
+  const tabIdsSignature = tabs.map((item) => item.id).join('|');
+  useEffect(() => {
+    const offs = tabsRef.current.map((entry) =>
+      editingRegistry.register({
+        id: entry.id,
+        priority:
+          entry.kind === 'request' ? SURFACE_PRIORITY.request : SURFACE_PRIORITY.panel,
+        get label() {
+          const current = tabsRef.current.find((item) => item.id === entry.id);
+          if (!current) return '';
+          if (current.kind === 'request') return `请求「${current.draft.name}」`;
+          const kindLabel = current.entityKind === 'collection' ? '集合' : '文件夹';
+          return `${kindLabel}「${current.entity?.name ?? ''}」的脚本`;
+        },
+        isDirty: () => {
+          const current = tabsRef.current.find((item) => item.id === entry.id);
+          return current ? isTabDirty(current) : false;
+        },
+        save: () => saveTabRef.current(entry.id),
+        isActive: () =>
+          activeKeyRef.current === entry.id &&
+          (entry.kind === 'entity' ||
+            (!showEnvironmentEditorRef.current && modalRef.current === null)),
+      }),
+    );
+    return () => offs.forEach((off) => off());
+    // 标签集合（id 列表）变化时重建；脏状态经 ref 读取，不需要重建
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingRegistry, tabIdsSignature]);
+
+  // 脏状态翻转时唤醒订阅者：守卫与 Ctrl+S 据此重新判断（对应 useEditingSurface 的 touch）。
+  const dirtySignature = `${tabs
+    .map((item) => (isTabDirty(item) ? '1' : '0'))
+    .join('')}|${tabs.length}`;
+  useEffect(() => {
+    editingRegistry.touch();
+  }, [editingRegistry, dirtySignature]);
 
   /** 有未保存改动的编辑面：未保存守卫据此判断要不要先问用户。 */
   const dirtySurfaces = useMemo(
@@ -584,11 +1034,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
    * `skipScripts` 为真时跳过全部脚本只发请求——门禁被拒绝后的「不执行脚本，仍发送」。
    */
   const performSend = async (skipScripts: boolean) => {
-    if (!draft) return;
+    // 发送永远作用于当前激活的请求标签；响应与脚本报告写回它自己的标签
+    const key = activeRequestTab?.id;
+    if (!key || !draft) return;
     setBusy(true);
     setError(null);
     setScriptGate(null);
-    setScriptReport(null);
+    patchRequestTab(key, (item) => ({ ...item, scriptReport: null }));
 
     // 三级脚本：集合 → 文件夹 → 请求（任务 2.4）。集合与文件夹的脚本挂在实体上，
     // 树形接口不给，因此单独取回（任务 2.5）。
@@ -649,7 +1101,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         inline: cleanForSend(draft),
         environment_id: environmentId,
       });
-      setResponse(payload);
+      patchRequestTab(key, (item) => ({ ...item, response: payload }));
 
       if (target && !skipScripts && phases) {
         const post = await runScriptPhase(client, target, 'test', phases.test, payload, requestUrl);
@@ -660,27 +1112,33 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         scriptVisualizer = post.visualizer;
       }
     } catch (caught) {
-      setResponse(null);
+      patchRequestTab(key, (item) => ({ ...item, response: null }));
       setError(describeError(caught).message);
       // 请求本身失败（离线、DNS、证书…）不该连带丢掉前置脚本已经产生的输出与断言：
       // console 的呈现要求没有「仅当请求成功」这一限定条件
-      setScriptReport({
-        console: scriptConsole,
-        assertions: scriptAssertions,
-        error: scriptError,
-        visualizer: scriptVisualizer,
-      });
+      patchRequestTab(key, (item) => ({
+        ...item,
+        scriptReport: {
+          console: scriptConsole,
+          assertions: scriptAssertions,
+          error: scriptError,
+          visualizer: scriptVisualizer,
+        },
+      }));
       setBusy(false);
       return;
     }
 
     setBusy(false);
-    setScriptReport({
-      console: scriptConsole,
-      assertions: scriptAssertions,
-      error: scriptError,
-      visualizer: scriptVisualizer,
-    });
+    patchRequestTab(key, (item) => ({
+      ...item,
+      scriptReport: {
+        console: scriptConsole,
+        assertions: scriptAssertions,
+        error: scriptError,
+        visualizer: scriptVisualizer,
+      },
+    }));
     // 脚本出错不阻断：请求已发出、响应已可查看，脚本的错误另行呈现
     // （spec: 脚本超时与错误处置）。
     if (scriptError) setError(scriptError);
@@ -694,21 +1152,40 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     await loadTree(workspaceId);
   };
 
-  /** 真正执行「新建请求」——不经过守卫。 */
+  /** 真正执行「新建请求」：后端立即分配真实 id，直接据此开新标签（design D1）。 */
   const createRequest = async (collectionId: string, folderId: string | null) => {
-    const created = await client.requestCreate({
-      collection_id: collectionId,
-      folder_id: folderId,
-      name: '新请求',
-      method: 'GET',
-      url: 'https://example.test/',
-    });
-    if (workspaceId) await loadTree(workspaceId);
-    setSelectedId(created.id);
-    setDraft(created);
-    setDirty(false);
-    setSelectedEntity(null);
-    setEntityDraft(null);
+    setError(null);
+    try {
+      const created = await client.requestCreate({
+        collection_id: collectionId,
+        folder_id: folderId,
+        name: '新请求',
+        method: 'GET',
+        url: 'https://example.test/',
+      });
+      if (workspaceId) await loadTree(workspaceId);
+      const key = requestTabId(created.id);
+      setTabs((previous) =>
+        previous.some((item) => item.id === key)
+          ? previous
+          : [
+              ...previous,
+              {
+                kind: 'request' as const,
+                id: key,
+                requestId: created.id,
+                draft: withoutEmptyRows(created),
+                dirty: false,
+                response: null,
+                innerTab: 'params' as const,
+                scriptReport: null,
+              },
+            ],
+      );
+      setActiveTabKey(key);
+    } catch (caught) {
+      setError(describeError(caught).message);
+    }
   };
 
   const deleteCollection = async (id: string) => {
@@ -732,10 +1209,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     setError(null);
     try {
       await client.folderDelete(id);
-      if (selectedEntity?.kind === 'folder' && selectedEntity.id === id) {
-        setSelectedEntity(null);
-        setEntityDraft(null);
-      }
+      // 指向被删文件夹（含后代）的脚本标签随删除一并关闭；loadTree 的对账兜底
+      removeTabsWhere(
+        (item) =>
+          item.kind === 'entity' &&
+          item.entityKind === 'folder' &&
+          collectFolderSubtreeIds(treesRef.current, id).has(item.entityId),
+      );
       if (workspaceId) await loadTree(workspaceId);
     } catch (caught) {
       setError(describeError(caught).message);
@@ -746,49 +1226,59 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     setError(null);
     try {
       await client.requestDelete(id);
-      if (selectedId === id) {
-        setDraft(null);
-        setSelectedId(null);
-      }
+      // 该请求的标签随删除一并关闭；loadTree 的对账兜底
+      removeTabsWhere((item) => item.kind === 'request' && item.requestId === id);
       if (workspaceId) await loadTree(workspaceId);
     } catch (caught) {
       setError(describeError(caught).message);
     }
   };
 
-  /** 菜单的「重命名」：先过守卫，执行时再把焦点交给面包屑里的名称框。 */
+  /** 菜单的「重命名」：打开对应标签并把焦点交给面板头里的名称框（不经过守卫）。 */
   const renameEntity = (entity: EntitySelection) => {
-    guard({ kind: 'rename-entity', entity });
+    void openEntity(entity.kind, entity.id, entity.collectionId).then(() =>
+      setPendingRenameFocus(true),
+    );
   };
 
   const renameRequest = (id: string) => {
-    guard({ kind: 'rename-request', id });
+    void openRequest(id).then(() => setPendingRenameFocus(true));
   };
 
-  /** 集合与文件夹的改名走面包屑，与请求改名同一处（design D3）。 */
-  const saveEntityName = async () => {
-    if (!selectedEntity || !entityDraft) return;
-    const name = entityDraft.name.trim();
+  /** 集合与文件夹的改名落在实体脚本面板的面板头（design D3）。 */
+  const commitEntityName = async () => {
+    const current = activeEntityTab;
+    if (!current || !current.entity) return;
+    const entity: EntitySelection = {
+      kind: current.entityKind,
+      id: current.entityId,
+      collectionId: current.collectionId,
+    };
+    const name = current.entity.name.trim();
 
     if (!name) {
       setError('名称不能为空');
-      const original = findEntityName(trees, selectedEntity);
-      if (original) setEntityDraft({ ...entityDraft, name: original });
+      const original = findEntityName(trees, entity);
+      if (original) {
+        patchEntityTab(current.id, (item) =>
+          item.entity ? { ...item, entity: { ...item.entity, name: original } } : item,
+        );
+      }
       return;
     }
 
     // 改成失焦/回车提交之后，这里会被「点进名称框又原样离开」触发：
     // 名称没变就不打扰后端
-    if (name === findEntityName(trees, selectedEntity)) return;
+    if (name === findEntityName(trees, entity)) return;
 
     setBusy(true);
     setError(null);
     try {
       const saved =
-        selectedEntity.kind === 'collection'
-          ? await client.collectionRename(selectedEntity.id, name)
-          : await client.folderRename(selectedEntity.id, name);
-      setEntityDraft(saved);
+        current.entityKind === 'collection'
+          ? await client.collectionRename(current.entityId, name)
+          : await client.folderRename(current.entityId, name);
+      patchEntityTab(current.id, (item) => ({ ...item, entity: saved }));
       if (workspaceId) await loadTree(workspaceId);
     } catch (caught) {
       setError(describeError(caught).message);
@@ -797,29 +1287,52 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     }
   };
 
-  /** 真正执行「另存为」——不经过守卫。 */
+  /** 真正执行「另存为」：新增标签、原标签与它的草稿原样保留（design D1）。 */
   const duplicateRequest = async () => {
     if (!draft) return;
-    const copy = await client.requestDuplicate(draft.id, null);
-    if (workspaceId) await loadTree(workspaceId);
-    setSelectedId(copy.id);
-    setDraft(copy);
-    setDirty(false);
+    setError(null);
+    try {
+      const copy = await client.requestDuplicate(draft.id, null);
+      if (workspaceId) await loadTree(workspaceId);
+      const key = requestTabId(copy.id);
+      setTabs((previous) =>
+        previous.some((item) => item.id === key)
+          ? previous
+          : [
+              ...previous,
+              {
+                kind: 'request' as const,
+                id: key,
+                requestId: copy.id,
+                draft: withoutEmptyRows(copy),
+                dirty: false,
+                response: null,
+                innerTab: 'params' as const,
+                scriptReport: null,
+              },
+            ],
+      );
+      setActiveTabKey(key);
+    } catch (caught) {
+      setError(describeError(caught).message);
+    }
   };
 
-  /** 删除当前打开的请求（面包屑上的「删除」）：有未保存改动时先问。 */
+  /** 该请求是否带着一个有未保存改动的标签——删除前的守卫判据。 */
+  const requestHasDirtyTab = (id: string) =>
+    tabsRef.current.some(
+      (item) => item.kind === 'request' && item.requestId === id && item.dirty,
+    );
+
+  /** 删除当前打开的请求（请求面板头上的「删除」）：有未保存改动时先问。 */
   const removeRequest = () => {
     if (!draft) return;
-    if (dirty) {
-      guard({ kind: 'delete-request', id: draft.id });
-      return;
-    }
-    void deleteRequestById(draft.id);
+    removeRequestById(draft.id);
   };
 
-  /** 树的菜单里删除请求：删的正是当前打开的那个且未保存时，先问。 */
+  /** 树的菜单里删除请求：该请求带着脏标签时先问。 */
   const removeRequestById = (id: string) => {
-    if (id === selectedId && dirty) {
+    if (requestHasDirtyTab(id)) {
       guard({ kind: 'delete-request', id });
       return;
     }
@@ -845,33 +1358,17 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const runIntent = async (intent: PendingIntent) => {
     setPendingIntent(null);
     switch (intent.kind) {
-      case 'select-request':
-        await activateRequest(intent.id);
-        return;
-      case 'select-entity':
-        await activateEntity(intent.entity);
-        return;
-      case 'rename-request':
-        await activateRequest(intent.id);
-        setPendingRenameFocus(true);
-        return;
-      case 'rename-entity':
-        await activateEntity(intent.entity);
-        setPendingRenameFocus(true);
-        return;
       case 'close-tab':
-        setDraft(null);
-        setSelectedId(null);
-        setResponse(null);
+        removeTabsWhere((item) => item.id === intent.key);
         return;
       case 'delete-request':
         await deleteRequestById(intent.id);
         return;
-      case 'duplicate-request':
-        await duplicateRequest();
+      case 'delete-collection':
+        await deleteCollection(intent.id);
         return;
-      case 'new-request':
-        await createRequest(intent.collectionId, intent.folderId);
+      case 'delete-folder':
+        await deleteFolder(intent.id);
         return;
       case 'exit-app': {
         // 双路径收尾（design D4）：有原生关闭请求挂起（Alt+F4）就把答案还给它的
@@ -923,26 +1420,49 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     await runIntent(intent);
   };
 
-  /** 树里选中请求（守卫入口）。 */
+  /** 树里选中请求：打开/聚焦标签。切换不丢草稿，因此不经过守卫。 */
   const selectRequest = (id: string) => {
-    // 重复点当前已打开的请求：不重载草稿、不动未保存标记，更不该弹守卫
-    if (id === selectedId) return;
-    guard({ kind: 'select-request', id });
+    // 重复点当前已打开的请求：不重载草稿、不动未保存标记
+    if (activeKeyRef.current === requestTabId(id)) return;
+    void openRequest(id);
   };
 
-  /** 树里选中集合/文件夹（守卫入口）。 */
+  /** 树里选中集合/文件夹：打开/聚焦其脚本标签，同样不经过守卫。 */
   const selectEntity = (entity: EntitySelection) => {
-    guard({ kind: 'select-entity', entity });
+    void openEntity(entity.kind, entity.id, entity.collectionId);
   };
 
-  /** 另存为 / 新建请求：都会把主区换成另一条请求，先过守卫。 */
-  const duplicate = () => {
-    if (!draft) return;
-    guard({ kind: 'duplicate-request' });
+  /** 关闭一个标签（标签上的关闭入口 / 中键）：有未保存改动时先问。 */
+  const requestCloseTab = (key: string) => {
+    const current = tabsRef.current.find((item) => item.id === key);
+    if (current && isTabDirty(current)) {
+      guard({ kind: 'close-tab', key });
+      return;
+    }
+    removeTabsWhere((item) => item.id === key);
+  };
+  requestCloseTabRef.current = requestCloseTab;
+
+  /** 树的菜单里删除集合：其下有脏标签（含级联到的请求/实体）时先问。 */
+  const removeCollection = (id: string) => {
+    if (collectionHasDirtyTab(tabsRef.current, id)) {
+      guard({ kind: 'delete-collection', id });
+      return;
+    }
+    void deleteCollection(id);
+  };
+
+  /** 树的菜单里删除文件夹：其子树里有脏标签时先问。 */
+  const removeFolder = (id: string) => {
+    if (folderHasDirtyTab(tabsRef.current, collectFolderSubtreeIds(treesRef.current, id))) {
+      guard({ kind: 'delete-folder', id });
+      return;
+    }
+    void deleteFolder(id);
   };
 
   const newRequest = (collectionId: string, folderId: string | null) => {
-    guard({ kind: 'new-request', collectionId, folderId });
+    void createRequest(collectionId, folderId);
   };
 
   const saveFullResponse = async () => {
@@ -1003,7 +1523,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           {sidebarTab === 'collections' ? (
             <WorkspaceTree
               trees={displayTrees}
-              selectedRequestId={selectedId}
+              selectedRequestId={activeRequestTab?.requestId ?? null}
               selectedEntity={selectedEntity}
               onSelectRequest={(id) => void selectRequest(id)}
               onSelectEntity={(entity) => void selectEntity(entity)}
@@ -1012,8 +1532,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               onNewFolder={(collectionId, parentFolderId) =>
                 void newFolder(collectionId, parentFolderId)
               }
-              onDeleteCollection={(id) => void deleteCollection(id)}
-              onDeleteFolder={(id) => void deleteFolder(id)}
+              onDeleteCollection={removeCollection}
+              onDeleteFolder={removeFolder}
               onDeleteRequest={removeRequestById}
               onRenameEntity={(entity) => renameEntity(entity)}
               onRenameRequest={(id) => renameRequest(id)}
@@ -1040,100 +1560,91 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         className={`main ${draft && !showEnvironmentEditor ? 'with-response' : ''}`}
         style={{ '--split': `${splitRatio * 100}%` } as CSSProperties}
       >
-        {/* 会话标签：视觉壳，始终最多一个（spec: 会话标签视觉壳）。
-            这一行同时是事实上的标题栏：拖拽移动与双击最大化挂在这里。 */}
+        {/* 会话标签栏（spec: 会话标签栏）：左侧承载标签集合，右侧只有环境选择器
+            与窗口控制按钮。这一行同时是事实上的标题栏：拖拽移动与双击最大化挂在这里，
+            标签本身渲染成 button，自然落在拖拽排除清单里（window-chrome）。 */}
         <div className="session-bar" data-testid="session-bar" onMouseDown={onSessionBarMouseDown}>
-          {/* 标签 + 面包屑合成同一个元素（design D3）：主区顶部只有这一行，
-              当前请求名在全界面只渲染这一次（原先标签与面包屑各渲染一次）。 */}
-          {showEnvironmentEditor ? (
-            <div className="session-tab" data-testid="session-tab">
-              <span className="badge">环境</span>
-              <span className="name">{environmentName}</span>
-            </div>
-          ) : draft ? (
-            <div className="session-tab" data-testid="session-tab">
-              {crumbCollectionName && (
-                <>
-                  <span className="crumb">{crumbCollectionName}</span>
-                  <span className="crumb-sep">›</span>
-                </>
-              )}
-              <span className="method-badge" data-method={draft.method}>
-                {draft.method}
-              </span>
-              <input
-                ref={requestNameRef}
-                className="crumb-name"
-                aria-label="请求名称"
-                value={draft.name}
-                onChange={(event) => editDraft({ ...draft, name: event.target.value })}
-              />
-              <button
-                className="ghost"
-                aria-label="关闭标签"
-                onClick={() => guard({ kind: 'close-tab' })}
-              >
-                ×
-              </button>
-            </div>
-          ) : selectedEntity && entityDraft ? (
-            <div className="session-tab" data-testid="session-tab">
-              {/* 种类用图标标注，不用「集合」「文件夹」两个汉字——那两个词
-                  和名称抢同一行的横向空间，而图标一眼就能分辨（design D3）。 */}
-              {selectedEntity.kind === 'collection' ? (
-                <CollectionIcon className="tab-kind-icon" role="img" aria-label="集合" />
+          {!showEnvironmentEditor && (
+            <div
+              className="session-tabs"
+              data-testid="session-tabs"
+              role="tablist"
+              aria-label="会话标签"
+              onWheel={(event) => {
+                // 垂直滚轮转成横向滚动（design D7）：滚动条已隐藏，滚轮是唯一的滚动暗示
+                if (event.deltaY === 0) return;
+                event.currentTarget.scrollLeft += event.deltaY;
+              }}
+            >
+              {tabs.length === 0 ? (
+                <span className="muted">没有打开的请求</span>
               ) : (
-                <FolderIcon className="tab-kind-icon" role="img" aria-label="文件夹" />
+                tabs.map((item) => {
+                  const active = item.id === activeTabKey;
+                  const itemDirty = isTabDirty(item);
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      className={`session-tab ${active ? 'active' : ''}`}
+                      data-testid="session-tab"
+                      data-tab-kind={item.kind}
+                      title={tabName(item)}
+                      onClick={() => setActiveTabKey(item.id)}
+                      onMouseDown={(event) => {
+                        // 中键会触发自动滚动，关掉它让中键专用于关闭标签
+                        if (event.button === 1) event.preventDefault();
+                      }}
+                      onAuxClick={(event) => {
+                        if (event.button !== 1) return;
+                        event.preventDefault();
+                        requestCloseTab(item.id);
+                      }}
+                    >
+                      {item.kind === 'request' ? (
+                        <span className="method-badge" data-method={item.draft.method}>
+                          {item.draft.method}
+                        </span>
+                      ) : item.entityKind === 'collection' ? (
+                        <CollectionIcon className="tab-kind-icon" role="img" aria-label="集合" />
+                      ) : (
+                        <FolderIcon className="tab-kind-icon" role="img" aria-label="文件夹" />
+                      )}
+                      <span className="session-tab-name">{tabName(item)}</span>
+                      <span className="session-tab-close">
+                        {itemDirty && (
+                          <span
+                            className="dirty-dot"
+                            data-testid="tab-unsaved-dot"
+                            aria-hidden="true"
+                          />
+                        )}
+                        <span
+                          className="session-tab-close-btn"
+                          role="button"
+                          aria-label="关闭标签"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            requestCloseTab(item.id);
+                          }}
+                        >
+                          ×
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })
               )}
-              <input
-                ref={entityNameRef}
-                className="crumb-name"
-                aria-label={selectedEntity.kind === 'collection' ? '集合名称' : '文件夹名称'}
-                value={entityDraft.name}
-                onChange={(event) => setEntityDraft({ ...entityDraft, name: event.target.value })}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') void saveEntityName();
-                }}
-                onBlur={() => void saveEntityName()}
-              />
             </div>
-          ) : (
-            <span className="muted">没有打开的请求</span>
           )}
+
+          {showEnvironmentEditor && <span className="grow" />}
 
           {/* 全局环境选择器（change: add-collection-search-and-env-management）：
               与侧栏 Environments tab 的激活态共用同一份状态；属于工作区级而非请求级，
               因此没有选中请求时同样可见。它自带「无环境 / 环境名」，不再另加标签。 */}
-          <span className="grow" />
-
-          {/* 请求级操作（spec: 面包屑与请求操作行）。未保存标记与保存入口只在有改动时
-              出现——默认界面上不存在「保存」按钮。 */}
-          {draft && dirty && (
-            <>
-              <span className="badge warn">未保存</span>
-              <button
-                data-testid="save-request"
-                title="保存（Ctrl+S）"
-                onClick={() => void saveDraft()}
-                disabled={busy}
-              >
-                保存
-              </button>
-            </>
-          )}
-          {/* 另存为 / 删除：保留文字标签，指针悬停或行内键盘聚焦时显现（见 App.css）。
-             它们与标签、环境选择器、窗口控制按钮同在会话标签行。 */}
-          {draft && (
-            <span className="session-actions">
-              <button onClick={() => duplicate()} disabled={busy}>
-                另存为
-              </button>
-              <button onClick={() => removeRequest()} disabled={busy}>
-                删除
-              </button>
-            </span>
-          )}
-
           <span className="env-select">
             <select
               aria-label="环境"
@@ -1189,27 +1700,6 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         </div>
 
         <div className="request-region">
-          {/* 未保存守卫的三选一（spec: 未保存改动在切走前的守卫） */}
-          {pendingIntent && (
-            <div className="notice warn" role="alert" data-testid="unsaved-guard">
-              <p>
-                {dirtySurfaces.map((surface) => surface.label).join('、')}
-                有未保存的改动。要保存后再继续吗？
-              </p>
-              <div className="row">
-                <button onClick={() => void saveAndContinue()} disabled={busy}>
-                  保存并继续
-                </button>
-                <button onClick={() => void runIntent(pendingIntent)} disabled={busy}>
-                  不保存
-                </button>
-                <button className="ghost" onClick={() => cancelIntent()}>
-                  取消
-                </button>
-              </div>
-            </div>
-          )}
-
           {error && (
             <div className="notice danger" role="alert" data-testid="app-error">
               {error}
@@ -1254,26 +1744,35 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 />
               </div>
             </div>
-          ) : selectedEntity && entityDraft ? (
+          ) : activeEntityTab && entityDraft ? (
             <EntityScriptPanel
-              /* 换实体时重置本地草稿与基线，否则上一个实体的脚本会留在输入框里 */
-              key={selectedEntity.id}
-              client={client}
-              kind={selectedEntity.kind}
+              key={activeEntityTab.id}
+              kind={activeEntityTab.entityKind}
               entity={entityDraft}
-              collectionId={selectedEntity.collectionId}
-              editing={editingRegistry}
-              onSaved={() => entitySaved()}
+              dirty={isTabDirty(activeEntityTab)}
+              busy={busy}
+              nameRef={entityNameRef}
+              onChange={(next) =>
+                patchEntityTab(activeEntityTab.id, (item) => ({ ...item, entity: next }))
+              }
+              onCommitName={() => void commitEntityName()}
+              onSave={() => saveEntityTab(activeEntityTab.id)}
             />
           ) : draft ? (
             <RequestEditor
               draft={draft}
               tab={tab}
               busy={busy}
-              onTab={setTab}
+              onTab={setInnerTab}
               onChange={editDraft}
               onSend={() => void send()}
               preview={<PreviewStrip preview={preview} error={previewError} />}
+              collectionName={crumbCollectionName}
+              dirty={dirty}
+              onSave={() => void saveRequestTab(requestTabId(draft.id))}
+              onDuplicate={() => void duplicateRequest()}
+              onDelete={() => removeRequest()}
+              nameRef={requestNameRef}
             />
           ) : (
             <div className="pane-body muted">从左侧选择一个请求，或新建一个。</div>
@@ -1341,6 +1840,38 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             sendInput={exportSendInput}
             onImported={() => void reloadAfterImport()}
           />
+        </Modal>
+      )}
+
+      {/* 未保存守卫以模态弹框呈现（spec: 未保存改动在被丢弃前的守卫）：
+          它属于整窗而非主区，浮层不会像内联块那样把主区挤出一截。
+          标题给判断题、正文给事实，避免两处各说一遍「未保存的改动」；
+          默认动作走 .primary 且自动聚焦，把键盘用户直接带进弹框。 */}
+      {pendingIntent && (
+        <Modal
+          title="要保存后再继续吗？"
+          onClose={() => cancelIntent()}
+          className="modal-confirm"
+        >
+          <div className="stack" data-testid="unsaved-guard">
+            <p>{dirtySurfaces.map((surface) => surface.label).join('、')}有未保存的改动。</p>
+            <div className="row">
+              <button
+                className="primary"
+                autoFocus
+                onClick={() => void saveAndContinue()}
+                disabled={busy}
+              >
+                保存并继续
+              </button>
+              <button onClick={() => void runIntent(pendingIntent)} disabled={busy}>
+                不保存
+              </button>
+              <button className="ghost" onClick={() => cancelIntent()}>
+                取消
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
     </div>
