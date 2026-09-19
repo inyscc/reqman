@@ -1,11 +1,0 @@
-     Running BeforeDevCommand (`npm run dev`)
-     Running DevCommand (`cargo  run --no-default-features --color always --`)
-        Info Watching C:\CodeLir\reqman\src-tauri for changes...
-[1m[93mwarning[0m[1m[97m: linker stdout: 正在创建库 C:\CodeLir\reqman\src-tauri\target\debug\deps\reqman_lib.dll.lib 和对象 C:\CodeLir\reqman\src-tauri\target\debug\deps\reqman_lib.dll.exp[0m
-  [1m[96m|[0m
-  [1m[96m= [0m[1m[97mnote[0m: `#[warn(linker_messages)]` on by default
-
-[1m[93mwarning[0m: `reqman` (lib) generated 1 warning
-[1m[92m   Compiling[0m reqman v0.1.0 (C:\CodeLir\reqman\src-tauri)
-[1m[96m    Building[0m [=======================> ] 488/489: reqman(…                                                            [1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 4.61s
-[1m[92m     Running[0m `target\debug\reqman.exe`
