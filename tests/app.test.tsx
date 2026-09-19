@@ -3786,3 +3786,58 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     await waitFor(() => expect(tabByName('我的请求').className).toContain('active'));
   });
 });
+
+describe('URL 与参数表同步（spec: URL 与参数表保持同步）', () => {
+  const urlField = () => screen.getByLabelText('请求地址') as HTMLInputElement;
+
+  it('打开 URL 里带查询串的请求：以地址栏为准，表格里的历史参数被替换', async () => {
+    const { client } = harness({
+      request: makeRequest({
+        url: 'http://localhost:8899/smoke?a=a&b=c',
+        params: [
+          { key: '12', value: '2', enabled: true },
+          { key: '1', value: '1', enabled: true },
+        ],
+      }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    expect(urlField().value).toBe('http://localhost:8899/smoke?a=a&b=c');
+    expect((screen.getByLabelText('参数名 0') as HTMLInputElement).value).toBe('a');
+    expect((screen.getByLabelText('参数名 1') as HTMLInputElement).value).toBe('b');
+    // 两行参数 + 末尾幽灵行，历史残留已不在
+    expect(document.querySelectorAll('.request-editor tbody tr')).toHaveLength(3);
+  });
+
+  it('打开 URL 里没有查询串的请求：已有参数补写进地址栏，不被清空', async () => {
+    const { client } = harness({
+      request: makeRequest({
+        params: [{ key: 'page', value: '1', enabled: true }],
+      }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    expect(urlField().value).toBe('https://api.test/users?page=1');
+    expect((screen.getByLabelText('参数名 0') as HTMLInputElement).value).toBe('page');
+  });
+
+  it('在地址栏里改查询串：发送载荷里的参数与地址栏一致', async () => {
+    const { client, sendRequest } = harness();
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.change(urlField(), { target: { value: 'https://api.test/users?page=2' } });
+    await screen.findByText('未保存');
+    fireEvent.click(screen.getByText('发送'));
+
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1));
+    expect(sendRequest.mock.calls[0][0]).toMatchObject({
+      inline: expect.objectContaining({
+        url: 'https://api.test/users?page=2',
+        params: [{ key: 'page', value: '2', enabled: true }],
+      }),
+    });
+  });
+});

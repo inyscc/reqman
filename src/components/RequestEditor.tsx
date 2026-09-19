@@ -1,5 +1,6 @@
 import { useRef, useState, type FocusEvent, type ReactNode, type RefObject } from 'react';
 import { isEmptyFormField, isEmptyKeyValue } from '../lib/rows';
+import { withParams, withUrl } from '../lib/url';
 import { ScriptPane } from './ScriptPane';
 import type {
   ApiKeyLocation,
@@ -363,12 +364,13 @@ export function RequestEditor(props: RequestEditorProps) {
           <div className="url-overlay mono" aria-hidden="true">
             {highlightUrl(draft.url)}
           </div>
+          {/* 地址栏是查询串的权威：改动即拆进参数表（spec: URL 与参数表保持同步） */}
           <input
             className="url-input mono"
             aria-label="请求地址"
             placeholder="https://api.example.com/users/:id"
             value={draft.url}
-            onChange={(event) => patch({ url: event.target.value })}
+            onChange={(event) => onChange(withUrl(draft, event.target.value))}
           />
         </div>
 
@@ -399,7 +401,8 @@ export function RequestEditor(props: RequestEditorProps) {
             rows={draft.params}
             keyPlaceholder="参数名"
             valuePlaceholder="参数值（可用 {{var}}）"
-            onChange={(params) => patch({ params })}
+            /* 改参数表即把查询串写回地址栏，两者是同一份数据（spec: URL 与参数表保持同步） */
+            onChange={(params) => onChange(withParams(draft, params))}
           />
         )}
 

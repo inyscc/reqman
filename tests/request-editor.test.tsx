@@ -183,3 +183,69 @@ describe('键值表的幽灵行', () => {
     expect((screen.getByLabelText('新增字段的类型') as HTMLSelectElement).value).toBe('text');
   });
 });
+
+describe('URL 与参数表同步（spec: URL 与参数表保持同步）', () => {
+  const urlField = () => screen.getByLabelText('请求地址') as HTMLInputElement;
+
+  it('在地址栏输入带查询串的 URL：参数表跟着出现这些行', () => {
+    const { latest } = harness(draft());
+
+    fireEvent.change(urlField(), { target: { value: 'https://api.test/users?page=1&size=10' } });
+
+    expect(latest().params).toEqual([
+      { key: 'page', value: '1', enabled: true },
+      { key: 'size', value: '10', enabled: true },
+    ]);
+    expect((screen.getByLabelText('参数名 1') as HTMLInputElement).value).toBe('size');
+  });
+
+  it('地址栏里删掉查询串：参数表清空', () => {
+    const { latest } = harness(
+      draft({
+        url: 'https://api.test/users?a=1',
+        params: [{ key: 'a', value: '1', enabled: true }],
+      }),
+    );
+
+    fireEvent.change(urlField(), { target: { value: 'https://api.test/users' } });
+
+    expect(latest().params).toEqual([]);
+  });
+
+  it('改参数行的值：地址栏的查询串同步更新', () => {
+    const { latest } = harness(
+      draft({
+        url: 'https://api.test/users?a=1',
+        params: [{ key: 'a', value: '1', enabled: true }],
+      }),
+    );
+
+    fireEvent.change(screen.getByLabelText('参数值（可用 {{var}}） 0'), { target: { value: '2' } });
+
+    expect(latest().url).toBe('https://api.test/users?a=2');
+  });
+
+  it('新增参数行：地址栏立刻带上它', () => {
+    const { latest } = harness(draft());
+
+    fireEvent.change(screen.getByLabelText('新增行的名称'), { target: { value: 'kw' } });
+
+    expect(latest().url).toBe('https://api.test/users?kw=');
+  });
+
+  it('删除参数行：地址栏的查询串跟着去掉', () => {
+    const { latest } = harness(
+      draft({
+        url: 'https://api.test/users?a=1&b=2',
+        params: [
+          { key: 'a', value: '1', enabled: true },
+          { key: 'b', value: '2', enabled: true },
+        ],
+      }),
+    );
+
+    fireEvent.click(screen.getAllByLabelText('删除该行')[0]);
+
+    expect(latest().url).toBe('https://api.test/users?b=2');
+  });
+});

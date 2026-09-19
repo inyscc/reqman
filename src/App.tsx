@@ -28,6 +28,7 @@ import {
 } from './lib/scriptRuntime';
 import type { ConsoleEntry, TestAssertion, VisualizerResult } from './lib/scriptRuntime';
 import { withoutEmptyRows, cleanForSend } from './lib/rows';
+import { alignUrlAndParams } from './lib/url';
 import { createEntityStore } from './lib/store';
 import type {
   Collection,
@@ -413,8 +414,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         kind: 'request',
         id: key,
         requestId: id,
-        // 打开时清一次历史空行：此前存进去的空行不该在表格里占位
-        draft: withoutEmptyRows(loaded),
+        // 打开时清一次历史空行：此前存进去的空行不该在表格里占位；
+        // 再对齐 URL 与参数表（spec: URL 与参数表保持同步），存量不一致在此自愈
+        draft: alignUrlAndParams(withoutEmptyRows(loaded)),
         dirty: false,
         response: null,
         innerTab: 'params',
@@ -574,7 +576,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               kind: 'request',
               id: requestTabId(entry.id),
               requestId: entry.id,
-              draft: withoutEmptyRows(request),
+              draft: alignUrlAndParams(withoutEmptyRows(request)),
               dirty: false,
               response: null,
               innerTab: 'params',
