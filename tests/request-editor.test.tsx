@@ -326,17 +326,69 @@ describe('请求体类型的选择行（spec: 请求体类型的选择行）', (
     expect(screen.getByLabelText('新增字段的名称')).toBeTruthy();
   });
 
-  it('raw 的语言选择内联在类型行行尾，且只在 raw 时出现', () => {
+  it('raw 的语言选择紧跟 raw 单选项，且只在 raw 时出现', () => {
     const { latest } = bodyTab({ kind: 'raw', raw: '', raw_language: 'json' });
 
-    expect(screen.getByLabelText('raw 语言')).toBeTruthy();
+    const dropdown = screen.getByLabelText('raw 语言').closest('.dropdown') as HTMLElement;
+    // 位置：紧跟 raw 单选项之后，而不是被甩到这一行的最右端
+    const rawLabel = screen.getByRole('radio', { name: 'raw' }).closest('label') as HTMLElement;
+    expect(rawLabel.nextElementSibling).toBe(dropdown);
+    expect(dropdown.closest('.body-kind-row')).toBeTruthy();
 
-    fireEvent.change(screen.getByLabelText('raw 语言'), { target: { value: 'xml' } });
+    fireEvent.click(screen.getByLabelText('raw 语言'));
+    fireEvent.click(screen.getByRole('option', { name: 'xml' }));
     expect(latest().body.raw_language).toBe('xml');
 
     fireEvent.click(screen.getByRole('radio', { name: 'none' }));
     expect(screen.queryByLabelText('raw 语言')).toBeNull();
     expect(screen.queryByLabelText('raw 正文')).toBeNull();
+  });
+});
+
+describe('raw 正文的格式化动作（spec: raw 正文的格式化动作）', () => {
+  const bodyTab = (body: Partial<SavedRequest['body']>) =>
+    harness(draft({ body: { ...emptyBody(), ...body } }), 'body');
+
+  it('Beautify 把 JSON 重排为缩进形式，Minify 压回紧凑形式', () => {
+    const { latest } = bodyTab({ kind: 'raw', raw: '{"a":1,"b":[1,2]}', raw_language: 'json' });
+
+    fireEvent.click(screen.getByTestId('body-beautify'));
+    expect(latest().body.raw).toBe('{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ]\n}');
+
+    fireEvent.click(screen.getByTestId('body-minify'));
+    expect(latest().body.raw).toBe('{"a":1,"b":[1,2]}');
+  });
+
+  it('非 JSON 语言下入口不存在（不是禁用态）', () => {
+    bodyTab({ kind: 'raw', raw: '{"a":1}', raw_language: 'xml' });
+
+    expect(screen.queryByTestId('body-beautify')).toBeNull();
+    expect(screen.queryByTestId('body-minify')).toBeNull();
+  });
+
+  it('非 raw 类型下入口不存在', () => {
+    bodyTab({ kind: 'form_data' });
+
+    expect(screen.queryByTestId('body-beautify')).toBeNull();
+    expect(screen.queryByTestId('body-minify')).toBeNull();
+  });
+
+  it('正文不是合法 JSON：不改写正文，并就地说明原因', () => {
+    const { latest } = bodyTab({ kind: 'raw', raw: '{"a":', raw_language: 'json' });
+
+    fireEvent.click(screen.getByTestId('body-beautify'));
+
+    // 没有产生 onChange（正文没动），错误信息就地呈现
+    expect(latest()).toBeUndefined();
+    expect((screen.getByLabelText('raw 正文') as HTMLTextAreaElement).value).toBe('{"a":');
+    expect(screen.getByTestId('body-format-error')).toBeTruthy();
+  });
+
+  it('正文为空时入口不可用', () => {
+    bodyTab({ kind: 'raw', raw: '', raw_language: 'json' });
+
+    expect((screen.getByTestId('body-beautify') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId('body-minify') as HTMLButtonElement).disabled).toBe(true);
   });
 });
 

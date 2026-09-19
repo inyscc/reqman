@@ -512,6 +512,23 @@ async function openEnvironments() {
   await screen.findByRole('listbox', { name: '环境列表' });
 }
 
+/**
+ * 会话标签行的环境选择器已不是原生 select（spec: 会话标签行的全局环境选择器）：
+ * 展开触发器，再点对应的选项。
+ */
+function pickEnvironment(label: string) {
+  fireEvent.click(screen.getByTestId('env-select-trigger'));
+  // 侧栏环境列表里的项同样是 role="option"，因此把范围收到下拉自己的 listbox 里
+  fireEvent.click(
+    within(screen.getByRole('listbox', { name: '环境' })).getByRole('option', { name: label }),
+  );
+}
+
+/** 当前选中的环境：触发器用 `data-value` 携带取值（不再是 select 的 value）。 */
+function envValue(): string {
+  return screen.getByTestId('env-select-trigger').getAttribute('data-value') ?? '';
+}
+
 /** 悬停环境行并打开它的操作菜单——与集合树同一套交互。 */
 function openEnvironmentMenu(name: string) {
   const row = envList().getByText(name).closest('.env-row') as HTMLElement;
@@ -854,6 +871,31 @@ describe('前端数据流骨架', () => {
 
     saveWithKeyboard();
     await waitFor(() => expect(screen.queryByText('未保存')).toBeNull());
+  });
+
+  it('Minify / Beautify 的改动计入未保存状态，Ctrl+S 把格式化后的正文落库（spec: raw 正文的格式化动作）', async () => {
+    const { client, requestSave } = harness({
+      request: makeRequest({
+        body: { ...emptyBody(), kind: 'raw', raw: '{"a":1}', raw_language: 'json' },
+      }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Body', exact: true }));
+    fireEvent.change(screen.getByLabelText('raw 正文'), { target: { value: '{"a":1,"b":[1,2]}' } });
+    expect(await screen.findByText('未保存')).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('body-beautify'));
+    expect((screen.getByLabelText('raw 正文') as HTMLTextAreaElement).value).toBe(
+      '{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ]\n}',
+    );
+
+    saveWithKeyboard();
+    await waitFor(() => expect(requestSave).toHaveBeenCalledTimes(1));
+    const saved = requestSave.mock.calls.at(-1)?.[0] as SavedRequest;
+    expect(saved.body.raw).toBe('{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ]\n}');
+    expect(saved.body.raw_language).toBe('json');
   });
 
   it('不可信响应的预览被放进 sandbox iframe，且不授予脚本执行（7.3）', async () => {
@@ -2110,7 +2152,7 @@ describe('环境管理与全局选择器（add-collection-search-and-env-managem
 
     // 激活态落到存储上（跨重启保留靠这条写入 + 启动时的读回）
     await waitFor(() => expect(environmentSetActive).toHaveBeenCalledWith('w1', 'e1'));
-    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1');
+    expect(envValue()).toBe('e1');
     // 激活态以行首勾选标记 + 整行浅底表达，不再用文字徽标（spec: 列表观感）
     const activeRow = envList().getByText('测试环境').closest('button') as HTMLButtonElement;
     expect(activeRow.className).toContain('active');
@@ -2134,11 +2176,11 @@ describe('环境管理与全局选择器（add-collection-search-and-env-managem
     expect(envList().getByText('生产环境')).toBeTruthy();
     // 过滤是纯视图态：不写后端、不改激活态
     expect(environmentSetActive).toHaveBeenCalledTimes(1);
-    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1');
+    expect(envValue()).toBe('e1');
 
     fireEvent.change(screen.getByLabelText('搜索环境'), { target: { value: '不存在的名字' } });
     expect(await screen.findByTestId('env-search-empty')).toBeTruthy();
-    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1');
+    expect(envValue()).toBe('e1');
 
     fireEvent.change(screen.getByLabelText('搜索环境'), { target: { value: '' } });
     expect(envList().getByText('测试环境')).toBeTruthy();
@@ -2153,13 +2195,13 @@ describe('环境管理与全局选择器（add-collection-search-and-env-managem
     await openEnvironments();
     fireEvent.click(envList().getByText('Globals'));
     await waitFor(() => expect(environmentSetActive).toHaveBeenLastCalledWith('w1', null));
-    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('');
+    expect(envValue()).toBe('');
 
     // 再从主区选择器激活一次，然后选回「无环境」
-    fireEvent.change(screen.getByLabelText('环境'), { target: { value: 'e1' } });
+    pickEnvironment('测试环境');
     await waitFor(() => expect(environmentSetActive).toHaveBeenLastCalledWith('w1', 'e1'));
 
-    fireEvent.change(screen.getByLabelText('环境'), { target: { value: '' } });
+    pickEnvironment('无环境');
     await waitFor(() => expect(environmentSetActive).toHaveBeenLastCalledWith('w1', null));
   });
 
@@ -2206,7 +2248,7 @@ describe('环境管理与全局选择器（add-collection-search-and-env-managem
     render(<App client={client} />);
     await openRequest();
 
-    fireEvent.change(screen.getByLabelText('环境'), { target: { value: 'e1' } });
+    pickEnvironment('测试环境');
 
     await waitFor(() => {
       const last = previewCalls.mock.calls.at(-1)?.[0] as { environment_id: string | null };
@@ -2228,10 +2270,10 @@ describe('环境管理与全局选择器（add-collection-search-and-env-managem
 
     render(<App client={client} />);
     await openRequest();
-    fireEvent.change(screen.getByLabelText('环境'), { target: { value: 'e1' } });
+    pickEnvironment('测试环境');
 
     expect((await screen.findByTestId('app-error')).textContent).toContain('写不进去');
-    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('');
+    expect(envValue()).toBe('');
   });
 
   it('激活态从存储读回，重开界面后仍是该环境（spec: 激活态跨重启保留）', async () => {
@@ -2239,13 +2281,13 @@ describe('环境管理与全局选择器（add-collection-search-and-env-managem
 
     const first = render(<App client={client} />);
     await waitFor(() =>
-      expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1'),
+      expect(envValue()).toBe('e1'),
     );
     first.unmount();
 
     render(<App client={client} />);
     await waitFor(() =>
-      expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1'),
+      expect(envValue()).toBe('e1'),
     );
   });
 
@@ -2318,7 +2360,7 @@ describe('环境管理与全局选择器（add-collection-search-and-env-managem
     await waitFor(() => expect(environmentDelete).toHaveBeenCalledWith('e1'));
     await waitFor(() => expect(envList().queryByText('测试环境')).toBeNull());
     await waitFor(() => expect(environmentSetActive).toHaveBeenLastCalledWith('w1', null));
-    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('');
+    expect(envValue()).toBe('');
   });
 });
 
@@ -2879,7 +2921,7 @@ describe('守卫不该打扰的路径', () => {
     const { client } = harness({ environments: [environment()] });
     await openDirty(client);
 
-    fireEvent.change(screen.getByLabelText('环境'), { target: { value: 'e1' } });
+    pickEnvironment('测试环境');
 
     expect(guard()).toBeNull();
     expect(screen.getByText('未保存')).toBeTruthy();
@@ -3392,7 +3434,7 @@ describe('页面内窗口控制', () => {
     // 双击（detail === 2）：切换最大化
     fireEvent.mouseDown(bar.querySelector('.session-tabs')!, { button: 0, detail: 2 });
     // 交互控件不触发拖拽
-    fireEvent.mouseDown(document.querySelector('.env-select select')!, { button: 0 });
+    fireEvent.mouseDown(document.querySelector('.env-select .dropdown-trigger')!, { button: 0 });
     fireEvent.mouseDown(screen.getByRole('button', { name: '最小化' }), { button: 0 });
 
     await waitFor(() => expect(win.calls.startDragging).toBe(1));
@@ -4276,7 +4318,7 @@ describe('环境变量的只读浮层（spec: 环境变量的只读浮层）', (
     });
     render(<App client={client} />);
     await openRequest();
-    fireEvent.change(screen.getByLabelText('环境'), { target: { value: 'e1' } });
+    pickEnvironment('测试环境');
     await waitFor(() => expect(environmentSetActive).toHaveBeenCalledWith('w1', 'e1'));
 
     await openPeek();
@@ -4287,7 +4329,7 @@ describe('环境变量的只读浮层（spec: 环境变量的只读浮层）', (
     fireEvent.pointerDown(document.body);
     expect(screen.queryByTestId('env-peek')).toBeNull();
 
-    expect((screen.getByLabelText('环境') as HTMLSelectElement).value).toBe('e1');
+    expect(envValue()).toBe('e1');
     expect(environmentSetActive).toHaveBeenCalledTimes(1);
   });
 

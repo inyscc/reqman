@@ -381,6 +381,40 @@ describe('变量浮层的锚定（真实引擎）', () => {
   });
 });
 
+describe('环境下拉（真实引擎，spec: 会话标签行的全局环境选择器）', () => {
+  it('展开菜单不抬高会话标签行，也不向右溢出', async () => {
+    const page = await openApp({ width: 1100, height: 700 });
+    try {
+      const before = await page.evaluate(() => {
+        const bar = document.querySelector('.session-bar') as HTMLElement;
+        return Math.round(bar.getBoundingClientRect().height * 100) / 100;
+      });
+
+      await page.getByTestId('env-select-trigger').click();
+      await page.getByRole('listbox', { name: '环境' }).waitFor();
+
+      const geometry = await page.evaluate(() => {
+        const round = (value: number) => Math.round(value * 100) / 100;
+        const bar = document.querySelector('.session-bar') as HTMLElement;
+        const menu = document.querySelector('.env-select .dropdown-menu') as HTMLElement;
+        const menuRect = menu.getBoundingClientRect();
+        return {
+          barHeight: round(bar.getBoundingClientRect().height),
+          menuRight: round(menuRect.right),
+          menuWidth: round(menuRect.width),
+          viewportWidth: window.innerWidth,
+        };
+      });
+
+      expect(geometry.barHeight, '展开菜单把这行抬高了').toBeCloseTo(before, 0);
+      expect(geometry.menuWidth).toBeGreaterThan(80);
+      expect(geometry.menuRight).toBeLessThanOrEqual(geometry.viewportWidth);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
 describe('cURL 快照标签（真实引擎）', () => {
   it('复制把命令写进剪贴板，写的是改动后的内容', async () => {
     // 剪贴板权限要显式授予，否则 writeText 会被拒绝——这条用例同时验证
@@ -444,6 +478,54 @@ describe('cURL 快照标签（真实引擎）', () => {
       expect(geometry.fieldScrolls).toBe(true);
       // 分栏区仍保有可用高度
       expect(geometry.responseHeight).toBeGreaterThan(150);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('动作行在正文上方右对齐，与 Body 行的格式化动作同一款式', async () => {
+    const page = await openApp({ width: 1100, height: 700 });
+    try {
+      await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click();
+      await page.getByLabel('请求地址').waitFor();
+      await page.getByRole('button', { name: 'cURL', exact: true }).click();
+      await page.getByLabel('curl 命令').waitFor();
+
+      const curl = await page.evaluate(() => {
+        const round = (value: number) => Math.round(value * 100) / 100;
+        const actions = document.querySelector('.curl-actions') as HTMLElement;
+        const field = document.querySelector('.curl-command') as HTMLTextAreaElement;
+        const copy = document.querySelector('[data-testid="curl-copy"]') as HTMLButtonElement;
+        const actionsRect = actions.getBoundingClientRect();
+        return {
+          actionsBottom: round(actionsRect.bottom),
+          fieldTop: round(field.getBoundingClientRect().top),
+          copyColor: getComputedStyle(copy).color,
+          copyBackground: getComputedStyle(copy).backgroundColor,
+          copyClass: copy.className,
+          rightGap: round(window.innerWidth - actionsRect.right),
+        };
+      });
+
+      // 动作行整体在正文上方
+      expect(curl.actionsBottom).toBeLessThanOrEqual(curl.fieldTop);
+      expect(curl.copyClass).toContain('text-action');
+
+      // 与 Body 类型行的 Minify / Beautify 同一款式：主色文字 + 透明底
+      await page.getByRole('button', { name: 'Body', exact: true }).click();
+      await page.getByRole('radio', { name: 'raw' }).check();
+      await page.getByLabel('raw 正文').fill('{"a":1}');
+      const body = await page.evaluate(() => {
+        const button = document.querySelector('[data-testid="body-beautify"]') as HTMLButtonElement;
+        return {
+          color: getComputedStyle(button).color,
+          background: getComputedStyle(button).backgroundColor,
+          class: button.className,
+        };
+      });
+
+      expect(body.color).toBe(curl.copyColor);
+      expect(body.background).toBe(curl.copyBackground);
     } finally {
       await page.close();
     }

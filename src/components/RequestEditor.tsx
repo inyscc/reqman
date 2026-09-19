@@ -1,6 +1,8 @@
-import { useRef, useState, type FocusEvent, type ReactNode, type RefObject } from 'react';
+import { Fragment, useRef, useState, type FocusEvent, type ReactNode, type RefObject } from 'react';
+import { formatRawBody, type RawFormatMode } from '../lib/editing';
 import { isEmptyFormField, isEmptyKeyValue } from '../lib/rows';
 import { withParams, withUrl } from '../lib/url';
+import { Dropdown } from './Dropdown';
 import { CurlPanel, useCurlSnapshot } from './CurlSnapshot';
 import { ScriptPane } from './ScriptPane';
 import type {
@@ -417,6 +419,27 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEd
    */
   const curl = useCurlSnapshot(onCurl, tab === 'curl', draft.id);
 
+  /**
+   * Minify / Beautify 的失败原因（spec: raw 正文的格式化动作）。
+   *
+   * 失败时不改动正文，只把原因摆在正文旁；一旦正文被改动，这条提示就过期了，
+   * 因此在写入正文的两处（动作成功 / 用户键入）都清掉它。
+   */
+  const [formatError, setFormatError] = useState<string | null>(null);
+
+  /** 当前正文是不是「可以被格式化」的那一档：raw 且语言为 JSON。 */
+  const isRawJson = draft.body.kind === 'raw' && (draft.body.raw_language ?? 'json') === 'json';
+  const rawEmpty = (draft.body.raw ?? '').trim() === '';
+
+  const applyFormat = (mode: RawFormatMode) => {
+    try {
+      patch({ body: { ...draft.body, raw: formatRawBody(draft.body.raw ?? '', mode) } });
+      setFormatError(null);
+    } catch (caught) {
+      setFormatError(caught instanceof Error ? caught.message : '正文不是合法的 JSON');
+    }
+  };
+
   /** 切换请求体类型：清掉其它类型的残留内容（既有行为，与控件形态无关）。 */
   const patchBodyKind = (kind: BodyKind) => {
     patch({
@@ -472,47 +495,77 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEd
         {tab === 'body' && (
           <div className="stack">
             {/* 请求体类型（spec: 请求体类型的选择行）：同一行内的互斥单选；语言选择
-                内联在行尾，只在 raw 时出现。 */}
+                紧接 `raw` 单选项之后（不再跑到行尾），只在 raw 时出现；这一行的
+                最右侧留给当前正文可用的格式化动作。 */}
             <div className="body-kind-row" role="radiogroup" aria-label="请求体类型">
               {BODY_KINDS.map((kind) => (
-                <label key={kind.value} className="body-kind">
-                  <input
-                    type="radio"
-                    name="body-kind"
-                    value={kind.value}
-                    checked={draft.body.kind === kind.value}
-                    onChange={() => patchBodyKind(kind.value)}
-                  />
-                  <span>{kind.label}</span>
-                </label>
+                <Fragment key={kind.value}>
+                  <label className="body-kind">
+                    <input
+                      type="radio"
+                      name="body-kind"
+                      value={kind.value}
+                      checked={draft.body.kind === kind.value}
+                      onChange={() => patchBodyKind(kind.value)}
+                    />
+                    <span>{kind.label}</span>
+                  </label>
+
+                  {kind.value === 'raw' && draft.body.kind === 'raw' && (
+                    <Dropdown<RawLanguage>
+                      className="raw-language"
+                      label="raw 语言"
+                      value={draft.body.raw_language ?? 'json'}
+                      options={RAW_LANGUAGES.map((language) => ({
+                        value: language,
+                        label: language,
+                      }))}
+                      onChange={(language) => patch({ body: { ...draft.body, raw_language: language } })}
+                    />
+                  )}
+                </Fragment>
               ))}
 
-              {draft.body.kind === 'raw' && (
-                <select
-                  className="raw-language"
-                  aria-label="raw 语言"
-                  value={draft.body.raw_language ?? 'json'}
-                  onChange={(event) =>
-                    patch({
-                      body: { ...draft.body, raw_language: event.target.value as RawLanguage },
-                    })
-                  }
-                >
-                  {RAW_LANGUAGES.map((language) => (
-                    <option key={language} value={language}>
-                      {language}
-                    </option>
-                  ))}
-                </select>
+              {/* 只有 JSON 有解析器，其它语言下这两个入口不存在（不是禁用态） */}
+              {isRawJson && (
+                <span className="body-format-actions">
+                  <button
+                    type="button"
+                    className="text-action"
+                    data-testid="body-minify"
+                    disabled={rawEmpty}
+                    onClick={() => applyFormat('minify')}
+                  >
+                    Minify
+                  </button>
+                  <button
+                    type="button"
+                    className="text-action"
+                    data-testid="body-beautify"
+                    disabled={rawEmpty}
+                    onClick={() => applyFormat('beautify')}
+                  >
+                    Beautify
+                  </button>
+                </span>
               )}
             </div>
+
+            {formatError && (
+              <div className="notice danger" role="alert" data-testid="body-format-error">
+                {formatError}
+              </div>
+            )}
 
             {draft.body.kind === 'raw' && (
               <textarea
                 aria-label="raw 正文"
                 rows={10}
                 value={draft.body.raw ?? ''}
-                onChange={(event) => patch({ body: { ...draft.body, raw: event.target.value } })}
+                onChange={(event) => {
+                  setFormatError(null);
+                  patch({ body: { ...draft.body, raw: event.target.value } });
+                }}
               />
             )}
 

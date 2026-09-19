@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createEditingRegistry, SURFACE_PRIORITY } from '../src/lib/editing';
+import { createEditingRegistry, formatRawBody, SURFACE_PRIORITY } from '../src/lib/editing';
 
 function surface(
   id: string,
@@ -104,5 +104,28 @@ describe('编辑面注册表', () => {
     unregister();
     expect(listener).toHaveBeenCalledTimes(3);
     expect(registry.top()).toBeNull();
+  });
+});
+
+describe('raw 正文的格式化（spec: raw 正文的格式化动作）', () => {
+  it('Beautify 重排为两空格缩进的多行形式', () => {
+    expect(formatRawBody('{"a":1,"b":[1,2]}', 'beautify')).toBe(
+      '{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ]\n}',
+    );
+  });
+
+  it('Minify 去掉多余空白，只留语法必需的间隔', () => {
+    expect(formatRawBody('{\n  "a": 1,\n  "b": [1, 2]\n}', 'minify')).toBe('{"a":1,"b":[1,2]}');
+  });
+
+  it('格式化不改变内容本身：两种模式互逆', () => {
+    const source = '{"id":7,"name":"张三","tags":["a","b"]}';
+    expect(formatRawBody(formatRawBody(source, 'beautify'), 'minify')).toBe(source);
+  });
+
+  it('不是合法 JSON 时抛错——不编一个「也许对」的结果出来', () => {
+    expect(() => formatRawBody('{"a":', 'beautify')).toThrow();
+    expect(() => formatRawBody('not json', 'minify')).toThrow();
+    expect(() => formatRawBody('', 'minify')).toThrow();
   });
 });

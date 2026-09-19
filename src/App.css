@@ -451,14 +451,154 @@ textarea {
   max-width: 46%;
 }
 
-.env-select select {
-  /* 全局 select 是常规内边距的表单控件；这一行是密集工具条，
-   * 收紧到与标签同高，避免把会话标签行撑高 */
-  width: auto;
-  min-width: 0;
+.env-select .dropdown-trigger {
+  /* 这一行是密集工具条（高度由 --chrome-row 钉住），触发器不许把整行撑高：
+     收紧纵向内边距，并给过长的环境名一条 ellipsis 上限 */
   max-width: 180px;
+}
+
+/* 通用下拉（spec: 通用下拉的观感与菜单行为；design D3）：触发器是文本而不是
+   表单控件，菜单是自绘浮层叠加在内容之上，不抬高所在行。 */
+.dropdown {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
   padding: var(--space-1) var(--space-2);
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
   font-size: var(--text-sm);
+}
+
+.dropdown-trigger:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.dropdown-trigger:disabled {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.dropdown-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-caret {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 100%;
+  max-width: 280px;
+  padding: var(--space-2);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+}
+
+.dropdown.align-right .dropdown-menu {
+  left: auto;
+  right: 0;
+}
+
+.dropdown-search {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.dropdown-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  /* 选项过多时菜单自身滚动，而不是把所在行推高 */
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.dropdown-empty {
+  margin: 0;
+  padding: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.dropdown-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.dropdown-option:hover:not(:disabled),
+.dropdown-option.active {
+  border-color: transparent;
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.dropdown-option.current {
+  color: var(--accent);
+}
+
+.dropdown-check {
+  flex: none;
+  color: var(--accent);
+}
+
+/* 文字按钮（spec: raw 正文的格式化动作 / cURL 快照标签）：常态是浅底主色文字，
+   与既有的填充方块按钮（button / button.ghost）区分开——它们是常驻的重量，
+   这两个只在行内作为次要动作出现。 */
+.text-action {
+  padding: var(--space-1) var(--space-3);
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+
+.text-action:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.text-action:disabled {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
 }
 
 /* 环境变量的只读浮层（spec: 环境变量的只读浮层）：浮层锚在环境选择器下方、覆盖在
@@ -1769,6 +1909,12 @@ iframe.preview {
   white-space: pre;
 }
 
+/* cURL 的动作行在正文上方、两个动作右对齐（spec: cURL 快照标签） */
+.curl-block .curl-actions {
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
 /* 请求体类型的选择行（spec: 请求体类型的选择行）：同一行内的互斥单选，与表格同一
  * 重量——不再是占满整行宽度的下拉控件。选中项用主色表达，语言选择内联在行尾。 */
 .body-kind-row {
@@ -1799,11 +1945,13 @@ iframe.preview {
   font-weight: 500;
 }
 
-.raw-language {
-  width: auto;
+/* 语言选择紧接 raw 单选项之后（spec: 请求体类型的选择行），不再用 margin-left: auto
+   把它甩到行尾；行尾腾给同一行的格式化动作。 */
+.body-format-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
   margin-left: auto;
-  padding: var(--space-1) var(--space-2);
-  font-size: var(--text-sm);
 }
 
 .auth-location-select {

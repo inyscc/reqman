@@ -119,6 +119,31 @@ export function CurlPanel(props: CurlSnapshot) {
         </div>
       )}
 
+      {/* 动作行在正文上方（spec: cURL 快照标签）：原先那句「可以就地修改这段命令」
+          的说明文案已删除——
+          每次进入即重新生成、编辑不写回请求，由行为本身表达就够了。 */}
+      <div className="row curl-actions">
+        <span className="grow" />
+        <button
+          type="button"
+          className="text-action"
+          data-testid="curl-regenerate"
+          onClick={onRegenerate}
+          disabled={busy}
+        >
+          重新生成
+        </button>
+        <button
+          type="button"
+          className="text-action"
+          data-testid="curl-copy"
+          onClick={onCopy}
+          disabled={busy || command === ''}
+        >
+          {copied ? '已复制' : '复制'}
+        </button>
+      </div>
+
       <textarea
         className="curl-command"
         aria-label="curl 命令"
@@ -132,17 +157,6 @@ export function CurlPanel(props: CurlSnapshot) {
           {warnings.join('；')}
         </div>
       )}
-
-      <div className="row">
-        <span className="muted">可以就地修改这段命令，改动不会写回请求。</span>
-        <span className="grow" />
-        <button className="ghost" data-testid="curl-regenerate" onClick={onRegenerate} disabled={busy}>
-          重新生成
-        </button>
-        <button data-testid="curl-copy" onClick={onCopy} disabled={busy || command === ''}>
-          {copied ? '已复制' : '复制'}
-        </button>
-      </div>
     </div>
   );
 }

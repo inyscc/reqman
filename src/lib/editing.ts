@@ -7,6 +7,25 @@
 // 这是纯逻辑，不依赖 React（组件侧的绑定见 useEditing.ts），与 store.ts /
 // useStore.ts 的分层一致。
 
+/**
+ * raw 正文的格式化动作支持的语言（spec: raw 正文的格式化动作）。
+ *
+ * 只有 JSON 有现成的解析器（`JSON`），xml / html / text / javascript 都没有，
+ * 因此入口只在这一种语言下出现。
+ */
+export type RawFormatMode = 'beautify' | 'minify';
+
+/**
+ * 重排或压缩 raw 正文。
+ *
+ * 解析失败时抛出（`JSON.parse` 的错误）——不为不理解的内容编一个"也许对"的结果，
+ * 也不静默返回原文；由调用方决定怎么提示。传入的不是 JSON 语言时不会被调用。
+ */
+export function formatRawBody(text: string, mode: RawFormatMode): string {
+  const parsed: unknown = JSON.parse(text);
+  return mode === 'beautify' ? JSON.stringify(parsed, null, 2) : JSON.stringify(parsed);
+}
+
 export interface EditingSurface {
   /** 稳定标识，重复注册同一 id 视为更新而不是新增。 */
   id: string;

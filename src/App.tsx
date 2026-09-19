@@ -3,6 +3,7 @@ import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
 import './App.css';
 import { BottomBar, type ModalKind } from './components/BottomBar';
 import { CookiePanel } from './components/CookiePanel';
+import { Dropdown } from './components/Dropdown';
 import { EntityScriptPanel, type EntitySaveStatus } from './components/EntityScriptPanel';
 import { EnvironmentsPanel } from './components/EnvironmentsPanel';
 import { CollectionIcon, FolderIcon } from './components/icons';
@@ -1708,20 +1709,24 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               与侧栏 Environments tab 的激活态共用同一份状态；属于工作区级而非请求级，
               因此没有选中请求时同样可见。它自带「无环境 / 环境名」，不再另加标签。 */}
           <span className="env-select">
-            <select
-              aria-label="环境"
+            {/* 环境选择器（spec: 会话标签行的全局环境选择器）：由通用下拉承载，
+                自带搜索——环境数量多时靠肉眼扫名字不可行。 */}
+            <Dropdown
+              label="环境"
               value={environmentId ?? ''}
-              onChange={(event) =>
-                void activateEnvironment(event.target.value === '' ? null : event.target.value)
-              }
-            >
-              <option value="">无环境</option>
-              {environments.map((environment) => (
-                <option key={environment.id} value={environment.id}>
-                  {environment.name}
-                </option>
-              ))}
-            </select>
+              options={[
+                { value: '', label: '无环境' },
+                ...environments.map((environment) => ({
+                  value: environment.id,
+                  label: environment.name,
+                })),
+              ]}
+              onChange={(next) => void activateEnvironment(next === '' ? null : next)}
+              searchable
+              align="right"
+              className="env-dropdown"
+              testId="env-select-trigger"
+            />
 
             {/* 只读变量浮层（spec: 环境变量的只读浮层）：锚在选择器下方、覆盖在内容
                 之上，不改变任何栏的布局；「去环境编辑器」把改动量交回主区。 */}
