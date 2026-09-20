@@ -343,7 +343,8 @@ describe('脚本编辑器的铺满（真实引擎）', () => {
     const geometry = await page.evaluate(() => {
       const round = (value: number) => Math.round(value * 100) / 100;
       const area = document.querySelector('[data-testid="entity-script-panel"]') as HTMLElement;
-      const editor = area.querySelector('textarea') as HTMLTextAreaElement;
+      // 脚本编辑器已是 Monaco 薄壳（change: monaco-code-editors），不再是 textarea
+      const editor = area.querySelector('.code-surface') as HTMLElement;
       return {
         areaHeight: round(area.getBoundingClientRect().height),
         editorHeight: round(editor.getBoundingClientRect().height),

@@ -29,7 +29,7 @@ export interface EntityScriptPanelProps {
  * 本组件是受控视图：草稿放在标签里，因此切走标签不会把没存下的脚本丢掉。
  *
  * 这里**没有保存按钮**——脚本在用户停止输入后由 `App` 自动落库（spec: 脚本的编辑与
- * 保存），面板只呈现"保存中 / 已保存 / 保存失败"的就地状态。
+ * 保存），面板只在「保存中 / 保存失败」时就地提示，落库成功不打扰。
  */
 export function EntityScriptPanel({
   kind,
@@ -59,12 +59,11 @@ export function EntityScriptPanel({
       </div>
       <div className="pane-body stack fill" data-testid="entity-script-panel">
         <ScriptPane
+          uri={`file:///reqman/${kind}/${entity.id}/script.js`}
           pre={entity.pre_request_script ?? ''}
           test={entity.test_script ?? ''}
           preLabel={`${label}前置脚本`}
           testLabel={`${label}后置脚本`}
-          preHint="前置脚本 — 最先执行（三级顺序的第一层或第二层）"
-          testHint="后置脚本 — 收到响应后执行"
           onChangePre={(value) => onChange({ ...entity, pre_request_script: value || null })}
           onChangeTest={(value) => onChange({ ...entity, test_script: value || null })}
         />
@@ -72,11 +71,6 @@ export function EntityScriptPanel({
         {saveStatus?.status === 'saving' && (
           <div className="notice info" role="status" data-testid="entity-script-status">
             保存中…
-          </div>
-        )}
-        {saveStatus?.status === 'saved' && (
-          <div className="notice info" role="status" data-testid="entity-script-status">
-            已保存
           </div>
         )}
         {saveStatus?.status === 'error' && (

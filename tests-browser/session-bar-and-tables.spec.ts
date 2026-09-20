@@ -514,7 +514,12 @@ describe('cURL 快照标签（真实引擎）', () => {
       // 与 Body 类型行的 Minify / Beautify 同一款式：主色文字 + 透明底
       await page.getByRole('button', { name: 'Body', exact: true }).click();
       await page.getByRole('radio', { name: 'raw' }).check();
-      await page.getByLabel('raw 正文').fill('{"a":1}');
+      // raw 正文已是 Monaco 编辑面（change: monaco-code-editors）：等编辑器渲染出来后
+      // 点进去用键盘输入，不能用 fill()（Monaco 的输入不是普通可填控件）
+      const bodyEditor = page.locator('.request-region .monaco-editor');
+      await bodyEditor.waitFor({ timeout: 15_000 });
+      await bodyEditor.click();
+      await page.keyboard.type('{"a":1}');
       const body = await page.evaluate(() => {
         const button = document.querySelector('[data-testid="body-beautify"]') as HTMLButtonElement;
         return {

@@ -5,6 +5,8 @@ import { withParams, withUrl } from '../lib/url';
 import { Dropdown } from './Dropdown';
 import { CurlPanel, useCurlSnapshot } from './CurlSnapshot';
 import { ScriptPane } from './ScriptPane';
+import { CodeSurface } from './CodeSurface';
+import { monacoLanguage } from '../lib/codeSurface';
 import type {
   ApiKeyLocation,
   AuthKind,
@@ -558,13 +560,15 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEd
             )}
 
             {draft.body.kind === 'raw' && (
-              <textarea
-                aria-label="raw 正文"
-                rows={10}
+              <CodeSurface
+                uri={`file:///reqman/request/${draft.id}/body`}
+                ariaLabel="raw 正文"
+                language={monacoLanguage(draft.body.raw_language ?? 'json')}
                 value={draft.body.raw ?? ''}
-                onChange={(event) => {
+                height={220}
+                onChange={(next) => {
                   setFormatError(null);
-                  patch({ body: { ...draft.body, raw: event.target.value } });
+                  patch({ body: { ...draft.body, raw: next } });
                 }}
               />
             )}
@@ -599,16 +603,11 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEd
 
         {tab === 'scripts' && (
           <ScriptPane
+            uri={`file:///reqman/request/${draft.id}/script.js`}
             pre={draft.pre_request_script ?? ''}
             test={draft.test_script ?? ''}
             preLabel="前置脚本"
             testLabel="后置脚本"
-            preHint="前置脚本 — 发送前执行；与本集合、文件夹的脚本按 集合 → 文件夹 → 请求 依次运行"
-            testHint={
-              <>
-                后置脚本 — 收到响应后执行；可读 <code>pm.response</code>、注册 <code>pm.test</code>
-              </>
-            }
             prePlaceholder={'// 例如：pm.environment.set("token", "...");'}
             testPlaceholder={
               '// 例如：pm.test("状态码为 200", () => pm.expect(pm.response.code).to.eql(200));'

@@ -1,13 +1,14 @@
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
+import { CodeSurface } from './CodeSurface';
 
 export interface ScriptPaneProps {
+  /** 模型 URI（`file://`）：pre/test 共用一个模型（切换只换内容，不重建编辑器）。 */
+  uri: string;
   pre: string;
   test: string;
   /** 编辑器可访问名：请求侧与集合/文件夹侧各自的文案。 */
   preLabel: string;
   testLabel: string;
-  preHint?: ReactNode;
-  testHint?: ReactNode;
   prePlaceholder?: string;
   testPlaceholder?: string;
   onChangePre: (value: string) => void;
@@ -24,12 +25,11 @@ type Phase = 'pre' | 'test';
  */
 export function ScriptPane(props: ScriptPaneProps) {
   const {
+    uri,
     pre,
     test,
     preLabel,
     testLabel,
-    preHint,
-    testHint,
     prePlaceholder,
     testPlaceholder,
     onChangePre,
@@ -38,6 +38,7 @@ export function ScriptPane(props: ScriptPaneProps) {
   const [phase, setPhase] = useState<Phase>('pre');
   const hasPre = pre.trim().length > 0;
   const hasTest = test.trim().length > 0;
+  const isPre = phase === 'pre';
 
   return (
     <div className="script-pane" data-testid="script-pane">
@@ -61,29 +62,16 @@ export function ScriptPane(props: ScriptPaneProps) {
       </div>
 
       <div className="script-pane-editor">
-        {phase === 'pre' ? (
-          <>
-            {preHint && <span className="muted">{preHint}</span>}
-            <textarea
-              aria-label={preLabel}
-              className="mono"
-              placeholder={prePlaceholder}
-              value={pre}
-              onChange={(event) => onChangePre(event.target.value)}
-            />
-          </>
-        ) : (
-          <>
-            {testHint && <span className="muted">{testHint}</span>}
-            <textarea
-              aria-label={testLabel}
-              className="mono"
-              placeholder={testPlaceholder}
-              value={test}
-              onChange={(event) => onChangeTest(event.target.value)}
-            />
-          </>
-        )}
+        <CodeSurface
+          uri={uri}
+          ariaLabel={isPre ? preLabel : testLabel}
+          language="javascript"
+          value={isPre ? pre : test}
+          placeholder={isPre ? prePlaceholder : testPlaceholder}
+          fill
+          enableCompletion
+          onChange={isPre ? onChangePre : onChangeTest}
+        />
       </div>
     </div>
   );

@@ -1,10 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { humanBytes, planPreview, prettyBody, revokeSandboxUrl, createSandboxUrl } from '../lib/sandbox';
 import { ScriptReport } from './ScriptReport';
+import { CodeSurface } from './CodeSurface';
+import { CODE_SURFACE_MAX_BYTES } from '../lib/codeSurface';
 import type { ConsoleEntry, TestAssertion } from '../lib/scriptRuntime';
 import type { ResponsePayload } from '../lib/types';
 
 type Tab = 'body' | 'headers' | 'script';
+
+/** 依据内容类型选 Monaco 语言 id（用于响应正文高亮）。 */
+function responseLanguage(contentType: string | null | undefined): string {
+  const type = (contentType ?? '').toLowerCase();
+  if (type.includes('json')) return 'json';
+  if (type.includes('xml')) return 'xml';
+  if (type.includes('html')) return 'html';
+  return 'plaintext';
+}
 
 export interface ResponsePanelProps {
   response: ResponsePayload | null;
@@ -259,13 +270,33 @@ export function ResponsePanel({
               <SandboxedPreview html={response.body_text} />
             )}
 
-            {plan?.kind === 'text' && (
-              <pre className="body" data-testid="response-body">
-                {pretty && response.pretty_available
-                  ? prettyBody(response.content_type, response.body_text ?? '')
-                  : response.body_text}
-              </pre>
-            )}
+            {plan?.kind === 'text' &&
+              (response.size_bytes > CODE_SURFACE_MAX_BYTES ? (
+                // 大正文降级：几 MB 文档交给 Monaco 会冻主线程，回落纯文本原样展示
+                <>
+                  <div className="notice info" role="status" data-testid="body-size-notice">
+                    正文过大，高亮已禁用。
+                  </div>
+                  <pre className="body" data-testid="response-body">
+                    {pretty && response.pretty_available
+                      ? prettyBody(response.content_type, response.body_text ?? '')
+                      : response.body_text}
+                  </pre>
+                </>
+              ) : (
+                <CodeSurface
+                  uri="file:///reqman/response/body"
+                  testId="response-body"
+                  language={responseLanguage(response.content_type)}
+                  value={
+                    pretty && response.pretty_available
+                      ? prettyBody(response.content_type, response.body_text ?? '')
+                      : (response.body_text ?? '')
+                  }
+                  readOnly
+                  fill
+                />
+              ))}
 
             {plan?.kind === 'binary' && (
               <pre className="body" data-testid="response-body">

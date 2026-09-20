@@ -258,7 +258,10 @@ textarea {
   min-height: 0;
 }
 
-.main {
+/* 注意必须是 main.main 而不是裸 .main：Monaco 的补全行内部恰好也有
+   .contents > .main 结构，裸 .main 的 background 会泼进补全列表，把选中行的
+   主题蓝底盖成不透明的白——这正是「选中项看不清/发白」的根因。 */
+main.main {
   grid-column: 2;
   grid-row: 1;
   display: grid;
@@ -1223,9 +1226,16 @@ textarea {
 }
 
 /* Scripts 与 cURL 两页要把编辑器铺满正文区：这两页的正文区不再自身滚动，把高度让给
-   编辑器（.script-pane / .curl-block 都是 flex:1），滚动由编辑器自己承担。 */
+   编辑器（.script-pane / .curl-block 都是 flex:1），滚动由编辑器自己承担。
+
+   不能用 overflow:hidden：Monaco 的补全浮层（列表 / 详情面板）本就允许溢出编辑器
+   显示（`.monaco-editor` 自身即 overflow:visible）。这一层再裁一刀，会把补全列表
+   整块切掉（光标在第一行时尤其明显——列表会被切得一点看不见），也会把详情面板
+   切掉上半截（只剩 MDN Reference 那行）。溢出方向由 overflow-clip-margin 放宽，
+   仍然不产生滚动条，保住了「正文区不自己滚」这条原意。 */
 .pane-body.fill {
-  overflow: hidden;
+  overflow: clip;
+  overflow-clip-margin: 320px;
 }
 
 .stack {
@@ -1634,9 +1644,29 @@ select.method-select[data-method='OPTIONS'] {
   min-height: 0;
 }
 
-.script-pane-editor textarea {
+/* CodeSurface：Monaco 薄壳（请求体 raw / 脚本 / 响应正文三处共用）。
+   视图态是纯色描边的代码块，与 pre.body / textarea 同族。 */
+.code-surface {
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  /* 刻意不设 overflow:hidden。Monaco 的浮层（补全列表 / 参数提示 / 补全详情）
+     是设计成允许溢出编辑器自由显示的——`.monaco-editor` 自身就是
+     `overflow: visible`，只有内部 `.overflow-guard` 才裁切。宿主容器再裁一刀，
+     会把第一行的补全面板和详情面板整个切掉、位置也跟着错。圆角改由下面对
+     编辑器自身的绘制层施加，浮层节点在 `.overflow-guard` 之外，不受影响。 */
+}
+
+.code-surface .monaco-editor,
+.code-surface .monaco-editor .overflow-guard {
+  border-radius: var(--radius-sm);
+}
+
+/* 铺满型（脚本右栏 / 响应正文）：占父容器剩余高度 */
+.code-surface.fill {
   flex: 1;
-  min-height: 220px;
+  min-height: 200px;
 }
 
 .badge {
