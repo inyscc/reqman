@@ -506,26 +506,22 @@ main.main {
   line-height: 1;
 }
 
+/* 菜单 portal 到 body 后用 fixed 自定位（坐标由组件按触发器实测给出）：
+   它是覆盖层，留在祖先里就会被 overflow 裁掉——设置模态的正文是滚动容器，
+   菜单贴着底边时正是被它切掉的。z 序要高于模态遮罩（20）与变量浮层（30）。
+   最小宽度由组件按触发器宽度内联给出：fixed 定位下百分比尺寸没有意义。 */
 .dropdown-menu {
-  position: absolute;
-  top: calc(100% + var(--space-1));
-  left: 0;
-  z-index: 20;
+  position: fixed;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  min-width: 100%;
   max-width: 280px;
   padding: var(--space-2);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
-}
-
-.dropdown.align-right .dropdown-menu {
-  left: auto;
-  right: 0;
 }
 
 .dropdown-search {
@@ -575,9 +571,34 @@ main.main {
   color: var(--accent);
 }
 
+/* 不可选的选项：靠自身的淡出表达「这一项用不了」，不另写解释 */
+.dropdown-option:disabled {
+  background: transparent;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .dropdown-check {
   flex: none;
   color: var(--accent);
+}
+
+/* 选项上的装饰标记（响应格式下拉里的「检测」）：与「当前选中项」的 ✓ 分列，
+   视觉上更轻，因为它描述的不是「选了这个」而是「检测到的是这个」。 */
+.dropdown-markers {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+
+.dropdown-badge {
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.6;
 }
 
 /* 文字按钮（spec: raw 正文的格式化动作 / cURL 快照标签）：常态是浅底主色文字，
@@ -1281,6 +1302,119 @@ main.main {
   min-width: 0;
 }
 
+/* 设置列表（spec: ui-layout「设置模态的配置列表」）：抄 Postman 的行式布局——
+   区标题分节，设置名在左、控件右对齐，行间一条细分隔线。控件宽度统一，整列的
+   右缘因此对齐成一条竖线，扫读时不必逐行去找控件。 */
+.settings-section {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 区标题上方留一口气：与上一节的末行拉开距离，扫读时一眼能分出「换了一组」 */
+.settings-section + .settings-section {
+  margin-top: var(--space-4);
+}
+
+.settings-section h4 {
+  margin: 0;
+  padding-bottom: var(--space-2);
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: 40px;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+/* 末行不画线：容器已有下边界，再画一条会像「后面还有内容」 */
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-name {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* 控件右对齐且宽度统一。全局 input 是 width:100%，在行里必须收回固定宽度，
+   否则它会顶开名称、把行撑成两半。 */
+.settings-row > input,
+.settings-row > .dropdown,
+.settings-row > .settings-control {
+  flex: none;
+  width: 200px;
+}
+
+.settings-row > .settings-control {
+  width: auto;
+  text-align: right;
+}
+
+/* 整宽行：名称在上、控件在下（文本域挤不进右侧那一列） */
+.settings-row.stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+}
+
+.settings-row.stacked > textarea,
+.settings-row.stacked > input {
+  width: 100%;
+}
+
+/* 动作行：只有右侧的动作 */
+.settings-row.actions {
+  justify-content: flex-end;
+}
+
+/* 布尔项用开关（Postman 同款）：仍是 checkbox 的键盘行为与 label 关联，只把外观
+   换成轨道 + 滑块；role="switch" 让辅助技术读作开关而不是复选框。 */
+input.switch {
+  appearance: none;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--border);
+  cursor: pointer;
+  transition: background 120ms var(--ease-out);
+}
+
+input.switch::after {
+  content: '';
+  display: block;
+  width: 14px;
+  height: 14px;
+  margin: 2px;
+  border-radius: 50%;
+  background: var(--panel);
+  transition: transform 120ms var(--ease-out);
+}
+
+input.switch:checked {
+  background: var(--accent);
+}
+
+input.switch:checked::after {
+  transform: translateX(16px);
+}
+
+/* 关闭后的危险态由标记表达（spec: 请求级网络设置「关闭证书校验有警示」）：
+   名称与轨道转为危险色，不另写解释后果的句子。 */
+.settings-row-danger .settings-name {
+  color: var(--danger);
+}
+
+input.switch.switch-danger {
+  background: var(--danger);
+}
+
 .grow {
   flex: 1;
   min-width: 0;
@@ -1912,6 +2046,14 @@ pre.body {
   word-break: break-word;
   font-family: var(--font-mono);
   font-size: var(--text-sm);
+}
+
+/* Hex 视图：三列靠空格对齐，因此不能像其它 pre 那样断行（pre-wrap 会把
+   十六进制列拆散），溢出改由横向滚动承担。 */
+pre.body.hex-body {
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
 }
 
 iframe.preview {

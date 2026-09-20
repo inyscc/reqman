@@ -398,7 +398,9 @@ describe('环境下拉（真实引擎，spec: 会话标签行的全局环境选�
       const geometry = await page.evaluate(() => {
         const round = (value: number) => Math.round(value * 100) / 100;
         const bar = document.querySelector('.session-bar') as HTMLElement;
-        const menu = document.querySelector('.env-select .dropdown-menu') as HTMLElement;
+        // 菜单 portal 到 body（不再挂在 .env-select 里）：它必须脱离祖先的 overflow，
+        // 否则设置模态这类滚动容器会把它裁掉
+        const menu = document.querySelector('.dropdown-menu') as HTMLElement;
         const menuRect = menu.getBoundingClientRect();
         return {
           barHeight: round(bar.getBoundingClientRect().height),

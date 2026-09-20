@@ -345,7 +345,7 @@ pub fn request_ids(db: &Db, collection_id: &str) -> AppResult<Vec<Id>> {
 mod tests {
     use super::*;
     use crate::storage::model::{
-        ApiKeyLocation, BodyKind, KeyValue, RawLanguage, RequestBody,
+        ApiKeyLocation, BodyKind, KeyValue, RawLanguage, RequestBody, ResponseFormatOverride,
     };
     use crate::error::ErrorCode;
     use crate::storage::{variables, workspace, Db};
@@ -392,6 +392,8 @@ mod tests {
             request.settings = RequestSettings {
                 timeout_ms: Some(1500),
                 verify_tls: false,
+                // 响应格式的请求级覆盖也随请求往返（spec: ui-layout「请求级响应格式覆盖」）
+                response_format: ResponseFormatOverride::Json,
                 ..RequestSettings::default()
             };
             request.pre_request_script = Some("console.log('pre')".into());
@@ -426,6 +428,10 @@ mod tests {
         );
         assert_eq!(restored.settings.timeout_ms, Some(1500));
         assert!(!restored.settings.verify_tls);
+        assert_eq!(
+            restored.settings.response_format,
+            ResponseFormatOverride::Json
+        );
         assert_eq!(restored.pre_request_script.as_deref(), Some("console.log('pre')"));
         assert_eq!(
             restored.test_script.as_deref(),

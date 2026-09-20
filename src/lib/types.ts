@@ -66,6 +66,11 @@ export interface RequestSettings {
   http_version: HttpVersion;
   encoding?: string | null;
   proxy?: ProxyConfig | null;
+  /**
+   * 响应呈现格式的请求级覆盖（spec: ui-layout「请求级响应格式覆盖」）。
+   * 缺省 / `inherit` = 跟随全局；旧数据没有这个字段，因此是可选且不迁移。
+   */
+  response_format?: 'inherit' | 'auto' | 'json';
 }
 
 export interface SavedRequest {

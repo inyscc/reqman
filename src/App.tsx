@@ -20,6 +20,11 @@ import { WorkspaceTree, type EntitySelection } from './components/WorkspaceTree'
 import { commands as defaultCommands, describeError, type Commands } from './lib/commands';
 import { createEditingRegistry, SURFACE_PRIORITY } from './lib/editing';
 import { readSplitRatio, SPLIT_DEFAULT, writeSplitRatio } from './lib/layout';
+import {
+  DEFAULT_PRESENTATION,
+  readPresentation,
+  type ResponsePresentation,
+} from './lib/responsePresentation';
 import { readTabs, writeTabs } from './lib/sessionTabs';
 import {
   allowScriptExecution,
@@ -295,6 +300,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [variables, setVariables] = useState<Variable[]>([]);
   /** 请求区与响应区的分栏比例（design D7）；以工作区为单位持久化。 */
   const [splitRatio, setSplitRatio] = useState(SPLIT_DEFAULT);
+  /**
+   * 应用级响应呈现配置（spec: ui-layout「设置模态的响应呈现配置」）。
+   *
+   * 由 App 持有而不是设置面板私有：它同时决定**新响应**的初始呈现格式，设置面板
+   * 保存后经 `onPresentationChange` 回写这里，改动因此立即生效。
+   */
+  const [presentation, setPresentation] = useState<ResponsePresentation>(DEFAULT_PRESENTATION);
   /** 侧栏内部 tab：Collections / Environments（design D2）。 */
   const [sidebarTab, setSidebarTab] = useState<'collections' | 'environments'>('collections');
   /** 低频面板的单例模态（design D5）：非空时打开对应弹窗，同一时间至多一个。 */
@@ -662,6 +674,24 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       cancelled = true;
     };
   }, [client, workspaceId]);
+
+  // 响应呈现配置是**应用级**的（不随工作区走），启动时读一次即可；
+  // 读不到就回落默认——一条显示偏好不该把界面拖进错误态。
+  useEffect(() => {
+    let cancelled = false;
+
+    void readPresentation(client)
+      .then((value) => {
+        if (!cancelled) setPresentation(value);
+      })
+      .catch(() => {
+        if (!cancelled) setPresentation(DEFAULT_PRESENTATION);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -1888,6 +1918,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 busy={busy}
                 error={null}
                 onSaveFull={() => void saveFullResponse()}
+                presentation={presentation}
+                requestFormat={draft.settings.response_format}
                 scriptConsole={scriptReport?.console}
                 scriptAssertions={scriptReport?.assertions}
                 scriptError={scriptReport?.error ?? null}
@@ -1923,7 +1955,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
       {modal === 'settings' && (
         <Modal title="设置" onClose={() => setModal(null)}>
-          <SettingsPanel client={client} editing={editingRegistry} />
+          <SettingsPanel
+            client={client}
+            editing={editingRegistry}
+            presentation={presentation}
+            onPresentationChange={setPresentation}
+          />
         </Modal>
       )}
 

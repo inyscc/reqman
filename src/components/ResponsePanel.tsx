@@ -1,5 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
-import { humanBytes, planPreview, prettyBody, revokeSandboxUrl, createSandboxUrl } from '../lib/sandbox';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  FORMAT_LABELS,
+  HEX_MAX_BYTES,
+  bodyBytes,
+  detectResponseFormat,
+  hexDump,
+  humanBytes,
+  planPreview,
+  renderBody,
+  revokeSandboxUrl,
+  createSandboxUrl,
+  type DetectedFormat,
+  type ResponseFormat,
+} from '../lib/sandbox';
+import {
+  DEFAULT_PRESENTATION,
+  resolveInitialFormat,
+  type RequestResponseFormat,
+  type ResponsePresentation,
+} from '../lib/responsePresentation';
+import { Dropdown, type DropdownOption } from './Dropdown';
 import { ScriptReport } from './ScriptReport';
 import { CodeSurface } from './CodeSurface';
 import { CODE_SURFACE_MAX_BYTES } from '../lib/codeSurface';
@@ -8,14 +28,8 @@ import type { ResponsePayload } from '../lib/types';
 
 type Tab = 'body' | 'headers' | 'script';
 
-/** 依据内容类型选 Monaco 语言 id（用于响应正文高亮）。 */
-function responseLanguage(contentType: string | null | undefined): string {
-  const type = (contentType ?? '').toLowerCase();
-  if (type.includes('json')) return 'json';
-  if (type.includes('xml')) return 'xml';
-  if (type.includes('html')) return 'html';
-  return 'plaintext';
-}
+/** 格式下拉的选项顺序：跟随检测在前，Hex 收在末尾（低频、诊断用）。 */
+const FORMAT_ORDER: ResponseFormat[] = ['auto', 'raw', 'json', 'xml', 'html', 'hex'];
 
 export interface ResponsePanelProps {
   response: ResponsePayload | null;
@@ -28,6 +42,10 @@ export interface ResponsePanelProps {
   scriptError?: string | null;
   /** 可视化结果（已渲染的 HTML）；由 sandbox="" 的 iframe 隔离承载（任务 4.6）。 */
   visualizerHtml?: string | null;
+  /** 应用级呈现配置；缺省与改动前行为一致（跟随检测、缩进 2）。 */
+  presentation?: ResponsePresentation;
+  /** 请求级的响应格式覆盖（spec: ui-layout「请求级响应格式覆盖」）。 */
+  requestFormat?: RequestResponseFormat;
 }
 
 /**
@@ -60,6 +78,32 @@ function SandboxedPreview({ html }: { html: string }) {
   );
 }
 
+/**
+ * 依据当前生效的呈现格式生成下拉选项。
+ *
+ * 检测格式以 `badge` 标记（spec: ui-layout「响应区正文工具条」）：标记跟着**检测**
+ * 走，不跟着当前值走，因此强制选了别的格式时它仍留在检测到的那一项上。
+ *
+ * text / markdown 在下拉里没有同名选项——它们的容器视图就是原文，因此标记落在 Raw。
+ *
+ * 响应超过格式化阈值时，需要格式化的三项直接不可选：这一事实由选项自身表达，
+ * 不由界面另写一句解释（spec: ui-layout「语义落在操作上」）。
+ */
+function formatOptions(
+  detected: DetectedFormat,
+  prettyAvailable: boolean,
+): DropdownOption<ResponseFormat>[] {
+  const detectedOption: ResponseFormat =
+    detected === 'text' || detected === 'markdown' ? 'raw' : detected;
+
+  return FORMAT_ORDER.map((format) => ({
+    value: format,
+    label: FORMAT_LABELS[format],
+    ...(format === detectedOption ? { badge: '检测' } : {}),
+    ...(prettyAvailable || format === 'raw' || format === 'hex' ? {} : { disabled: true }),
+  }));
+}
+
 export function ResponsePanel({
   response,
   busy,
@@ -69,9 +113,28 @@ export function ResponsePanel({
   scriptAssertions,
   scriptError,
   visualizerHtml,
+  presentation = DEFAULT_PRESENTATION,
+  requestFormat,
 }: ResponsePanelProps) {
   const [tab, setTab] = useState<Tab>('body');
-  const [pretty, setPretty] = useState(false);
+  const [preview, setPreview] = useState(true);
+
+  /** 本次查看的格式（spec: http-engine「响应内容与格式化」）：临时覆盖，不持久。 */
+  const initialFormat = resolveInitialFormat(presentation.formatDetection, requestFormat);
+  const [format, setFormat] = useState<ResponseFormat>(initialFormat);
+
+  // 解析结果与配置都要经 ref 读，避免把「新响应才重置」写成「配置一变就重置」——
+  // 用户正在看的那份响应不该因为改了全局设置而跳走（spec: ui-layout 配置生效于
+  // **之后的**响应呈现）。
+  const resolveRef = useRef({ global: presentation.formatDetection, request: requestFormat });
+  resolveRef.current = { global: presentation.formatDetection, request: requestFormat };
+
+  const responseId = response?.id ?? null;
+  useEffect(() => {
+    const resolved = resolveInitialFormat(resolveRef.current.global, resolveRef.current.request);
+    setFormat(resolved);
+    setPreview(true);
+  }, [responseId]);
 
   // 没有输出也没有断言时不产生噪声：连标签页都不出现
   const hasScript =
@@ -93,6 +156,31 @@ export function ResponsePanel({
       response.body_text === null,
     );
   }, [response]);
+
+  const detected = detectResponseFormat(response?.content_type);
+
+  /**
+   * 体积超过格式化阈值时不套格式化器（后端已判定 `pretty_available`），但仍允许
+   * Raw 与 Hex —— 字节视图与格式化无关。
+   */
+  const effectiveFormat: ResponseFormat =
+    response && !response.pretty_available && format !== 'hex' ? 'raw' : format;
+
+  const rendered =
+    response && tab === 'body'
+      ? renderBody(effectiveFormat, detected, response.body_text ?? '', presentation.indentWidth)
+      : null;
+
+  // 预览是**开关**而不是独裁者（design D5）：可预览响应默认照旧预览，用户关掉开关
+  // 或选了任一其它格式时让位给文本视图。
+  const showPreview =
+    plan?.kind === 'iframe' && preview && format === 'auto' && response?.body_text != null;
+
+  // 正文为空（二进制）时没有可解释的文本：沿用原有的 base64 提示，Hex 除外。
+  const binaryFallback = plan?.kind === 'binary' && response?.body_text == null;
+
+  const hexBytes =
+    rendered?.view === 'hex' ? bodyBytes(response?.body_text, response?.body_base64) : null;
 
   if (error) {
     return (
@@ -229,82 +317,76 @@ export function ResponsePanel({
               </div>
             )}
 
-            {!response.pretty_available && (
-              <div className="notice info">
-                响应体积超过格式化阈值（{humanBytes(response.pretty_print_threshold)}），
-                结构化视图已关闭，只提供原始内容。
-              </div>
-            )}
-
-            {response.insecure_warning && (
-              <div className="notice danger" role="alert">
-                该请求关闭了证书校验。
-              </div>
-            )}
-
             <div className="response-view-bar">
-              {/* 与头部那组标签分属不同维度（容器视图 vs 呈现方式），因此不合并，
-                  只把它收紧成一行紧凑工具条（design D6）。 */}
-              <span className="tabs">
-                <button
-                  className={`tab ${!pretty ? 'active' : ''}`}
-                  onClick={() => setPretty(false)}
-                >
-                  原始
-                </button>
-                <button
-                  className={`tab ${pretty ? 'active' : ''}`}
-                  onClick={() => setPretty(true)}
-                  disabled={!response.pretty_available}
-                >
-                  格式化
-                </button>
-              </span>
+              {/* 呈现方式与头部那组标签分属不同维度（容器视图 vs 呈现格式），因此不
+                  合并；下拉替换了原先的「原始 / 格式化」双 tab——Raw 即原「原始」，
+                  格式选择即原「格式化」的泛化（design D1）。 */}
+              <Dropdown
+                label="响应呈现格式"
+                testId="response-format"
+                value={format}
+                options={formatOptions(detected, response.pretty_available)}
+                onChange={setFormat}
+              />
               <span className="grow" />
+              {plan?.kind === 'iframe' && (
+                <button
+                  className="ghost"
+                  aria-pressed={preview}
+                  data-testid="preview-toggle"
+                  onClick={() => setPreview((current) => !current)}
+                >
+                  预览
+                </button>
+              )}
               <span className="muted mono response-content-type">
                 {response.content_type ?? '未知内容类型'}
               </span>
             </div>
 
-            {plan?.kind === 'iframe' && response.body_text != null && (
-              <SandboxedPreview html={response.body_text} />
+            {showPreview && <SandboxedPreview html={response.body_text ?? ''} />}
+
+            {!showPreview && rendered?.view === 'hex' && (
+              <>
+                {hexBytes && hexBytes.length > HEX_MAX_BYTES && (
+                  <div className="notice info" role="status" data-testid="hex-size-notice">
+                    字节过多，Hex 视图只呈现前 {humanBytes(HEX_MAX_BYTES)}。
+                  </div>
+                )}
+                <pre className="body hex-body" data-testid="response-body">
+                  {hexDump(hexBytes ?? new Uint8Array())}
+                </pre>
+              </>
             )}
 
-            {plan?.kind === 'text' &&
-              (response.size_bytes > CODE_SURFACE_MAX_BYTES ? (
+            {!showPreview &&
+              rendered?.view !== 'hex' &&
+              (binaryFallback ? (
+                <pre className="body" data-testid="response-body">
+                  {response.body_base64
+                    ? `（二进制内容，base64）\n${response.body_base64.slice(0, 2000)}`
+                    : '（二进制内容）'}
+                </pre>
+              ) : response.size_bytes > CODE_SURFACE_MAX_BYTES ? (
                 // 大正文降级：几 MB 文档交给 Monaco 会冻主线程，回落纯文本原样展示
                 <>
                   <div className="notice info" role="status" data-testid="body-size-notice">
                     正文过大，高亮已禁用。
                   </div>
                   <pre className="body" data-testid="response-body">
-                    {pretty && response.pretty_available
-                      ? prettyBody(response.content_type, response.body_text ?? '')
-                      : response.body_text}
+                    {rendered?.view === 'text' ? rendered.text : ''}
                   </pre>
                 </>
               ) : (
                 <CodeSurface
                   uri="file:///reqman/response/body"
                   testId="response-body"
-                  language={responseLanguage(response.content_type)}
-                  value={
-                    pretty && response.pretty_available
-                      ? prettyBody(response.content_type, response.body_text ?? '')
-                      : (response.body_text ?? '')
-                  }
+                  language={rendered?.view === 'text' ? rendered.language : 'plaintext'}
+                  value={rendered?.view === 'text' ? rendered.text : ''}
                   readOnly
                   fill
                 />
               ))}
-
-            {plan?.kind === 'binary' && (
-              <pre className="body" data-testid="response-body">
-                {response.body_base64
-                  ? `（二进制内容，base64）\n${response.body_base64.slice(0, 2000)}`
-                  : '（二进制内容）'}
-              </pre>
-            )}
           </>
         )}
       </div>

@@ -4353,3 +4353,215 @@ describe('环境变量的只读浮层（spec: 环境变量的只读浮层）', (
     expect((address as HTMLInputElement).value).toBe('https://api.test/edited');
   });
 });
+
+// ---------------------------------------------------------------------------
+// 响应呈现格式（change: response-format-selector）
+// ---------------------------------------------------------------------------
+
+describe('响应呈现格式（response-format-selector）', () => {
+  /** 打开请求并发一次：响应面板此时已就位。 */
+  async function sendOnce(client: Commands) {
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('status');
+  }
+
+  const trigger = () => screen.getByTestId('response-format');
+  const openFormatMenu = () => fireEvent.click(trigger());
+
+  it('格式下拉替代「原始 / 格式化」双 tab，并以标记指出检测格式', async () => {
+    const { client } = harness();
+    await sendOnce(client);
+
+    expect(screen.queryByRole('button', { name: '原始' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '格式化' })).toBeNull();
+
+    expect(trigger().getAttribute('data-value')).toBe('auto');
+    openFormatMenu();
+    expect(screen.getByTestId('response-format-badge-json').textContent).toBe('检测');
+  });
+
+  it('检测标记不随强制选择移动', async () => {
+    const { client } = harness({
+      sendResult: response({ content_type: 'application/xml', body_text: '<a><b>1</b></a>' }),
+    });
+    await sendOnce(client);
+
+    openFormatMenu();
+    fireEvent.click(screen.getByRole('option', { name: /^JSON/ }));
+    expect(trigger().getAttribute('data-value')).toBe('json');
+
+    openFormatMenu();
+    expect(screen.getByTestId('response-format-badge-xml').textContent).toBe('检测');
+    expect(screen.queryByTestId('response-format-badge-json')).toBeNull();
+  });
+
+  it('强制解释失败时原样显示，不报错', async () => {
+    const { client } = harness({
+      sendResult: response({ content_type: 'text/plain', body_text: 'not json' }),
+    });
+    await sendOnce(client);
+
+    openFormatMenu();
+    fireEvent.click(screen.getByRole('option', { name: /^JSON/ }));
+
+    expect(screen.getByTestId('response-body').textContent).toBe('not json');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('Hex 视图把不可见字符摆出来', async () => {
+    const { client } = harness({
+      sendResult: response({ content_type: 'text/plain', body_text: 'a\u0000b' }),
+    });
+    await sendOnce(client);
+
+    openFormatMenu();
+    fireEvent.click(screen.getByRole('option', { name: /^Hex/ }));
+
+    const body = screen.getByTestId('response-body').textContent ?? '';
+    expect(body.startsWith('00000000  61 00 62')).toBe(true);
+    expect(body.endsWith('a.b')).toBe(true);
+  });
+
+  it('缩进宽度跟着全局设置走进响应正文', async () => {
+    const { client, settingsSet } = harness({ sendResult: response({ body_text: '{"a":1}' }) });
+    render(<App client={client} />);
+
+    fireEvent.click(await screen.findByText('设置'));
+    await screen.findByTestId('settings-panel');
+
+    // 缺省：Auto + 2 空格
+    expect(screen.getByTestId('format-detection').getAttribute('data-value')).toBe('auto');
+    expect(screen.getByTestId('indent-width').getAttribute('data-value')).toBe('2');
+
+    fireEvent.click(screen.getByTestId('indent-width'));
+    fireEvent.click(screen.getByRole('option', { name: '4 空格' }));
+
+    // 设置面改动停止后自动落库；落库的值同时回写给 App，之后的响应才按新宽度格式化
+    await waitFor(() =>
+      expect(settingsSet).toHaveBeenCalledWith('response_presentation', 'indent_width', '4'),
+    );
+
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('status');
+
+    await waitFor(() =>
+      expect(screen.getByTestId('response-body').textContent).toBe('{\n    "a": 1\n}'),
+    );
+  });
+
+  it('全局格式检测设为 JSON 后，新响应初始即按 JSON 解释', async () => {
+    const { client, settingsSet } = harness({ sendResult: response({ body_text: '{"a":1}' }) });
+    render(<App client={client} />);
+
+    fireEvent.click(await screen.findByText('设置'));
+    await screen.findByTestId('settings-panel');
+    fireEvent.click(screen.getByTestId('format-detection'));
+    fireEvent.click(screen.getByRole('option', { name: 'JSON' }));
+
+    await waitFor(() =>
+      expect(settingsSet).toHaveBeenCalledWith('response_presentation', 'format_detection', 'json'),
+    );
+
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('status');
+
+    expect(screen.getByTestId('response-format').getAttribute('data-value')).toBe('json');
+  });
+
+  it('预览是开关：关掉之后 HTML 以源码呈现', async () => {
+    const { client } = harness({
+      sendResult: response({ content_type: 'text/html', body_text: '<p>hi</p>' }),
+    });
+    await sendOnce(client);
+    expect(screen.getByTestId('sandboxed-preview')).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('preview-toggle'));
+    expect(screen.queryByTestId('sandboxed-preview')).toBeNull();
+    expect(screen.getByTestId('response-body').textContent).toBe('<p>hi</p>');
+  });
+
+  it('请求级覆盖决定初始格式', async () => {
+    const { client } = harness({
+      request: makeRequest({ settings: { ...defaultSettings(), response_format: 'json' } }),
+    });
+    await sendOnce(client);
+    expect(trigger().getAttribute('data-value')).toBe('json');
+  });
+
+  it('临时选择不跨响应保留：新响应回到请求级解析值', async () => {
+    const base = harness({
+      request: makeRequest({ settings: { ...defaultSettings(), response_format: 'json' } }),
+    });
+    let seq = 0;
+    const client: Commands = {
+      ...base.client,
+      sendRequest: async () => response({ id: `resp-${++seq}` }),
+    };
+
+    await sendOnce(client);
+    openFormatMenu();
+    fireEvent.click(screen.getByRole('option', { name: /^Hex/ }));
+    expect(trigger().getAttribute('data-value')).toBe('hex');
+
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(trigger().getAttribute('data-value')).toBe('json'));
+  });
+
+  it('关闭证书校验只有标记，没有解释后果的句子', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+    await openRequest();
+
+    expect(screen.queryByTestId('insecure-request')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings', exact: true }));
+    fireEvent.click(screen.getByLabelText('校验证书'));
+
+    // 操作自身的危险态 + 请求身份行上的标识
+    expect(screen.getByTestId('insecure-request').textContent).toBe('证书未校验');
+    expect(document.querySelector('.settings-row-danger')).toBeTruthy();
+    // 不出现「已关闭证书校验…」这类解释后果的文案
+    expect(screen.queryByText(/仅应在明确知情时使用/)).toBeNull();
+  });
+
+  it('响应超过格式化阈值时格式化选项不可选，Raw 与 Hex 照常', async () => {
+    const { client } = harness({
+      sendResult: response({ body_text: '{"a":1}', pretty_available: false }),
+    });
+    await sendOnce(client);
+
+    openFormatMenu();
+    expect(
+      (screen.getByRole('option', { name: /^JSON/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole('option', { name: /^Raw/ }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(
+      (screen.getByRole('option', { name: /^Hex/ }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    // 这一事实由选项状态表达，界面不再另写一句解释
+    expect(screen.queryByText(/结构化视图已关闭/)).toBeNull();
+  });
+
+  it('请求 Settings 里能覆盖响应格式，并计入未保存', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings', exact: true }));
+    expect(screen.getByTestId('request-response-format').getAttribute('data-value')).toBe(
+      'inherit',
+    );
+
+    fireEvent.click(screen.getByTestId('request-response-format'));
+    fireEvent.click(screen.getByRole('option', { name: 'JSON' }));
+
+    expect(screen.getByTestId('request-response-format').getAttribute('data-value')).toBe('json');
+    expect(await screen.findByText('未保存')).toBeTruthy();
+  });
+});

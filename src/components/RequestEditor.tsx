@@ -368,6 +368,16 @@ export function RequestBand(props: RequestBandProps) {
           onChange={(event) => patch({ name: event.target.value })}
         />
         <span className="grow" />
+        {/* 关闭证书校验的显著标识（spec: 请求级网络设置）：一个标记，不是一句解释 */}
+        {!draft.settings.verify_tls && (
+          <span
+            className="badge danger"
+            data-testid="insecure-request"
+            title="证书校验已关闭"
+          >
+            证书未校验
+          </span>
+        )}
         {/* 未保存标记是这一行唯一的"还没存下"信号：保存入口已不存在，等价的键盘操作
             写在提示里，否则用户无从知道怎么保存。 */}
         {dirty && (
@@ -1152,15 +1162,16 @@ function SettingsEditor({
     onChange({ ...settings, proxy });
   };
 
+  // 行式配置列表（spec: ui-layout「设置模态的配置列表」）：名称在左、控件在右，
+  // 与设置模态同一套观感——两处都是「一堆配置项」的列表。
   return (
-    <div className="stack">
-      <div className="row">
-        <label className="row auth-label-wide">
-          <span className="muted">超时（毫秒）</span>
-        </label>
+    <div className="settings-section">
+      <div className="settings-row">
+        <span className="settings-name">超时（毫秒）</span>
         <input
           aria-label="超时毫秒"
           type="number"
+          placeholder="0"
           value={settings.timeout_ms ?? ''}
           onChange={(event) =>
             onChange({
@@ -1171,92 +1182,121 @@ function SettingsEditor({
         />
       </div>
 
-      <label className="row">
+      <label className="settings-row">
+        <span className="settings-name">跟随重定向</span>
         <input
-          className="checkbox"
+          className="switch"
           type="checkbox"
+          role="switch"
           checked={settings.follow_redirects}
           onChange={(event) => onChange({ ...settings, follow_redirects: event.target.checked })}
         />
-        <span>跟随重定向</span>
       </label>
 
-      <label className="row">
+      {/* 关闭证书校验的警示由标记承担（spec: 请求级网络设置「关闭证书校验有警示」）：
+          这一行以危险色呈现，配合请求带上的标识——不另写解释后果的句子。 */}
+      <label className={`settings-row${settings.verify_tls ? '' : ' settings-row-danger'}`}>
+        <span className="settings-name">校验证书</span>
         <input
-          className="checkbox"
+          className={`switch${settings.verify_tls ? '' : ' switch-danger'}`}
           type="checkbox"
+          role="switch"
           checked={settings.verify_tls}
           onChange={(event) => onChange({ ...settings, verify_tls: event.target.checked })}
         />
-        <span>校验证书</span>
       </label>
 
-      {!settings.verify_tls && (
-        <div className="notice danger" role="alert">
-          已关闭证书校验。该请求不会被验证目标身份，仅应在明确知情时使用。
-        </div>
-      )}
-
-      <div className="row">
-        <span className="muted auth-label">
-          协议版本
-        </span>
-        <select
-          aria-label="协议版本"
+      <div className="settings-row">
+        <span className="settings-name">协议版本</span>
+        <Dropdown<HttpVersion>
+          label="协议版本"
+          testId="http-version"
           value={settings.http_version}
-          onChange={(event) =>
-            onChange({ ...settings, http_version: event.target.value as HttpVersion })
-          }
-        >
-          <option value="auto">自动</option>
-          <option value="http1">HTTP/1</option>
-          <option value="http2">HTTP/2</option>
-        </select>
+          options={[
+            { value: 'auto', label: '自动' },
+            { value: 'http1', label: 'HTTP/1' },
+            { value: 'http2', label: 'HTTP/2' },
+          ]}
+          onChange={(value) => onChange({ ...settings, http_version: value })}
+        />
       </div>
 
-      <div className="row">
-        <span className="muted auth-label">
-          请求级代理
-        </span>
-        <select
-          aria-label="请求级代理模式"
+      {/* 响应呈现格式的请求级覆盖（spec: ui-layout「请求级响应格式覆盖」）：
+          「跟随全局」是缺省，改动随请求保存并计入未保存守卫。 */}
+      <div className="settings-row">
+        <span className="settings-name">响应格式</span>
+        <Dropdown
+          label="响应格式"
+          testId="request-response-format"
+          value={settings.response_format ?? 'inherit'}
+          options={[
+            { value: 'inherit', label: '跟随全局' },
+            { value: 'auto', label: 'Auto' },
+            { value: 'json', label: 'JSON' },
+          ]}
+          onChange={(value) =>
+            onChange({
+              ...settings,
+              response_format: value === 'json' ? 'json' : value === 'auto' ? 'auto' : 'inherit',
+            })
+          }
+        />
+      </div>
+
+      <div className="settings-row">
+        <span className="settings-name">请求级代理</span>
+        <Dropdown<ProxyMode>
+          label="请求级代理模式"
+          testId="request-proxy-mode"
           value={settings.proxy?.mode ?? 'none'}
-          onChange={(event) => {
-            const mode = event.target.value as ProxyMode;
+          options={[
+            { value: 'none', label: '不使用' },
+            { value: 'system', label: '跟随系统' },
+            { value: 'manual', label: '手工填写' },
+          ]}
+          onChange={(mode) => {
             if (mode === 'none') {
               onChange({ ...settings, proxy: null });
               return;
             }
             patchProxy({ mode });
           }}
-        >
-          <option value="none">不使用</option>
-          <option value="system">跟随系统</option>
-          <option value="manual">手工填写</option>
-        </select>
+        />
       </div>
 
       {settings.proxy?.mode === 'manual' && (
         <>
-          <input
-            aria-label="代理地址"
-            placeholder="http://127.0.0.1:8080 或 socks5://127.0.0.1:1080"
-            value={settings.proxy.url ?? ''}
-            onChange={(event) => patchProxy({ url: event.target.value })}
-          />
-          <input
-            aria-label="不走代理的主机"
-            placeholder="不走代理的主机，用逗号分隔"
-            value={settings.proxy.no_proxy.join(',')}
-            onChange={(event) =>
-              patchProxy({
-                no_proxy: event.target.value
-                  .split(',')
-                  .map((entry) => entry.trim())
-                  .filter((entry) => entry.length > 0),
-              })
-            }
-          />
+          <div className="settings-row stacked">
+            <label className="settings-name" htmlFor="proxy-url">
+              代理地址
+            </label>
+            <input
+              id="proxy-url"
+              aria-label="代理地址"
+              placeholder="http://127.0.0.1:8080"
+              value={settings.proxy.url ?? ''}
+              onChange={(event) => patchProxy({ url: event.target.value })}
+            />
+          </div>
+          <div className="settings-row stacked">
+            <label className="settings-name" htmlFor="proxy-no-proxy">
+              不走代理的主机
+            </label>
+            <input
+              id="proxy-no-proxy"
+              aria-label="不走代理的主机"
+              placeholder="localhost, *.internal"
+              value={settings.proxy.no_proxy.join(',')}
+              onChange={(event) =>
+                patchProxy({
+                  no_proxy: event.target.value
+                    .split(',')
+                    .map((entry) => entry.trim())
+                    .filter((entry) => entry.length > 0),
+                })
+              }
+            />
+          </div>
         </>
       )}
     </div>

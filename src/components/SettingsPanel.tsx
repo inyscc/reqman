@@ -2,6 +2,15 @@ import { useCallback, useEffect, useState } from 'react';
 import { describeError } from '../lib/commands';
 import { SURFACE_PRIORITY, type EditingRegistry } from '../lib/editing';
 import {
+  DEFAULT_PRESENTATION,
+  readPresentation,
+  writePresentation,
+  type FormatDetection,
+  type ResponsePresentation,
+} from '../lib/responsePresentation';
+import { INDENT_WIDTHS, type IndentWidth } from '../lib/sandbox';
+import { Dropdown } from './Dropdown';
+import {
   readSendRequestPolicyRaw,
   writeSendRequestPolicy,
   type SendRequestPolicy,
@@ -12,6 +21,9 @@ export interface SettingsPanelProps {
   client: Parameters<typeof readSendRequestPolicyRaw>[0];
   /** 编辑面注册表：Ctrl+S 与未保存守卫据此找到这一面。 */
   editing?: EditingRegistry;
+  /** 响应呈现配置的当前值（App 持有，改动后立即作用于之后的响应呈现）。 */
+  presentation?: ResponsePresentation;
+  onPresentationChange?: (value: ResponsePresentation) => void;
 }
 
 /** 改动停止后自动落库的延迟（spec: 脚本的编辑与保存对设置面同样适用）。 */
@@ -25,20 +37,37 @@ const SETTINGS_AUTOSAVE_DELAY_MS = 500;
  *
  * 这里**没有保存按钮**：改动停止后自动落库，落库成功后基线前移，脏判据自然为假。
  */
-export function SettingsPanel({ client, editing }: SettingsPanelProps) {
+export function SettingsPanel({
+  client,
+  editing,
+  presentation = DEFAULT_PRESENTATION,
+  onPresentationChange,
+}: SettingsPanelProps) {
   const [mode, setMode] = useState<'allow' | 'deny'>('allow');
   const [hosts, setHosts] = useState('');
   /** null = 未配置（不限制）；字符串 = 已配置的原始值。 */
   const [raw, setRaw] = useState<string | null>(null);
   const [unreadable, setUnreadable] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** 响应呈现配置（spec: ui-layout「设置模态的响应呈现配置」）。 */
+  const [formatDetection, setFormatDetection] = useState<FormatDetection>(
+    presentation.formatDetection,
+  );
+  const [indentWidth, setIndentWidth] = useState<IndentWidth>(presentation.indentWidth);
   /** 读回来的基线：未保存守卫据此判断草稿有没有偏离已配置的值。 */
-  const [baseline, setBaseline] = useState({ mode: 'allow' as 'allow' | 'deny', hosts: '' });
+  const [baseline, setBaseline] = useState({
+    mode: 'allow' as 'allow' | 'deny',
+    hosts: '',
+    formatDetection: presentation.formatDetection as FormatDetection,
+    indentWidth: presentation.indentWidth as IndentWidth,
+  });
 
   const load = useCallback(async () => {
     try {
-      const value = await readSendRequestPolicyRaw(client);
+      const [value, storedPresentation] = await Promise.all([
+        readSendRequestPolicyRaw(client),
+        readPresentation(client),
+      ]);
 
       setRaw(value);
       setUnreadable(false);
@@ -60,11 +89,22 @@ export function SettingsPanel({ client, editing }: SettingsPanelProps) {
 
       setMode(nextMode);
       setHosts(nextHosts);
-      setBaseline({ mode: nextMode, hosts: nextHosts });
+      setFormatDetection(storedPresentation.formatDetection);
+      setIndentWidth(storedPresentation.indentWidth);
+      setBaseline({
+        mode: nextMode,
+        hosts: nextHosts,
+        formatDetection: storedPresentation.formatDetection,
+        indentWidth: storedPresentation.indentWidth,
+      });
+      // 读回来的值即应用当前生效的值，同步给 App
+      onPresentationChange?.(storedPresentation);
       setError(null);
     } catch (caught) {
       setError(describeError(caught).message);
     }
+    // onPresentationChange 只在 App 内定义一次；纳入依赖不会造成额外读取
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
 
   useEffect(() => {
@@ -80,11 +120,10 @@ export function SettingsPanel({ client, editing }: SettingsPanelProps) {
     setError(null);
     try {
       await writeSendRequestPolicy(client, { mode, hosts: list });
-      setStatus(
-        list.length === 0
-          ? '已保存：名单为空，当前拒绝全部目标'
-          : `已保存：${mode === 'allow' ? '只允许' : '只拒绝'} ${list.length} 个主机`,
-      );
+      const nextPresentation = { formatDetection, indentWidth };
+      await writePresentation(client, nextPresentation);
+      // 改动立即作用于之后的响应呈现，不需要重启（spec: ui-layout 配置生效）
+      onPresentationChange?.(nextPresentation);
       await load();
       return true;
     } catch (caught) {
@@ -93,83 +132,127 @@ export function SettingsPanel({ client, editing }: SettingsPanelProps) {
     }
   };
 
+  const dirty = () =>
+    mode !== baseline.mode ||
+    hosts !== baseline.hosts ||
+    formatDetection !== baseline.formatDetection ||
+    indentWidth !== baseline.indentWidth;
+
   // 编辑即自动保存（spec: 脚本的编辑与保存）：改动停止后落库。
   // 失败时基线不前移，因此这里会随下一次键入再次排期；退出/关模态时守卫也会拦。
   useEffect(() => {
-    if (mode === baseline.mode && hosts === baseline.hosts) return;
+    if (!dirty()) return;
     const timer = window.setTimeout(() => {
       void save();
     }, SETTINGS_AUTOSAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
-    // save 每次渲染都是新函数，进依赖会让定时器永远重排；脏判据已由 mode/hosts/baseline 表达
+    // save 每次渲染都是新函数，进依赖会让定时器永远重排；脏判据已由上面的 state 表达
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, hosts, baseline.mode, baseline.hosts]);
+  }, [mode, hosts, formatDetection, indentWidth, baseline]);
 
   useEditingSurface(editing, {
     id: 'settings-policy',
     priority: SURFACE_PRIORITY.modal,
     label: '脚本目标策略',
-    isDirty: () => mode !== baseline.mode || hosts !== baseline.hosts,
+    isDirty: dirty,
     save,
   });
 
   const reset = async () => {
     await writeSendRequestPolicy(client, null);
     setHosts('');
-    setStatus('已恢复为不限制目标（与 Postman 一致）');
     await load();
   };
 
   return (
     <div className="stack" data-testid="settings-panel">
-      <strong>脚本目标策略</strong>
-      <p className="muted">
-        <code>pm.sendRequest</code> 默认不限制目标地址（与 Postman 一致）。一旦配置，脚本就只能
-        访问名单内的主机（或反过来，被名单挡住）。子域一并匹配。
-      </p>
+      <section className="settings-section">
+        <h4>脚本目标策略</h4>
 
-      <div className="row">
-        <span data-testid="policy-state">
-          {raw ? (unreadable ? '已配置（无法解析，当前拒绝全部）' : '已配置') : '未配置 · 不限制目标'}
-        </span>
-      </div>
-
-      <div className="row">
-        <select
-          aria-label="策略模式"
-          value={mode}
-          onChange={(event) => setMode(event.target.value === 'deny' ? 'deny' : 'allow')}
-        >
-          <option value="allow">只允许名单内</option>
-          <option value="deny">只拒绝名单内</option>
-        </select>
-      </div>
-
-      <label htmlFor="policy-hosts">主机名单（每行一个，例如 api.test）</label>
-      <textarea
-        id="policy-hosts"
-        aria-label="主机名单"
-        rows={4}
-        value={hosts}
-        onChange={(event) => setHosts(event.target.value)}
-      />
-
-      <div className="row">
-        <button
-          className="ghost"
-          onClick={() => {
-            void reset();
-          }}
-        >
-          恢复为不限制
-        </button>
-      </div>
-
-      {status && (
-        <div className="notice info" role="status" data-testid="settings-status">
-          {status}
+        <div className="settings-row">
+          <span className="settings-name">状态</span>
+          <span className="muted settings-control" data-testid="policy-state">
+            {raw ? (unreadable ? '已配置（无法解析）' : '已配置') : '未配置'}
+          </span>
         </div>
-      )}
+
+        <div className="settings-row">
+          <span className="settings-name">策略模式</span>
+          <Dropdown
+            label="策略模式"
+            testId="policy-mode"
+            value={mode}
+            options={[
+              { value: 'allow', label: '只允许名单内' },
+              { value: 'deny', label: '只拒绝名单内' },
+            ]}
+            onChange={(value) => setMode(value === 'deny' ? 'deny' : 'allow')}
+          />
+        </div>
+
+        <div className="settings-row stacked">
+          <label className="settings-name" htmlFor="policy-hosts">
+            主机名单
+          </label>
+          <textarea
+            id="policy-hosts"
+            aria-label="主机名单"
+            placeholder="api.test"
+            rows={4}
+            value={hosts}
+            onChange={(event) => setHosts(event.target.value)}
+          />
+        </div>
+
+        <div className="settings-row actions">
+          <button
+            className="ghost"
+            onClick={() => {
+              void reset();
+            }}
+          >
+            恢复为不限制
+          </button>
+        </div>
+      </section>
+
+      {/* 响应呈现配置（spec: ui-layout「设置模态的响应呈现配置」）：应用级偏好，
+          改动后立即作用于之后的响应呈现。 */}
+      <section className="settings-section">
+        <h4>响应呈现</h4>
+
+        <div className="settings-row">
+          <span className="settings-name">响应格式检测</span>
+          <Dropdown
+            label="响应格式检测"
+            testId="format-detection"
+            value={formatDetection}
+            options={[
+              { value: 'auto', label: 'Auto' },
+              { value: 'json', label: 'JSON' },
+            ]}
+            onChange={(value) => setFormatDetection(value === 'json' ? 'json' : 'auto')}
+          />
+        </div>
+
+        <div className="settings-row">
+          <span className="settings-name">格式化缩进宽度</span>
+          <Dropdown
+            label="格式化缩进宽度"
+            testId="indent-width"
+            value={String(indentWidth)}
+            options={INDENT_WIDTHS.map((width) => ({
+              value: String(width),
+              label: `${width} 空格`,
+            }))}
+            onChange={(value) => {
+              const width = INDENT_WIDTHS.find((candidate) => String(candidate) === value);
+              if (width) setIndentWidth(width);
+            }}
+          />
+        </div>
+      </section>
+
       {error && (
         <div className="notice danger" role="alert">
           {error}

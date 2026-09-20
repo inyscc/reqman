@@ -484,6 +484,27 @@ pub enum HttpVersion {
     Http2,
 }
 
+/// 响应呈现格式的请求级覆盖（spec: ui-layout「请求级响应格式覆盖」）。
+///
+/// 只是「选中了哪一档」这一个选择，解释与回退都在前端做（见 `src/lib/sandbox.ts`），
+/// 后端不理解也不使用它——它随请求往返，仅此而已。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormatOverride {
+    /// 跟随应用级「响应格式检测」设置（缺省）。
+    Inherit,
+    /// 本次强制按检测结果解释。
+    Auto,
+    /// 本次强制按 JSON 解释，解释失败静默回退。
+    Json,
+}
+
+impl Default for ResponseFormatOverride {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RequestSettings {
@@ -494,6 +515,8 @@ pub struct RequestSettings {
     pub encoding: Option<String>,
     /// 请求级代理（三级代理中的最高优先层）。
     pub proxy: Option<ProxyConfig>,
+    /// 响应呈现格式的请求级覆盖；缺省 = 跟随全局。
+    pub response_format: ResponseFormatOverride,
 }
 
 impl Default for RequestSettings {
@@ -505,6 +528,7 @@ impl Default for RequestSettings {
             http_version: HttpVersion::Auto,
             encoding: None,
             proxy: None,
+            response_format: ResponseFormatOverride::Inherit,
         }
     }
 }
