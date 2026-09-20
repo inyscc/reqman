@@ -1238,6 +1238,32 @@ main.main {
   overflow-clip-margin: 320px;
 }
 
+/* 文件行的选取单元（spec: 请求体文件的选取）：文件名与「重新选择 / 清除」
+   动作同行排布，动作是文字按钮（.text-action），不占单元格整行宽度。 */
+.file-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* 铺满型的 stack：铺满模式下在列方向上占满父容器的剩余高度。
+   铺满链路（pane-body.fill → .stack.fill → 编辑面）的中间层：少了 flex:1，
+   高度到不了下一层；少了 min-height:0，内容会把自己顶高而不是铺满。 */
+.stack.fill {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 键值表的满高滚动容器（KeyValueTable / FormDataEditor 的根元素）：
+   容器占满正文区剩余高度，行多时在容器内滚动，表头吸顶——滚动容器从
+   .pane-body 下沉到这里后，thead th 的吸顶参照面随之改变（见下方 its top 规则）。
+   行少于一屏时容器不出现滚动条，布局与整页滚动时等价。 */
+.table-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
 .stack {
   display: flex;
   flex-direction: column;
@@ -1763,16 +1789,21 @@ th {
   scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
-/* 表头吸顶 + 可辨识的表面：表头钉在滚动容器顶部（滚动条所在的 .pane-body 有 8px
-   内边距，因此吸顶位置要向上抬同样的距离，否则会留出一条让行内容穿过的缝——
-   这正是此前「看起来没吸顶」的原因）。表头底用更重的分隔线与数据行区分，
-   同时它是不透明的，滚过的行不会从它下面透出来。 */
+/* 表头吸顶 + 可辨识的表面：表头钉在滚动容器顶部。吸顶位置取决于滚动条所在的
+   容器：滚动容器是 .pane-body 时，它有 8px（--space-4）内边距，吸顶位置要向上抬
+   同样的距离，否则会留出一条让行内容穿过的缝——这正是此前「看起来没吸顶」的原因；
+   滚动容器下沉到 .table-scroll（无内边距）后，top 归零即可。表头底用更重的分隔线
+   与数据行区分，同时它是不透明的，滚过的行不会从它下面透出来。 */
 thead th {
   position: sticky;
   top: calc(-1 * var(--space-4));
   background: var(--surface-sunken);
   border-bottom: 1px solid var(--border-strong);
   z-index: 1;
+}
+
+.table-scroll thead th {
+  top: 0;
 }
 
 tbody tr:hover {

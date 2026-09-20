@@ -59,13 +59,17 @@ describe('空行清洗', () => {
     expect(withoutEmptyKeyValues(rows)).toEqual([kv('x-disabled', 'v', false)]);
   });
 
-  it('FormField 的空行只以名称为准', () => {
+  it('FormField 的保留判定以名称与描述为准', () => {
     // file 类型的字段本来就没有值，不能因为 value 为空就删掉
     expect(isEmptyFormField(field('avatar', null, 'file'))).toBe(false);
     expect(isEmptyFormField(field('', null, 'file'))).toBe(true);
-    expect(withoutEmptyFormFields([field('avatar', null, 'file'), field('', '')])).toEqual([
-      field('avatar', null, 'file'),
-    ]);
+    // 只写了描述的行不是空行（保留档与键值行同构）
+    const noted: FormField = { ...field('', null), description: '只写了说明' };
+    expect(isEmptyFormField(noted)).toBe(false);
+    expect(isEmptyFormField({ ...noted, description: '   ' })).toBe(true);
+    expect(
+      withoutEmptyFormFields([field('avatar', null, 'file'), noted, field('', '')]),
+    ).toEqual([field('avatar', null, 'file'), noted]);
   });
 
   it('没有空行时返回原引用', () => {
@@ -134,5 +138,27 @@ describe('描述列带来的两档判定', () => {
     const source = request({ headers: [kv('', '有值没名')] });
 
     expect(cleanForSend(source).headers).toEqual([kv('', '有值没名')]);
+  });
+
+  it('form 行：描述-only 的行被保留，但无名（含文件）字段不进发送载荷', () => {
+    const noted: FormField = { ...field('', null), description: '只写了说明' };
+    // 模拟导入链路的形态：文件名写在 description 里，字段名还空着
+    const namelessFile: FormField = {
+      ...field('', null, 'file'),
+      file_handle: 'h1',
+      description: '导入的文件',
+    };
+    const source = request({
+      body: {
+        ...emptyBody(),
+        kind: 'form_data',
+        form: [field('a', '1'), noted, namelessFile],
+      },
+    });
+
+    // 保留档：描述-only 的行不清洗
+    expect(withoutEmptyRows(source).body.form).toEqual([field('a', '1'), noted, namelessFile]);
+    // 发出档：名称为空的字段（包括带文件的）不进入载荷
+    expect(cleanForSend(source).body.form).toEqual([field('a', '1')]);
   });
 });

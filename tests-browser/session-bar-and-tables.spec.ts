@@ -155,12 +155,14 @@ describe('表头吸顶（真实引擎）', () => {
         await page.keyboard.press('Enter');
       }
 
-      const pane = page.locator('.request-editor .pane-body').first();
+      // 滚动容器是键值表自己的满高容器（change: fill-request-editor-panes），
+      // 不再是 .pane-body——正文区在铺满模式下不滚，滚动发生在表格容器内部。
+      const pane = page.locator('.request-editor .table-scroll').first();
       const scrollable = await pane.evaluate((node) => node.scrollHeight - node.clientHeight);
       expect(scrollable, '表格没有撑到需要滚动，本用例无法验证吸顶').toBeGreaterThan(40);
 
       const geometry = await page.evaluate(() => {
-        const body = document.querySelector('.request-editor .pane-body') as HTMLElement;
+        const body = document.querySelector('.request-editor .table-scroll') as HTMLElement;
         const header = document.querySelector('.request-editor thead th') as HTMLElement;
         const round = (value: number) => Math.round(value * 100) / 100;
         return {
@@ -176,7 +178,7 @@ describe('表头吸顶（真实引擎）', () => {
       });
 
       const after = await page.evaluate(() => {
-        const body = document.querySelector('.request-editor .pane-body') as HTMLElement;
+        const body = document.querySelector('.request-editor .table-scroll') as HTMLElement;
         const header = document.querySelector('.request-editor thead th') as HTMLElement;
         const round = (value: number) => Math.round(value * 100) / 100;
         return {

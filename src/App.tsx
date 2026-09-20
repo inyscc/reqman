@@ -1864,6 +1864,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               tab={tab}
               onTab={setInnerTab}
               onChange={editDraft}
+              onPickFile={() => client.pickUploadFile()}
               onCurl={() => {
                 // 与发送共用同一份输入（未保存时走内联载荷），因此两处命令必然一致
                 if (!exportSendInput) throw new Error('没有可导出的请求');

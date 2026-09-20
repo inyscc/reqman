@@ -14,6 +14,7 @@ import type {
   CurlCommand,
   HttpVersion,
   KeyValue,
+  PickedFile,
   ProxyConfig,
   ProxyMode,
   RawLanguage,
@@ -42,6 +43,12 @@ export interface RequestEditorProps {
   onChange: (next: SavedRequest) => void;
   /** 生成当前请求的 curl 快照（spec: cURL 快照标签）。 */
   onCurl: () => Promise<CurlCommand>;
+  /**
+   * 请求体文件的选取出口（spec: 请求体文件的选取）：拉起系统对话框，返回
+   * 一次性句柄与文件名；用户取消时返回 null。由宿主注入（App 接
+   * `client.pickUploadFile()`，与 `onCurl` 同款注入模式），组件不直连命令层。
+   */
+  onPickFile?: () => Promise<PickedFile | null>;
 }
 
 /** 请求标签的顺序与文案对齐 Postman（spec: 请求标签命名）；cURL 排在 Settings 右侧。 */
@@ -165,7 +172,9 @@ function KeyValueTable({
   };
 
   return (
-    <div className="stack">
+    /* 满高滚动容器（spec: 请求编辑器正文区的满高与区域内滚动）：容器占满正文区
+       剩余高度，行多时在容器内滚动，表头吸顶（见 App.css 的 .table-scroll）。 */
+    <div className="table-scroll">
       <table>
         <thead>
           <tr>
@@ -412,8 +421,16 @@ export function RequestBand(props: RequestBandProps) {
  * 请求区的列内容：内层标签与正文。请求带（身份与地址栏）已抬到主区顶部，
  * 不再属于这里——本组件只负责分栏以下的那一列。
  */
-export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEditorProps) {
+export function RequestEditor({ draft, tab, onTab, onChange, onCurl, onPickFile }: RequestEditorProps) {
   const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
+
+  /** binary 的文件选取：取消对话框时无副作用（spec: 请求体文件的选取）。 */
+  const pickBinary = async () => {
+    if (!onPickFile) return;
+    const picked = await onPickFile();
+    if (!picked) return;
+    patch({ body: { ...draft.body, binary: { file_handle: picked.handle, description: picked.name } } });
+  };
 
   /**
    * cURL 快照（spec: cURL 快照标签）：停在该标签时按当前请求生成；离开标签即清空，
@@ -469,9 +486,16 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEd
         ))}
       </div>
 
-      {/* Scripts 与 cURL 两页要把编辑器铺满正文区，因此正文区不再自身滚动
-          （见 App.css 的 .pane-body.fill），滚动交给编辑器自己。 */}
-      <div className={`pane-body stack${tab === 'scripts' || tab === 'curl' ? ' fill' : ''}`}>
+      {/* 键值表三页（params / headers / body）与 scripts、cURL 一样把编辑面铺满
+          正文区：正文区自身不再滚动（见 App.css 的 .pane-body.fill），滚动分别
+          交给编辑器与表格容器自己。 */}
+      <div
+        className={`pane-body stack${
+          tab === 'params' || tab === 'headers' || tab === 'body' || tab === 'scripts' || tab === 'curl'
+            ? ' fill'
+            : ''
+        }`}
+      >
 
         {tab === 'params' && (
           <KeyValueTable
@@ -494,8 +518,11 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEd
           />
         )}
 
+        {/* 铺满链路的中间层：pane-body.fill 之后，这一层也要把高度让下去
+            （flex: 1; min-height: 0，见 App.css 的 .stack.fill），否则类型行
+            下方固定高度以上的空间到不了编辑器/表格。 */}
         {tab === 'body' && (
-          <div className="stack">
+          <div className="stack fill">
             {/* 请求体类型（spec: 请求体类型的选择行）：同一行内的互斥单选；语言选择
                 紧接 `raw` 单选项之后（不再跑到行尾），只在 raw 时出现；这一行的
                 最右侧留给当前正文可用的格式化动作。 */}
@@ -565,7 +592,7 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEd
                 ariaLabel="raw 正文"
                 language={monacoLanguage(draft.body.raw_language ?? 'json')}
                 value={draft.body.raw ?? ''}
-                height={220}
+                fill
                 onChange={(next) => {
                   setFormatError(null);
                   patch({ body: { ...draft.body, raw: next } });
@@ -587,13 +614,48 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl }: RequestEd
               <FormDataEditor
                 key={`form-${draft.id}`}
                 rows={draft.body.form}
+                onPickFile={onPickFile}
                 onChange={(form) => patch({ body: { ...draft.body, form } })}
               />
             )}
 
             {draft.body.kind === 'binary' && (
-              <div className="notice info">
-                二进制正文需要先选择文件。文件由系统对话框选取，后端只给出一次性句柄。
+              /* 文件选取入口（spec: 请求体文件的选取）：路径留在后端，应用只持有
+                 一次性句柄——这句安全语义值得用一行提示说清，因此提示保留。 */
+              <div className="row">
+                {draft.body.binary?.file_handle ? (
+                  <>
+                    <span className="muted">
+                      已选择：{draft.body.binary.description ?? '文件'}
+                    </span>
+                    <button
+                      type="button"
+                      className="text-action"
+                      aria-label="重新选择二进制文件"
+                      onClick={() => void pickBinary()}
+                    >
+                      重新选择
+                    </button>
+                    <button
+                      type="button"
+                      className="text-action"
+                      aria-label="清除二进制文件"
+                      onClick={() => patch({ body: { ...draft.body, binary: null } })}
+                    >
+                      清除
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="text-action"
+                    aria-label="选择二进制文件"
+                    onClick={() => void pickBinary()}
+                  >
+                    选择文件
+                  </button>
+                )}
+                <span className="muted">文件由系统对话框选取，后端只给出一次性句柄。</span>
               </div>
             )}
           </div>
@@ -648,9 +710,11 @@ const EMPTY_FIELD: FormRow = {
  */
 function FormDataEditor({
   rows,
+  onPickFile,
   onChange,
 }: {
   rows: SavedRequest['body']['form'];
+  onPickFile?: () => Promise<PickedFile | null>;
   onChange: (rows: SavedRequest['body']['form']) => void;
 }) {
   const [pending, setPending] = useState<FormRow>(EMPTY_FIELD);
@@ -698,8 +762,17 @@ function FormDataEditor({
     ghostKeyRef.current?.focus();
   };
 
+  /** 文件行的选取：取消对话框（null）时不动该行；确认则写入句柄与文件名。 */
+  const pick = async (index: number) => {
+    if (!onPickFile) return;
+    const picked = await onPickFile();
+    if (!picked) return;
+    update(index, { file_handle: picked.handle, description: picked.name });
+  };
+
   return (
-    <div className="stack">
+    /* 与 KeyValueTable 同款满高滚动容器（见上面的注释）。 */
+    <div className="table-scroll">
       <table>
         <thead>
           <tr>
@@ -749,11 +822,49 @@ function FormDataEditor({
                       aria-label={`字段值 ${index}`}
                       onChange={(event) => update(index, { value: event.target.value })}
                     />
-                  ) : (
-                    <span className="muted">
-                      {row.file_handle ? `已选择：${row.description ?? '文件'}` : '未选择文件'}
+                  ) : row.file_handle ? (
+                    /* 文件名展示取自 description（导入与选取链路都把文件名写在
+                        这里）——这是 description 在 file 行上兼作文件名的既有
+                        语义：编辑描述会同时改变这里的展示文案（design D3）。 */
+                    <span className="file-cell">
+                      <span className="muted">已选择：{row.description ?? '文件'}</span>
+                      <button
+                        type="button"
+                        className="text-action"
+                        aria-label={`重新选择文件 ${index}`}
+                        onClick={() => void pick(index)}
+                      >
+                        重新选择
+                      </button>
+                      <button
+                        type="button"
+                        className="text-action"
+                        aria-label={`清除文件 ${index}`}
+                        onClick={() => update(index, { file_handle: null, description: null })}
+                      >
+                        清除
+                      </button>
                     </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="text-action"
+                      aria-label={`选择文件 ${index}`}
+                      onClick={() => void pick(index)}
+                    >
+                      选择文件
+                    </button>
                   )}
+                </td>
+                <td>
+                  <input
+                    value={row.description ?? ''}
+                    placeholder="描述"
+                    aria-label={`字段描述 ${index}`}
+                    onChange={(event) =>
+                      update(index, { description: event.target.value === '' ? null : event.target.value })
+                    }
+                  />
                 </td>
                 <td>
                   <button
@@ -768,6 +879,9 @@ function FormDataEditor({
             ),
           )}
           <tr className="ghost-row">
+            {/* 首列是勾选列的占位：幽灵行此前只有 4 个 <td>，对不上表头的 5 列，
+                整行左移了一格（spec: form-data 幽灵行与表头对齐）。 */}
+            <td />
             <td>
               <input
                 ref={ghostKeyRef}
@@ -813,8 +927,84 @@ function FormDataEditor({
                 <span className="muted">未选择文件</span>
               )}
             </td>
+            <td>
+              <input
+                value={ghost.description ?? ''}
+                placeholder="描述"
+                aria-label="新增字段的描述"
+                onChange={(event) =>
+                  editGhost({ description: event.target.value === '' ? null : event.target.value })
+                }
+                onBlur={leaveGhost}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return;
+                  event.preventDefault();
+                  submitGhost();
+                }}
+              />
+            </td>
             <td />
           </tr>
+          {/* 「下一行」跳板行：与 KeyValueTable 的同款机制（见那里的注释）——键入
+           * 第一个字符后 editGhost 已把内容提交成真实行，这一行随之出现，对齐
+           * Postman「键入即见新行」。点击会先落定当前行、再把焦点交回底部空白行。
+           * aria-label 用「下一行的 *」，与幽灵行的「新增字段的 *」区分开，测试按
+           * label 取元素不会取到两个。 */}
+          {owned !== null && (
+            <tr className="ghost-row">
+              <td />
+              <td>
+                <input
+                  placeholder="字段名"
+                  aria-label="下一行的字段名"
+                  onFocus={() => {
+                    releaseGhost();
+                    ghostKeyRef.current?.focus();
+                  }}
+                  onChange={(event) => editGhost({ key: event.target.value })}
+                />
+              </td>
+              <td>
+                <select
+                  aria-label="下一行的类型"
+                  value={ghost.kind}
+                  onChange={(event) =>
+                    editGhost({ kind: event.target.value as 'text' | 'file' })
+                  }
+                >
+                  <option value="text">文本</option>
+                  <option value="file">文件</option>
+                </select>
+              </td>
+              <td>
+                {ghost.kind === 'text' ? (
+                  <input
+                    placeholder="字段值"
+                    aria-label="下一行的值"
+                    onFocus={() => {
+                      releaseGhost();
+                      ghostKeyRef.current?.focus();
+                    }}
+                    onChange={(event) => editGhost({ value: event.target.value })}
+                  />
+                ) : (
+                  <span className="muted">未选择文件</span>
+                )}
+              </td>
+              <td>
+                <input
+                  placeholder="描述"
+                  aria-label="下一行的描述"
+                  onFocus={() => {
+                    releaseGhost();
+                    ghostKeyRef.current?.focus();
+                  }}
+                  onChange={(event) => editGhost({ description: event.target.value || null })}
+                />
+              </td>
+              <td />
+            </tr>
+          )}
         </tbody>
       </table>
     </div>

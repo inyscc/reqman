@@ -40,9 +40,13 @@ export function isEmptyKeyValue(row: KeyValue): boolean {
   return !hasRequestData(row) && !isDescriptionOnlyRow(row);
 }
 
-/** FormField 的空行只以名称为准：file 类型的字段本来就没有值。 */
+/**
+ * FormField 的保留判定：名称与描述皆空才算空行（file 类型本来就没有值）。
+ * 与 `isEmptyKeyValue` 的保留判定同构——只写了描述的行会被保留下来，
+ * 但它不构成请求数据：发出档在 `cleanForSend` 里按「名称非空」过滤。
+ */
 export function isEmptyFormField(row: FormField): boolean {
-  return row.key.trim() === '';
+  return row.key.trim() === '' && (row.description ?? '').trim() === '';
 }
 
 export function withoutEmptyKeyValues(rows: KeyValue[]): KeyValue[] {
@@ -105,7 +109,9 @@ export function cleanForSend(request: SavedRequest): SavedRequest {
     body: {
       ...cleaned.body,
       urlencoded: cleaned.body.urlencoded.filter(sendable),
-      form: cleaned.body.form.filter((row) => row.enabled),
+      // form 行的发出档：名称非空才进入载荷（file 字段没有值，不能套用键值行的
+      // 「名称或值非空」）。描述-only 的行会被保留判定留在存储里，但不发出。
+      form: cleaned.body.form.filter((row) => row.enabled && row.key.trim() !== ''),
     },
   };
 }

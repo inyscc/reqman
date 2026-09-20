@@ -40,6 +40,7 @@ function harness(
   initial: SavedRequest,
   initialTab: Tab = 'params',
   curlResult?: CurlCommand | 'reject',
+  onPickFile?: () => Promise<{ handle: string; name: string; size_bytes: number } | null>,
 ) {
   const seen: SavedRequest[] = [];
   let curlCalls = 0;
@@ -83,6 +84,7 @@ function harness(
           onTab={setTab}
           onChange={change}
           onCurl={generateCurl}
+          onPickFile={onPickFile}
         />
       </>
     );
@@ -228,6 +230,132 @@ describe('键值表的幽灵行', () => {
       },
     ]);
     expect((screen.getByLabelText('新增字段的类型') as HTMLSelectElement).value).toBe('text');
+  });
+
+  it('form-data 键入后立即出现下一行跳板行（对齐 Postman 自动新增行）', () => {
+    const { latest } = harness(draft({ body: { ...emptyBody(), kind: 'form_data' } }), 'body');
+
+    const name = screen.getByLabelText('新增字段的名称') as HTMLInputElement;
+    fireEvent.change(name, { target: { value: 'avatar' } });
+
+    // 物化后跳板行立即出现：键入即见新行，不必等失焦
+    expect(screen.getByLabelText('下一行的字段名')).toBeTruthy();
+    expect(latest().body.form).toHaveLength(1);
+
+    // 点击跳板行：当前行落定，焦点交回底部空白行
+    fireEvent.focus(screen.getByLabelText('下一行的字段名'));
+    expect(document.activeElement).toBe(screen.getByLabelText('新增字段的名称'));
+    expect(latest().body.form).toHaveLength(1);
+  });
+
+  it('form-data 的描述列就地编辑并写进模型', () => {
+    const { latest } = harness(
+      draft({
+        body: {
+          ...emptyBody(),
+          kind: 'form_data',
+          form: [{ key: 'a', value: '1', file_handle: null, description: null, kind: 'text', enabled: true }],
+        },
+      }),
+      'body',
+    );
+
+    fireEvent.change(screen.getByLabelText('字段描述 0'), { target: { value: '说明' } });
+    expect(latest().body.form[0].description).toBe('说明');
+
+    // 幽灵行只写描述也物化（保留档：名称与描述皆空才算空行）
+    fireEvent.change(screen.getByLabelText('新增字段的描述'), { target: { value: 'note' } });
+    expect(latest().body.form).toHaveLength(2);
+    expect(latest().body.form[1].description).toBe('note');
+    expect(latest().body.form[1].key).toBe('');
+  });
+});
+
+describe('请求体文件的选取（spec: 请求体文件的选取）', () => {
+  const picked = { handle: 'h1', name: 'avatar.png', size_bytes: 3 };
+
+  it('文件行点击「选择文件」后句柄与文件名写入该行', async () => {
+    const onPickFile = vi.fn(async () => picked);
+    const { latest } = harness(
+      draft({
+        body: {
+          ...emptyBody(),
+          kind: 'form_data',
+          form: [{ key: 'avatar', value: null, file_handle: null, description: null, kind: 'file', enabled: true }],
+        },
+      }),
+      'body',
+      undefined,
+      onPickFile,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '选择文件 0' }));
+
+    await waitFor(() => expect(latest().body.form[0].file_handle).toBe('h1'));
+    expect(latest().body.form[0].description).toBe('avatar.png');
+    // 选取后可重新选择或清除
+    expect(screen.getByRole('button', { name: '重新选择文件 0' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '清除文件 0' })).toBeTruthy();
+  });
+
+  it('取消对话框时该行保持原样', async () => {
+    const onPickFile = vi.fn(async () => null);
+    const { seen } = harness(
+      draft({
+        body: {
+          ...emptyBody(),
+          kind: 'form_data',
+          form: [{ key: 'avatar', value: null, file_handle: null, description: null, kind: 'file', enabled: true }],
+        },
+      }),
+      'body',
+      undefined,
+      onPickFile,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '选择文件 0' }));
+    await waitFor(() => expect(onPickFile).toHaveBeenCalledTimes(1));
+
+    // 取消 = 没有任何改动：onChange 一次都没发生，按钮回到原态
+    expect(seen).toHaveLength(0);
+    expect(screen.getByRole('button', { name: '选择文件 0' })).toBeTruthy();
+  });
+
+  it('清除把句柄置空，回到「选择文件」态', async () => {
+    const onPickFile = vi.fn(async () => picked);
+    const { latest } = harness(
+      draft({
+        body: {
+          ...emptyBody(),
+          kind: 'form_data',
+          form: [
+            { key: 'avatar', value: null, file_handle: 'h0', description: 'old.png', kind: 'file', enabled: true },
+          ],
+        },
+      }),
+      'body',
+      undefined,
+      onPickFile,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '清除文件 0' }));
+
+    expect(latest().body.form[0].file_handle).toBeNull();
+    expect(latest().body.form[0].description).toBeNull();
+    expect(screen.getByRole('button', { name: '选择文件 0' })).toBeTruthy();
+  });
+
+  it('binary 选择文件写入 body.binary，清除置空', async () => {
+    const onPickFile = vi.fn(async () => picked);
+    const { latest } = harness(draft({ body: { ...emptyBody(), kind: 'binary' } }), 'body', undefined, onPickFile);
+
+    fireEvent.click(screen.getByRole('button', { name: '选择二进制文件' }));
+    await waitFor(() => expect(latest().body.binary?.file_handle).toBe('h1'));
+    expect(latest().body.binary?.description).toBe('avatar.png');
+    expect(screen.getByText('已选择：avatar.png')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: '清除二进制文件' }));
+    expect(latest().body.binary).toBeNull();
   });
 });
 
