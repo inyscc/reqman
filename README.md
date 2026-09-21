@@ -33,6 +33,24 @@ npx tauri build --bundles nsis
 （本次在 Windows 上就是用它产出 `reqman_0.1.0_x64-setup.exe` 的：NSIS 3.11 与
 `nsis_tauri_utils` 均取自该第三方镜像，**没有做校验和比对**——介意的话请在可信网络里用官方源重打一次。）
 
+## 发布
+
+推一个 `v*` 标签即触发 `.github/workflows/release.yml`：在 Windows runner 上构建 NSIS 与 MSI，
+并创建一个**草稿** Release 把安装包附上去，人工确认后再 Publish。
+
+```bash
+# 三处版本号必须是同一个值（流水线第一步会校验，不一致直接失败）：
+#   package.json / src-tauri/tauri.conf.json / src-tauri/Cargo.toml
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+在 Actions 页面手动触发同一条流水线时**只构建、不创建 Release**，产物留成 artifact，
+用于正式打标签前先验证流水线本身。
+
+Release 默认是草稿（`releaseDraft: true`）；要改成推标签即公开，把该行改成 `false`。
+安装包未做代码签名，用户首次运行会看到 SmartScreen 的「未知发布者」提示，点「仍要运行」即可通过。
+
 ## 测试
 
 前端与后端分开跑，两条命令互不依赖，也不需要先启动应用。
