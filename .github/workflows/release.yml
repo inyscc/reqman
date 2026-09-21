@@ -78,7 +78,9 @@ jobs:
 
             安装包未做代码签名，首次运行时 Windows 会提示「未知发布者」，
             选择「更多信息 → 仍要运行」即可。
-          releaseDraft: true
+          # 推标签即对外发布。改成 true 的话 Release 会先落成草稿，
+          # 需要去 Releases 页面的 Drafts 区手动 Publish——草稿不出现在公开列表里。
+          releaseDraft: false
           prerelease: false
 
       - name: 打包（手动触发，只构建不创建 Release）
