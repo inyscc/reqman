@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { filterTrees, WorkspaceTree } from '../src/components/WorkspaceTree';
 import type { Commands } from '../src/lib/commands';
+import { applyTreeMove } from '../src/lib/treeMoves';
 import {
   defaultSettings,
   emptyAuth,
@@ -4282,7 +4283,85 @@ describe('集合树的拖拽排序与移动（rework-collection-tree-and-variabl
       id: 'A',
       collectionId: 'c1',
       folderId: 'F',
+      // 「移入」没有位置信息：null 表示追加到目标父级末尾（唯一允许落末尾的拖法）
+      index: null,
     });
+  });
+
+  it('跨目录按落点插入：位置一路传到写入，不是末尾', () => {
+    const { actions, view } = renderTree(dndTrees());
+    // 拖到 F 内那条请求（B）的下半区：应插在 B 之后，而不是 F 的末尾
+    const { target, transfer } = dragOver(view, 'A', 'B', 0.9);
+
+    expect(target.className).toContain('drop-after');
+    dropOn(target, 0.9, transfer);
+    expect(actions.onMove).toHaveBeenCalledWith({
+      kind: 'move-request',
+      id: 'A',
+      collectionId: 'c1',
+      folderId: 'F',
+      index: 1,
+    });
+  });
+
+  it('乐观重排按位置插入：不先显示末尾再跳到中间', () => {
+    const trees: CollectionTree[] = [
+      {
+        collection,
+        children: [
+          requestNode('A', 'https://api.test/a'),
+          folderNode('F', [
+            requestNode('B', 'https://api.test/b'),
+            requestNode('C', 'https://api.test/c'),
+          ]),
+        ],
+      },
+    ];
+    const insideF = (result: CollectionTree[]): string[] =>
+      (result[0].children.find((node) => node.id === 'F')?.children ?? []).map(
+        (node) => node.name,
+      );
+
+    const inserted = applyTreeMove(trees, {
+      kind: 'move-request',
+      id: 'A',
+      collectionId: 'c1',
+      folderId: 'F',
+      index: 1,
+    });
+    expect(insideF(inserted)).toEqual(['B', 'A', 'C']);
+  });
+
+  it('乐观重排：位置越界与 null 都落到末尾，条目一个不丢', () => {
+    const trees: CollectionTree[] = [
+      {
+        collection,
+        children: [
+          requestNode('A', 'https://api.test/a'),
+          folderNode('F', [
+            requestNode('B', 'https://api.test/b'),
+            requestNode('C', 'https://api.test/c'),
+          ]),
+        ],
+      },
+    ];
+    const insideF = (result: CollectionTree[]): string[] =>
+      (result[0].children.find((node) => node.id === 'F')?.children ?? []).map(
+        (node) => node.name,
+      );
+
+    for (const index of [99, null]) {
+      const appended = applyTreeMove(trees, {
+        kind: 'move-request',
+        id: 'A',
+        collectionId: 'c1',
+        folderId: 'F',
+        index,
+      });
+      expect(insideF(appended)).toEqual(['B', 'C', 'A']);
+      // 原来挂 A 的那一层也真的不再包含它
+      expect(appended[0].children.map((node) => node.name)).toEqual(['F']);
+    }
   });
 
   it('跨集合拖动不呈现落点：松手不写入、也不报错', () => {
@@ -4399,8 +4478,10 @@ describe('集合树的拖拽排序与移动（rework-collection-tree-and-variabl
     const { target, transfer } = dragOver(view, '外层请求', '内层', 0.5);
     dropOn(target, 0.5, transfer);
 
+    // 落在目录行的中间区域 = 「移入」，没有位置信息：位置传 null（追加到末尾）。
+    // 位置参数自 fix-html5-dnd-in-tauri-shell 起存在，跨目录按落点插入时才带下标。
     await waitFor(() =>
-      expect(requestMove).toHaveBeenCalledWith('外层请求', '内层'),
+      expect(requestMove).toHaveBeenCalledWith('外层请求', '内层', null),
     );
     // 乐观重排必须递归到那一层：目标父级不在集合根时，条目不能被摘下后丢掉
     expect(rowNames()).toContain('外层请求');

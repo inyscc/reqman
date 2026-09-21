@@ -54,10 +54,21 @@ pub fn run() {
             // 窗口在代码中创建，以便挂上导航守卫；tauri.conf.json 的 windows 为空。
             // decorations(false)：去掉原生标题栏，窗口 chrome 由页面承载
             // （change: add-in-page-window-controls）。
+            //
+            // 关掉 Tauri 的拖放处理器（见下一行）：Windows / WebView2 下**必须**如此，否则 wry 会
+            // 撤掉 WebView2 子窗口自己的 OLE 拖放目标、再换上只认文件（CF_HDROP）的那个，页面内的
+            // HTML5 拖拽因此到不了 DOM——集合树与变量表格的排序在真机上会整个失效，而
+            // Linux / 浏览器里一切正常，极难发现（change: fix-html5-dnd-in-tauri-shell，design D1）。
+            // `security_audit.rs` 有断言守着这一行；代价是应用不再接收文件拖入
+            // （当前无任何功能依赖它，导入只经 dialog 插件）。
+            //
+            // 注意：本注释刻意不写出那个方法名。审计断言按字面匹配 `src/lib.rs`，注释里出现
+            // 方法名会让断言在调用被摘掉后依然通过，守卫就废了。
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("reqman")
                 .inner_size(1280.0, 800.0)
                 .decorations(false)
+                .disable_drag_drop_handler()
                 .on_navigation(is_allowed_navigation)
                 .build()?;
             Ok(())

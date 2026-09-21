@@ -493,7 +493,14 @@ pub fn delete_folder(db: &Db, id: &str) -> AppResult<()> {
 }
 
 /// 移动文件夹到新的父级（`None` 表示移到集合根）。拒绝移入自身的后代，避免成环。
-pub fn move_folder(db: &Db, id: &str, new_parent: Option<&str>) -> AppResult<Folder> {
+///
+/// `position` 是它在目标父级子列表里的目标下标；`None` 或越界表示追加到末尾。
+pub fn move_folder(
+    db: &Db,
+    id: &str,
+    new_parent: Option<&str>,
+    position: Option<i64>,
+) -> AppResult<Folder> {
     let folder = get_folder(db, id)?;
 
     if let Some(parent_id) = new_parent {
@@ -515,14 +522,94 @@ pub fn move_folder(db: &Db, id: &str, new_parent: Option<&str>) -> AppResult<Fol
         }
     }
 
-    db.write(|conn| {
-        conn.execute(
+    let collection_id = folder.collection_id.clone();
+    db.write_tx(|conn| {
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE folders SET parent_folder_id = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, new_parent, now()],
         )?;
+        // 过去这里不更新 sort_order，于是「追加到目标父级末尾」对它并不成立——移入后它按
+        // 旧序号落位，重新加载可能与界面显示的末尾不一致。现在两类条目走同一条规则。
+        place_child_at(&tx, &collection_id, new_parent, (id, NodeKind::Folder), position)?;
+        tx.commit()?;
         Ok(())
     })?;
     get_folder(db, id)
+}
+
+/// 把刚改变归属的那一项放到目标父级的第 `position` 位，并重写该父级下**全部**子条目的
+/// `sort_order`（下标即序号）。
+///
+/// 为什么两类条目必须一起重编号：文件夹与请求**共用**同一套 `sort_order`，
+/// `collection_tree` 按它混排（见 `build_nodes` 末尾的排序）。只改被移动那一项的序号
+/// 表达不出「插到第 k 位」——目标父级里与它序号相同的条目会按名称排在它前面。
+///
+/// `position` 为 `None` 或越界时追加到末尾。调用方必须已在本事务内把 `moved` 的父级
+/// 改成 `parent_folder_id`；本函数只负责顺序，不再校验归属。
+pub(crate) fn place_child_at(
+    tx: &Connection,
+    collection_id: &str,
+    parent_folder_id: Option<&str>,
+    moved: (&str, NodeKind),
+    position: Option<i64>,
+) -> AppResult<()> {
+    // 目标父级当前的子条目，顺序与界面一致：sort_order，同序号时文件夹在前，再按名称。
+    // 与 `collection_tree` 的混排规则保持一致，否则重编号会把顺序改到别的样子上去。
+    let mut ordered: Vec<(String, NodeKind)> = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT id, kind FROM (
+                 SELECT id, 'folder' AS kind, sort_order, name
+                   FROM folders WHERE collection_id = ?1 AND parent_folder_id IS ?2
+                 UNION ALL
+                 SELECT id, 'request' AS kind, sort_order, name
+                   FROM requests WHERE collection_id = ?1 AND folder_id IS ?2
+             )
+             ORDER BY sort_order, CASE kind WHEN 'folder' THEN 0 ELSE 1 END, name, id",
+        )?;
+        let rows = stmt.query_map(params![collection_id, parent_folder_id], |row| {
+            let kind: String = row.get("kind")?;
+            Ok((
+                row.get::<_, String>("id")?,
+                match kind.as_str() {
+                    "folder" => NodeKind::Folder,
+                    _ => NodeKind::Request,
+                },
+            ))
+        })?;
+        for row in rows {
+            ordered.push(row?);
+        }
+    }
+
+    // 刚移入的那一项可能已经在列表里（同父级重排），先摘掉再按目标位置插回。
+    ordered.retain(|(id, _)| id != moved.0);
+    let at = match position {
+        Some(value) => (value.max(0) as usize).min(ordered.len()),
+        None => ordered.len(),
+    };
+    ordered.insert(at, (moved.0.to_string(), moved.1));
+
+    for (index, (id, kind)) in ordered.iter().enumerate() {
+        let changed = match kind {
+            NodeKind::Folder => tx.execute(
+                "UPDATE folders SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND parent_folder_id IS ?4",
+                params![index as i64, id, collection_id, parent_folder_id],
+            )?,
+            NodeKind::Request => tx.execute(
+                "UPDATE requests SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND folder_id IS ?4",
+                params![index as i64, id, collection_id, parent_folder_id],
+            )?,
+        };
+        if changed == 0 {
+            return Err(AppError::not_found(format!(
+                "条目不存在或不属于该父级：{}",
+                id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn is_descendant(db: &Db, ancestor_id: &str, candidate_id: &str) -> AppResult<bool> {
@@ -875,6 +962,46 @@ mod tests {
     }
 
     #[test]
+    fn moving_a_folder_lands_at_the_given_position() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let ws = self::list(&db).unwrap().remove(0);
+        let collection = create_collection(&db, &ws.id, "集合").unwrap();
+        let target = create_folder(&db, &collection.id, None, "目标").unwrap();
+        create_folder(&db, &collection.id, Some(&target.id), "一").unwrap();
+        create_folder(&db, &collection.id, Some(&target.id), "二").unwrap();
+        let incoming = create_folder(&db, &collection.id, None, "外来").unwrap();
+
+        // 插到第 1 位：落在「一」之后、「二」之前
+        move_folder(&db, &incoming.id, Some(&target.id), Some(1)).expect("按位置移动文件夹");
+
+        let tree = collection_tree(&db, &collection.id).unwrap();
+        let names: Vec<String> = tree
+            .children
+            .iter()
+            .find(|n| n.id == target.id)
+            .expect("目标文件夹存在")
+            .children
+            .iter()
+            .map(|n| n.name.clone())
+            .collect();
+        // 位置为空时落末尾——过去这里连 sort_order 都不更新，「追加到末尾」对它并不成立
+        assert_eq!(names, vec!["一", "外来", "二"]);
+
+        move_folder(&db, &incoming.id, Some(&target.id), None).expect("末尾移动文件夹");
+        let tree = collection_tree(&db, &collection.id).unwrap();
+        let names: Vec<String> = tree
+            .children
+            .iter()
+            .find(|n| n.id == target.id)
+            .expect("目标文件夹存在")
+            .children
+            .iter()
+            .map(|n| n.name.clone())
+            .collect();
+        assert_eq!(names, vec!["一", "二", "外来"]);
+    }
+
+    #[test]
     fn reorder_changes_persisted_order() {
         let db = Db::open_in_memory().expect("打开数据库");
         let ws = self::list(&db).unwrap().remove(0);
@@ -967,10 +1094,10 @@ mod tests {
         let outer = create_folder(&db, &collection.id, None, "外层").unwrap();
         let inner = create_folder(&db, &collection.id, Some(&outer.id), "内层").unwrap();
 
-        let err = move_folder(&db, &outer.id, Some(&inner.id)).expect_err("应拒绝成环");
+        let err = move_folder(&db, &outer.id, Some(&inner.id), None).expect_err("应拒绝成环");
         assert_eq!(err.code, crate::error::ErrorCode::Conflict);
 
-        let err = move_folder(&db, &outer.id, Some(&outer.id)).expect_err("应拒绝自环");
+        let err = move_folder(&db, &outer.id, Some(&outer.id), None).expect_err("应拒绝自环");
         assert_eq!(err.code, crate::error::ErrorCode::Conflict);
     }
 
@@ -983,7 +1110,7 @@ mod tests {
         let outer = create_folder(&db, &collection.id, None, "外层").unwrap();
         let inner = create_folder(&db, &collection.id, Some(&outer.id), "内层").unwrap();
 
-        let moved = move_folder(&db, &inner.id, None).expect("移到根");
+        let moved = move_folder(&db, &inner.id, None, None).expect("移到根");
         assert_eq!(moved.parent_folder_id, None);
 
         let tree = collection_tree(&db, &collection.id).unwrap();

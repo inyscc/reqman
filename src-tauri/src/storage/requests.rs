@@ -303,7 +303,19 @@ pub fn delete_request(db: &Db, id: &str) -> AppResult<()> {
     })
 }
 
-pub fn move_request(db: &Db, id: &str, folder_id: Option<&str>) -> AppResult<SavedRequest> {
+/// 移动请求到新的归属（`None` = 集合根）。
+///
+/// `position` 是它在目标父级子列表里的目标下标；`None` 或越界表示追加到末尾。
+///
+/// 归属变更与目标父级的重编号在**同一个事务**内完成：拆成两次写入的话，第二次失败会留下
+/// 「已经移过去、但停在末尾」的状态，与用户看到的插入线不符——而这类"有时对、有时差一格"
+/// 的错位最难复现。
+pub fn move_request(
+    db: &Db,
+    id: &str,
+    folder_id: Option<&str>,
+    position: Option<i64>,
+) -> AppResult<SavedRequest> {
     let request = get_request(db, id)?;
     if let Some(folder_id) = folder_id {
         let folder = super::workspace::get_folder(db, folder_id)?;
@@ -312,21 +324,22 @@ pub fn move_request(db: &Db, id: &str, folder_id: Option<&str>) -> AppResult<Sav
         }
     }
 
-    let next: i64 = db.read(|conn| {
-        conn.query_row(
-            "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM requests
-             WHERE collection_id = ?1 AND folder_id IS ?2",
-            params![request.collection_id, folder_id],
-            |row| row.get(0),
-        )
-        .map_err(AppError::from)
-    })?;
-
-    db.write(|conn| {
-        conn.execute(
-            "UPDATE requests SET folder_id = ?2, sort_order = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, folder_id, next, now()],
+    let collection_id = request.collection_id.clone();
+    db.write_tx(|conn| {
+        let tx = conn.transaction()?;
+        // 只改归属：sort_order 交给 place_child_at 统一重排（文件夹与请求共用一套序号）
+        tx.execute(
+            "UPDATE requests SET folder_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, folder_id, now()],
         )?;
+        super::workspace::place_child_at(
+            &tx,
+            &collection_id,
+            folder_id,
+            (id, super::workspace::NodeKind::Request),
+            position,
+        )?;
+        tx.commit()?;
         Ok(())
     })?;
 
@@ -495,7 +508,7 @@ mod tests {
         let request =
             create_request(&db, &collection_id, None, "请求", "GET", "https://a.test").unwrap();
 
-        let moved = move_request(&db, &request.id, Some(&folder.id)).expect("移动请求");
+        let moved = move_request(&db, &request.id, Some(&folder.id), None).expect("移动请求");
         assert_eq!(moved.folder_id.as_deref(), Some(folder.id.as_str()));
 
         let tree = workspace::collection_tree(&db, &collection_id).unwrap();
@@ -505,6 +518,80 @@ mod tests {
             .find(|n| n.name == "目标文件夹")
             .expect("文件夹存在");
         assert_eq!(folder_node.children.len(), 1);
+    }
+
+    /// 某个父级下的子条目名字，顺序即界面顺序（文件夹与请求按共享 sort_order 混排）。
+    fn names_under(db: &Db, collection_id: &str, parent: Option<&str>) -> Vec<String> {
+        let tree = workspace::collection_tree(db, collection_id).unwrap();
+        if parent.is_none() {
+            return tree.children.iter().map(|n| n.name.clone()).collect();
+        }
+        tree.children
+            .iter()
+            .find(|n| Some(n.id.as_str()) == parent)
+            .map(|n| n.children.iter().map(|c| c.name.clone()).collect())
+            .expect("目标父级应存在")
+    }
+
+    #[test]
+    fn moving_a_request_into_another_folder_lands_at_the_given_position() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let collection_id = setup(&db);
+        let target = workspace::create_folder(&db, &collection_id, None, "目标").unwrap();
+        for name in ["一", "二", "三"] {
+            create_request(&db, &collection_id, Some(&target.id), name, "GET", "https://a.test")
+                .unwrap();
+        }
+        let incoming =
+            create_request(&db, &collection_id, None, "外来", "GET", "https://a.test").unwrap();
+
+        // 插到第 1 位：落在「一」之后、「二」之前——不是末尾
+        move_request(&db, &incoming.id, Some(&target.id), Some(1)).expect("按位置移动");
+        assert_eq!(
+            names_under(&db, &collection_id, Some(&target.id)),
+            vec!["一", "外来", "二", "三"]
+        );
+
+        // 越界位置被夹到末尾，不报错
+        move_request(&db, &incoming.id, Some(&target.id), Some(99)).expect("越界位置移动");
+        assert_eq!(
+            names_under(&db, &collection_id, Some(&target.id)),
+            vec!["一", "二", "三", "外来"]
+        );
+
+        // 位置为空同样是末尾（落在目录行中间区域的「移入」没有位置信息）
+        move_request(&db, &incoming.id, Some(&target.id), None).expect("末尾移动");
+        assert_eq!(
+            names_under(&db, &collection_id, Some(&target.id)),
+            vec!["一", "二", "三", "外来"]
+        );
+    }
+
+    #[test]
+    fn moving_a_request_between_folders_and_requests_keeps_the_mixed_order() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let collection_id = setup(&db);
+        // 集合根下依次是：文件夹 A、请求 r1、文件夹 B、文件夹 Z
+        // （同序号时文件夹在前，因此 A 与 r1 本就是交错的）
+        workspace::create_folder(&db, &collection_id, None, "A").unwrap();
+        create_request(&db, &collection_id, None, "r1", "GET", "https://a.test").unwrap();
+        workspace::create_folder(&db, &collection_id, None, "B").unwrap();
+        let holder = workspace::create_folder(&db, &collection_id, None, "Z").unwrap();
+        assert_eq!(
+            names_under(&db, &collection_id, None),
+            vec!["A", "r1", "B", "Z"]
+        );
+
+        let outside =
+            create_request(&db, &collection_id, Some(&holder.id), "rX", "GET", "https://a.test")
+                .unwrap();
+        move_request(&db, &outside.id, None, Some(1)).expect("跨父级按位置移动");
+
+        // 两类条目共用一套 sort_order：重编号不许把文件夹挤到后面，也不许漏掉尾部的 Z
+        assert_eq!(
+            names_under(&db, &collection_id, None),
+            vec!["A", "rX", "r1", "B", "Z"]
+        );
     }
 
     #[test]

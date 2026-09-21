@@ -105,8 +105,12 @@ export function createCommands(call: Invoker) {
       call<Folder>('folder_create', { collectionId, parentFolderId, name }),
     folderRename: (id: string, name: string) => call<Folder>('folder_rename', { id, name }),
     folderDelete: (id: string) => call<void>('folder_delete', { id }),
-    folderMove: (id: string, newParentId: string | null) =>
-      call<Folder>('folder_move', { id, newParentId }),
+    /**
+     * 移动文件夹到新父级（`null` = 集合根）。`index` 是它在目标父级子列表里的目标下标，
+     * `null` 表示追加到末尾（落在目录行中间区域的「移入」没有位置信息）。
+     */
+    folderMove: (id: string, newParentId: string | null, index: number | null = null) =>
+      call<Folder>('folder_move', { id, newParentId, index }),
     /** 更新文件夹级前后置脚本（5.2）；null 表示清空。 */
     folderSetScript: (id: string, preRequestScript: string | null, testScript: string | null) =>
       call<Folder>('folder_set_script', { id, preRequestScript, testScript }),
@@ -131,8 +135,9 @@ export function createCommands(call: Invoker) {
     requestDuplicate: (id: string, newName?: string | null) =>
       call<SavedRequest>('request_duplicate', { id, newName: newName ?? null }),
     requestDelete: (id: string) => call<void>('request_delete', { id }),
-    requestMove: (id: string, folderId: string | null) =>
-      call<SavedRequest>('request_move', { id, folderId }),
+    /** 移动请求到新位置；`index` 语义同 `folderMove`。 */
+    requestMove: (id: string, folderId: string | null, index: number | null = null) =>
+      call<SavedRequest>('request_move', { id, folderId, index }),
 
     // 环境与变量
     environmentList: (workspaceId: string) =>

@@ -55,10 +55,25 @@ export type TreeMove =
       parentFolderId: string | null;
       items: { id: string; kind: 'folder' | 'request' }[];
     }
-  /** 跨父级移动文件夹；后端把它追加到目标父级末尾。 */
-  | { kind: 'move-folder'; id: string; collectionId: string; parentFolderId: string | null }
-  /** 跨父级移动请求；同上。 */
-  | { kind: 'move-request'; id: string; collectionId: string; folderId: string | null };
+  /**
+   * 跨父级移动文件夹。`index` 是它在**目标父级子列表**里的目标下标；`null` 表示追加到
+   * 末尾（落在目录行中间区域的「移入」没有位置信息）。
+   */
+  | {
+      kind: 'move-folder';
+      id: string;
+      collectionId: string;
+      parentFolderId: string | null;
+      index: number | null;
+    }
+  /** 跨父级移动请求；`index` 同上。 */
+  | {
+      kind: 'move-request';
+      id: string;
+      collectionId: string;
+      folderId: string | null;
+      index: number | null;
+    };
 
 function clamp(value: number, max: number): number {
   if (!Number.isFinite(value)) return max;
@@ -159,9 +174,28 @@ export function buildMove(
     };
   }
 
+  // 位置必须一路带出去：跨父级移动同样遵守「插入线即最终落位」，否则指示器会承诺一件
+  // 后端做不到的事（真机验收暴露的那条缺陷）。
+  //
+  // `Infinity`（落在目录行中间区域的「移入」）本身没有位置信息，归一成 null。顺带避开
+  // 一个坑：`Infinity` 经 JSON 会变成 `null`，不归一的话语义就在序列化那一刻变形了。
+  const index = Number.isFinite(target.index) ? target.index : null;
+
   return drag.kind === 'folder'
-    ? { kind: 'move-folder', id: drag.id, collectionId: drag.collectionId, parentFolderId: targetFolderId }
-    : { kind: 'move-request', id: drag.id, collectionId: drag.collectionId, folderId: targetFolderId };
+    ? {
+        kind: 'move-folder',
+        id: drag.id,
+        collectionId: drag.collectionId,
+        parentFolderId: targetFolderId,
+        index,
+      }
+    : {
+        kind: 'move-request',
+        id: drag.id,
+        collectionId: drag.collectionId,
+        folderId: targetFolderId,
+        index,
+      };
 }
 
 // 下面两个改动函数都要递归进**每一层**文件夹：目标父级可能嵌在任意深度，
@@ -209,15 +243,29 @@ function detach(
   return { nodes: next, removed };
 }
 
-/** 把节点插到目标父级的末尾（`folderId` 为 null 时插到集合根末尾）。 */
-function append(nodes: TreeNode[], folderId: string | null, node: TreeNode): TreeNode[] {
-  if (folderId === null) return [...nodes, node];
+/** 在某个子列表的第 `index` 位插入；`null` 或越界表示追加到末尾。 */
+function spliceIn(nodes: TreeNode[], node: TreeNode, index: number | null): TreeNode[] {
+  const at =
+    index === null || !Number.isFinite(index)
+      ? nodes.length
+      : Math.min(Math.max(index, 0), nodes.length);
+  return [...nodes.slice(0, at), node, ...nodes.slice(at)];
+}
+
+/** 把节点插到目标父级的第 `index` 位（`folderId` 为 null 时指集合根）。 */
+function insertAt(
+  nodes: TreeNode[],
+  folderId: string | null,
+  node: TreeNode,
+  index: number | null,
+): TreeNode[] {
+  if (folderId === null) return spliceIn(nodes, node, index);
   return nodes.map((item) => {
     if (item.kind !== 'folder') return item;
     const children =
       item.id === folderId
-        ? append(item.children, null, node)
-        : append(item.children, folderId, node);
+        ? insertAt(item.children, null, node, index)
+        : insertAt(item.children, folderId, node, index);
     return children === item.children ? item : { ...item, children };
   });
 }
@@ -259,9 +307,14 @@ export function applyTreeMove(trees: CollectionTree[], move: TreeMove): Collecti
       }
       if (!node) return trees;
 
+      // 乐观重排必须与后端同一条规则：跨父级也按位置插入。这里若仍用「追加末尾」，
+      // 界面会先显示末尾、后端确认后跳到中间——"瞬时看不出、刷新才对不上"的那类错位。
       return detached.map((tree) =>
         tree.collection.id === move.collectionId
-          ? { ...tree, children: append(tree.children, targetFolderId, node as TreeNode) }
+          ? {
+              ...tree,
+              children: insertAt(tree.children, targetFolderId, node as TreeNode, move.index),
+            }
           : tree,
       );
     }

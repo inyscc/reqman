@@ -1,8 +1,9 @@
 //! 测试辅助（仅在 `cfg(test)` 下编译）。
 //!
 //! 环境里没有 `tempfile` / `wiremock` 这类 crate，因此这里自带最小的临时目录
-//! 持有者、一个可控的本地 HTTP 测试服务器，以及一个用 openssl 现场签发自签
-//! 证书的 HTTPS 测试服务器——后者让证书校验的两条路径都能被断言。
+//! 持有者、一个可控的本地 HTTP 测试服务器，以及一个现场生成自签证书的 HTTPS
+//! 测试服务器——后者让证书校验的两条路径都能被断言。证书生成用 `rcgen`（dev 依赖）
+//! 而不是外部 `openssl` 命令：不依赖机器上装了什么，测试才在任何环境都跑得起来。
 
 #![allow(dead_code)]
 
@@ -380,67 +381,39 @@ async fn read_chunked(
 }
 
 // ---------------------------------------------------------------------------
-// HTTPS 测试服务器（自签证书，由 openssl 现场签发）
+// HTTPS 测试服务器（自签证书，现场生成）
 // ---------------------------------------------------------------------------
 
-/// 现场签发一张自签证书，返回 (证书 DER, 私钥 DER/PKCS#8)。
-fn generate_self_signed(dir: &TempDir) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
-    let cert_pem = dir.join("cert.pem");
-    let key_pem = dir.join("key.pem");
-    let cert_der = dir.join("cert.der");
-    let key_der = dir.join("key.der");
+/// 现场生成一张自签证书与对应的私钥，返回 (证书 DER, 私钥 DER/PKCS#8)。
+///
+/// 用 `rcgen`（dev 依赖）而不是 spawn 一个 `openssl` 进程。旧写法让这个测试**在没装
+/// openssl 的机器上根本起不来**（Windows 开发机、精简 CI 镜像都踩得到），而它守的正是
+/// 「证书校验默认开启、可逐请求关闭」这条安全行为——最不该被环境吞掉的测试。
+///
+/// 生成器只在测试期编译，不进产物；rcgen 关掉默认特性、只留 ring，与仓库既有的
+/// 「复用 ring 后端、不引入第二个 crypto provider」一致（它真实的传递依赖
+/// `ring` / `rustls-pki-types` / `time` 本来就都在依赖树里，没有新增编译单元）。
+fn generate_self_signed() -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+    use rcgen::{CertificateParams, SanType};
+    use std::net::{IpAddr, Ipv4Addr};
 
-    let status = std::process::Command::new("openssl")
-        .args([
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-days",
-            "2",
-            "-subj",
-            "/CN=localhost",
-            "-addext",
-            "subjectAltName=DNS:localhost,IP:127.0.0.1",
-        ])
-        .arg("-keyout")
-        .arg(&key_pem)
-        .arg("-out")
-        .arg(&cert_pem)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "openssl 签发证书失败",
-        ));
+    fn io_err(err: impl std::fmt::Display) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::Other, err.to_string())
     }
 
-    fn to_der(args: &[&str], input: &Path, output: &Path) -> std::io::Result<()> {
-        let status = std::process::Command::new("openssl")
-            .args(args)
-            .arg(input)
-            .args(["-outform", "DER", "-out"])
-            .arg(output)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "openssl 转换 DER 失败",
-            ));
-        }
-        Ok(())
-    }
+    // SAN 同时覆盖 DNS 与 IP，与旧 openssl 命令的 `-addext subjectAltName=DNS:localhost,
+    // IP:127.0.0.1` 等价。少了 IP 那一项，「默认拒绝」会因为**名称不匹配**而拒绝，而不是
+    // 因为证书不受信任——那样这条测试守的就不是它名字里的东西了。
+    let mut params =
+        CertificateParams::new(vec!["localhost".to_string()]).map_err(io_err)?;
+    params
+        .subject_alt_names
+        .push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)));
 
-    to_der(&["x509", "-in"], &cert_pem, &cert_der)?;
-    // `pkey -outform DER` 输出的是 PKCS#1，rustls 需要 PKCS#8，因此显式转换
-    to_der(&["pkcs8", "-topk8", "-nocrypt", "-in"], &key_pem, &key_der)?;
+    let signing_key = rcgen::KeyPair::generate().map_err(io_err)?;
+    let cert = params.self_signed(&signing_key).map_err(io_err)?;
 
-    Ok((std::fs::read(cert_der)?, std::fs::read(key_der)?))
+    Ok((cert.der().to_vec(), signing_key.serialize_der()))
 }
 
 /// 使用自签证书的 HTTPS 测试服务器。
@@ -451,10 +424,10 @@ pub struct HttpsTestServer {
 }
 
 impl HttpsTestServer {
-    pub fn start(dir: &TempDir, body: impl Into<Vec<u8>>) -> std::io::Result<Self> {
+    pub fn start(body: impl Into<Vec<u8>>) -> std::io::Result<Self> {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
-        let (cert_der, key_der) = generate_self_signed(dir)?;
+        let (cert_der, key_der) = generate_self_signed()?;
 
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = rustls::ServerConfig::builder_with_provider(provider)

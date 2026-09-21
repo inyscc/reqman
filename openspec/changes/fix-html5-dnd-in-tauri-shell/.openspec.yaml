@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-09-21
+
+# 原标 `skip_specs: true`（理由：无规格层行为变更，修的是实现未兑现规格）。
+# 该判断被真机验收推翻，标记已撤：跨目录拖放总是落到目标父级的末尾，而
+# 「插入线指示同级排序」与 `#### Scenario: 文件夹与请求交错` 并不限定同一父级，
+# 两者互相矛盾。规格必须改口，见 specs/ui-layout/spec.md 与 design.md 的 D3/D5。

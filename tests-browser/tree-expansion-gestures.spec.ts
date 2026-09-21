@@ -417,6 +417,37 @@ describe('集合树拖拽（真实引擎）', () => {
     expect(await invoked(page)).toContain('request_move');
   });
 
+  it('跨目录按落点插入：插到指示的位置，而不是目标目录的末尾', async () => {
+    const page = await openApp();
+    page.setDefaultTimeout(10_000);
+    const tree = page.getByTestId('workspace-tree');
+
+    // 起点：「内层」（挂在「外层」下）里挂着「深处的请求」
+    expect(await orderNow(page)).toEqual([
+      '探针集合',
+      '外层',
+      '内层',
+      '深处的请求',
+      '外层请求',
+    ]);
+
+    // 把「深处的请求」拖到「内层」行的**上半区**：目标父级变成「外层」、位置是第 0 位。
+    // 这条用例的全部价值在于它能区分两种实现：按落点插入得 [深处的请求, 内层, 外层请求]，
+    // 而"忽略位置、一律追加到目标父级末尾"得 [内层, 外层请求, 深处的请求]——两者不同。
+    const inner = tree.locator('.node').filter({ hasText: '内层' }).first();
+    const deepRequest = tree.locator('.node').filter({ hasText: '深处的请求' }).first();
+    await deepRequest.dragTo(inner, { targetPosition: { x: 60, y: 4 } });
+
+    await expect.poll(() => orderNow(page)).toEqual([
+      '探针集合',
+      '外层',
+      '深处的请求',
+      '内层',
+      '外层请求',
+    ]);
+    expect(await invoked(page)).toContain('request_move');
+  });
+
   it('搜索态下不可拖拽：行不可拖，顺序也不变', async () => {
     const page = await openApp();
     page.setDefaultTimeout(10_000);

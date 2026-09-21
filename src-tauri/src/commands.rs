@@ -191,8 +191,9 @@ pub fn move_folder(
     state: &AppState,
     id: &str,
     new_parent_id: Option<String>,
+    index: Option<i64>,
 ) -> AppResult<Folder> {
-    workspace::move_folder(&state.db, id, new_parent_id.as_deref())
+    workspace::move_folder(&state.db, id, new_parent_id.as_deref(), index)
 }
 
 pub fn reorder_children(
@@ -248,8 +249,9 @@ pub fn move_request(
     state: &AppState,
     id: &str,
     folder_id: Option<String>,
+    index: Option<i64>,
 ) -> AppResult<SavedRequest> {
-    requests::move_request(&state.db, id, folder_id.as_deref())
+    requests::move_request(&state.db, id, folder_id.as_deref(), index)
 }
 
 pub fn list_environments(state: &AppState, workspace_id: &str) -> AppResult<Vec<Environment>> {
@@ -738,8 +740,9 @@ pub fn folder_move(
     state: State<'_, AppState>,
     id: String,
     new_parent_id: Option<String>,
+    index: Option<i64>,
 ) -> AppResult<Folder> {
-    move_folder(&state, &id, new_parent_id)
+    move_folder(&state, &id, new_parent_id, index)
 }
 
 #[tauri::command]
@@ -792,8 +795,9 @@ pub fn request_move(
     state: State<'_, AppState>,
     id: String,
     folder_id: Option<String>,
+    index: Option<i64>,
 ) -> AppResult<SavedRequest> {
-    move_request(&state, &id, folder_id)
+    move_request(&state, &id, folder_id, index)
 }
 
 #[tauri::command]

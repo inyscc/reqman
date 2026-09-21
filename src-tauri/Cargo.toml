@@ -70,6 +70,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 # 仅供测试期起一个自签证书的 HTTPS 服务器，用于验证证书校验的两条路径。
 # 复用 reqwest 已经带入的 ring 后端，避免出现第二个 crypto provider。
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }

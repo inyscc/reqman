@@ -1418,9 +1418,10 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       } else if (move.kind === 'reorder-children') {
         await client.childrenReorder(move.collectionId, move.parentFolderId, move.items);
       } else if (move.kind === 'move-folder') {
-        await client.folderMove(move.id, move.parentFolderId);
+        // 位置一路透传到后端：跨父级移动同样按落点插入，而不是一律追加到末尾
+        await client.folderMove(move.id, move.parentFolderId, move.index);
       } else {
-        await client.requestMove(move.id, move.folderId);
+        await client.requestMove(move.id, move.folderId, move.index);
       }
     } catch (caught) {
       setError(describeError(caught).message);

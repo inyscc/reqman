@@ -507,9 +507,8 @@ async fn auth_fields_accept_variable_references() {
 
 #[tokio::test]
 async fn certificate_validation_is_on_by_default_and_can_be_disabled_per_request() {
-    let cert_dir = TempDir::new("net-tls-cert");
-    let server = HttpsTestServer::start(&cert_dir, "{\"tls\":true}")
-        .expect("启动自签 HTTPS 测试服务器");
+    let server =
+        HttpsTestServer::start("{\"tls\":true}").expect("启动自签 HTTPS 测试服务器");
     let harness = Harness::new("net-tls");
 
     let mut request = harness.request("R", "GET", &server.url("/s"));

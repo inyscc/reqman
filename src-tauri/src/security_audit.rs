@@ -306,6 +306,24 @@ fn window_is_created_in_code_so_the_navigation_guard_applies() {
     );
 }
 
+/// 页面内的 HTML5 拖拽在桌面壳里必须可用。
+///
+/// Windows / WebView2 下，Tauri 默认的拖放处理器会撤掉 WebView2 子窗口自己的 OLE 拖放目标、
+/// 换成只认文件（CF_HDROP）的那个，集合树与变量表格的拖拽因此到不了 DOM——真机上整个失效，
+/// 而 Linux（WebKitGTK）与浏览器里都看不见。这种"只在某个平台的宿主里存在"的缺陷没法用
+/// 行为测试守，只能用源码级断言守（change: fix-html5-dnd-in-tauri-shell，design D2）：
+/// 摘掉 `lib.rs` 里那一行时，本条必须变红。
+#[test]
+fn the_shell_does_not_swallow_in_page_drag_and_drop() {
+    let source = read("src/lib.rs");
+    assert!(
+        source.contains("disable_drag_drop_handler"),
+        "主窗口必须关掉 Tauri 的拖放处理器（WebviewWindowBuilder::disable_drag_drop_handler）。\
+         不关掉，Windows / WebView2 下外壳会接管页面内的 HTML5 拖拽，集合树与变量表格的\
+         排序在真机上整个失效，而 Linux 与浏览器里一切正常——见变更 fix-html5-dnd-in-tauri-shell 的 design D1/D2"
+    );
+}
+
 #[test]
 fn no_generic_file_or_shell_command_is_exposed() {
     let commands = registered_commands();
