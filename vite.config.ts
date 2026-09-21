@@ -39,7 +39,11 @@ export default defineConfig(() => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      //    `openspec/` 同样不参与前端构建；更要紧的是：Windows 下 Vite 对项目
+      //    目录的文件监视会持有句柄，`openspec archive` 移动变更目录时会直接
+      //    报 EPERM（rename 被拒），只有在 dev server 没跑时才成功。忽略掉它，
+      //    归档就不必先关掉应用。
+      ignored: ["**/src-tauri/**", "**/openspec/**"],
     },
   },
 }));

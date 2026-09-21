@@ -3,11 +3,12 @@
 //! 覆盖 spec: 环境与变量持久化 / 工作区级全局变量与应用设置持久化 /
 //! 敏感值不以明文落盘。
 
-use super::model::{setting_keys, Environment, ProxyConfig, Scope, Variable};
+use super::model::{setting_keys, Environment, Id, ProxyConfig, Scope, Variable};
 use super::{from_json, new_id, now, require_name, to_json, Db};
 use crate::error::{AppError, AppResult};
 use crate::secrets::{self, KeyProvider, StoredValue};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
@@ -300,7 +301,10 @@ fn variable_from_row(row: &Row<'_>, key_provider: &dyn KeyProvider) -> rusqlite:
         scope,
         owner_id: row.get("owner_id")?,
         name: row.get("name")?,
+        description: row.get("description")?,
         is_secret,
+        enabled: row.get::<_, i64>("enabled")? != 0,
+        sort_order: row.get("sort_order")?,
         initial: decode_value(is_secret, initial_value, initial_readable, key_provider),
         current: decode_value(is_secret, current_value, current_readable, key_provider),
     })
@@ -313,8 +317,9 @@ pub fn list_variables(
     key_provider: &dyn KeyProvider,
 ) -> AppResult<Vec<Variable>> {
     db.read(|conn| {
+        // 列表顺序就是生效顺序：同名组里最靠下的启用条目胜出（spec: 作用域优先级）
         let mut stmt = conn.prepare(
-            "SELECT * FROM variables WHERE scope = ?1 AND owner_id = ?2 ORDER BY name",
+            "SELECT * FROM variables WHERE scope = ?1 AND owner_id = ?2 ORDER BY sort_order, name",
         )?;
         let rows = stmt.query_map(params![scope.as_str(), owner_id], |row| {
             variable_from_row(row, key_provider)
@@ -347,9 +352,289 @@ fn validate_owner(db: &Db, scope: Scope, owner_id: &str) -> AppResult<()> {
     }
 }
 
+fn require_persisted_scope(scope: Scope) -> AppResult<()> {
+    if scope.is_persisted() {
+        return Ok(());
+    }
+    Err(AppError::invalid_input(format!(
+        "作用域 {} 不落盘，不能持久化",
+        scope.as_str()
+    )))
+}
+
+/// 空白描述等价于「没有描述」。
+fn normalize_description(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// 同名组里生效的那一条（按 id）：顺序最靠后的**启用**条目；全组被禁用时取最靠后的一条。
+///
+/// 这份判定同时被解析层（`layer_for` 跳过禁用）、脚本运行时与只读浮层使用，
+/// 改动它必须三处一起改（spec: 作用域优先级）。
+fn effective_variable_id(
+    conn: &Connection,
+    scope: Scope,
+    owner_id: &str,
+    name: &str,
+) -> AppResult<Option<Id>> {
+    let pick = |only_enabled: bool| -> AppResult<Option<Id>> {
+        let sql = if only_enabled {
+            "SELECT id FROM variables WHERE scope = ?1 AND owner_id = ?2 AND name = ?3 AND enabled = 1
+             ORDER BY sort_order DESC, rowid DESC LIMIT 1"
+        } else {
+            "SELECT id FROM variables WHERE scope = ?1 AND owner_id = ?2 AND name = ?3
+             ORDER BY sort_order DESC, rowid DESC LIMIT 1"
+        };
+        Ok(conn
+            .query_row(sql, params![scope.as_str(), owner_id, name], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?)
+    };
+
+    match pick(true)? {
+        Some(id) => Ok(Some(id)),
+        None => pick(false),
+    }
+}
+
+/// 新增条目一律落在所属（作用域 + 归属）的末尾（spec: 新增追加到末尾）。
+fn next_sort_order(conn: &Connection, scope: Scope, owner_id: &str) -> AppResult<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM variables WHERE scope = ?1 AND owner_id = ?2",
+        params![scope.as_str(), owner_id],
+        |row| row.get::<_, i64>(0),
+    )?)
+}
+
+/// 按 id 更新一个变量的若干字段；`None` 表示该字段不变。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VariablePatch {
+    pub name: Option<String>,
+    /// 同时写入初始值与当前值。
+    pub value: Option<String>,
+    /// 空字符串等价于清空描述。
+    pub description: Option<String>,
+    pub is_secret: Option<bool>,
+    pub enabled: Option<bool>,
+}
+
+/// 切换 secret 标记时把已有取值重编码；值不可读时返回可辨识错误（明文不落库）。
+fn reencode_on_toggle(
+    raw: &RawVariable,
+    is_secret: bool,
+    key_provider: &dyn KeyProvider,
+) -> AppResult<(Option<String>, Option<String>)> {
+    let convert = |existing: &Option<String>, readable: bool| -> AppResult<Option<String>> {
+        match existing {
+            None => Ok(None),
+            Some(encoded) => {
+                match decode_value(raw.is_secret, Some(encoded.clone()), readable, key_provider)
+                    .plaintext()
+                {
+                    Some(plain) => Ok(Some(encode_value(is_secret, plain, key_provider)?)),
+                    None => Err(AppError::invalid_input(
+                        "该变量当前不可解密，无法切换 secret 标记",
+                    )),
+                }
+            }
+        }
+    };
+
+    Ok((
+        convert(&raw.initial_value, raw.initial_readable)?,
+        convert(&raw.current_value, raw.current_readable)?,
+    ))
+}
+
+/// 插入一条变量记录（调用方负责校验作用域与归属）；顺序取该归属的末尾。
+///
+/// 三条写入路径（新增行、按名 upsert 的新键、导入）都汇到这里，
+/// 因此「新条目落在末尾」与「三列新字段的写法」只有一处。
+#[allow(clippy::too_many_arguments)]
+fn insert_variable_row(
+    conn: &Connection,
+    scope: Scope,
+    owner_id: &str,
+    name: &str,
+    description: Option<String>,
+    initial_encoded: Option<String>,
+    current_encoded: Option<String>,
+    is_secret: bool,
+    enabled: bool,
+) -> AppResult<Id> {
+    let id = new_id();
+    let ts = now();
+    let sort_order = next_sort_order(conn, scope, owner_id)?;
+
+    conn.execute(
+        "INSERT INTO variables (id, scope, owner_id, name, description, initial_value, current_value,
+            is_secret, enabled, initial_readable, current_readable, sort_order, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 1, ?10, ?11, ?11)",
+        params![
+            id,
+            scope.as_str(),
+            owner_id,
+            name,
+            description,
+            initial_encoded,
+            current_encoded,
+            is_secret as i64,
+            enabled as i64,
+            sort_order,
+            ts,
+        ],
+    )?;
+
+    Ok(id)
+}
+
+/// 新建一个持久化变量，落在所属（作用域 + 归属）的末尾。
+///
+/// 与 `upsert_variable` 的区别是**永远新增**：界面上的「新增一行」用它，
+/// 因此填入一个已存在的名称会新增一条同名条目，而不是覆盖既有条目
+/// （spec: 变量表格的重复键与拖拽排序）。
+#[allow(clippy::too_many_arguments)]
+pub fn create_variable(
+    db: &Db,
+    scope: Scope,
+    owner_id: &str,
+    name: &str,
+    value: &str,
+    is_secret: bool,
+    description: Option<&str>,
+    key_provider: &dyn KeyProvider,
+) -> AppResult<Variable> {
+    require_persisted_scope(scope)?;
+    let name = require_name(name)?;
+    validate_owner(db, scope, owner_id)?;
+    let encoded = encode_value(is_secret, value, key_provider)?;
+    let description = normalize_description(description);
+
+    let id = db.write(|conn| {
+        insert_variable_row(
+            conn,
+            scope,
+            owner_id,
+            &name,
+            description,
+            Some(encoded.clone()),
+            Some(encoded),
+            is_secret,
+            true,
+        )
+    })?;
+
+    get_variable(db, &id, key_provider)
+}
+
+/// 按 id 更新一个变量：名称、值与描述可就地改，启用状态与 secret 标记可就地切换。
+///
+/// 名称允许与既有条目重名（同名共存）但拒绝空名；改名与排序无关，
+/// SHALL NOT 改变该行在列表中的位置。
+pub fn update_variable(
+    db: &Db,
+    id: &str,
+    patch: VariablePatch,
+    key_provider: &dyn KeyProvider,
+) -> AppResult<Variable> {
+    let raw = db.read(|conn| raw_variable(conn, id))?;
+    let is_secret = patch.is_secret.unwrap_or(raw.is_secret);
+
+    let name = match patch.name.as_deref() {
+        Some(candidate) => Some(require_name(candidate)?),
+        None => None,
+    };
+    let description = patch
+        .description
+        .as_deref()
+        .map(|value| normalize_description(Some(value)));
+
+    // 新值优先；没给新值时只有 secret 标记变化才需要重编码
+    let (initial_encoded, current_encoded) = match patch.value.as_deref() {
+        Some(value) => {
+            let encoded = encode_value(is_secret, value, key_provider)?;
+            (Some(encoded.clone()), Some(encoded))
+        }
+        None if is_secret == raw.is_secret => {
+            (raw.initial_value.clone(), raw.current_value.clone())
+        }
+        None => reencode_on_toggle(&raw, is_secret, key_provider)?,
+    };
+
+    db.write(|conn| {
+        let changed = conn.execute(
+            "UPDATE variables SET
+                name = COALESCE(?2, name),
+                description = CASE WHEN ?3 = 1 THEN ?4 ELSE description END,
+                initial_value = ?5,
+                current_value = ?6,
+                is_secret = ?7,
+                enabled = COALESCE(?8, enabled),
+                initial_readable = 1,
+                current_readable = 1,
+                updated_at = ?9
+             WHERE id = ?1",
+            params![
+                id,
+                name,
+                patch.description.is_some() as i64,
+                description,
+                initial_encoded,
+                current_encoded,
+                is_secret as i64,
+                patch.enabled.map(|value| value as i64),
+                now(),
+            ],
+        )?;
+        if changed == 0 {
+            return Err(AppError::not_found(format!("变量不存在：{}", id)));
+        }
+        Ok(())
+    })?;
+
+    get_variable(db, id, key_provider)
+}
+
+/// 按给定顺序重写某个（作用域 + 归属）下全部条目的顺序（下标即 `sort_order`）。
+pub fn reorder_variables(
+    db: &Db,
+    scope: Scope,
+    owner_id: &str,
+    ordered_ids: &[Id],
+) -> AppResult<()> {
+    require_persisted_scope(scope)?;
+    validate_owner(db, scope, owner_id)?;
+
+    db.write_tx(|conn| {
+        let tx = conn.transaction()?;
+        for (index, id) in ordered_ids.iter().enumerate() {
+            let changed = tx.execute(
+                "UPDATE variables SET sort_order = ?1, updated_at = ?5
+                 WHERE id = ?2 AND scope = ?3 AND owner_id = ?4",
+                params![index as i64, id, scope.as_str(), owner_id, now()],
+            )?;
+            if changed == 0 {
+                return Err(AppError::not_found(format!(
+                    "变量不存在或不属于该归属：{}",
+                    id
+                )));
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 /// 新建或更新一个持久化变量。
 ///
-/// `initial` / `current` 为 `None` 表示「保持原值不变」。
+/// `initial` / `current` 为 `None` 表示「保持原值不变」。名称定位的是**生效的那一条**
+/// （同名组里顺序最靠后的启用条目；全组被禁用时取最靠后的一条）；名称不存在时追加到末尾。
+/// 脚本经 `pm.*` 写入与导入走这条路径，因此 SHALL NOT 凭空造出同名重复条目
+/// （spec: 脚本对变量的读写）。
 #[allow(clippy::too_many_arguments)]
 pub fn upsert_variable(
     db: &Db,
@@ -361,24 +646,11 @@ pub fn upsert_variable(
     current: Option<&str>,
     key_provider: &dyn KeyProvider,
 ) -> AppResult<Variable> {
-    if !scope.is_persisted() {
-        return Err(AppError::invalid_input(format!(
-            "作用域 {} 不落盘，不能持久化",
-            scope.as_str()
-        )));
-    }
+    require_persisted_scope(scope)?;
     let name = require_name(name)?;
     validate_owner(db, scope, owner_id)?;
 
-    let existing_id: Option<String> = db.read(|conn| {
-        Ok(conn
-            .query_row(
-                "SELECT id FROM variables WHERE scope = ?1 AND owner_id = ?2 AND name = ?3",
-                params![scope.as_str(), owner_id, name],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?)
-    })?;
+    let existing = db.read(|conn| effective_variable_id(conn, scope, owner_id, &name))?;
 
     // 密钥不可用时在这里失败，明文不会落库（design D5 降级态）
     let initial_encoded = initial
@@ -388,29 +660,20 @@ pub fn upsert_variable(
         .map(|value| encode_value(is_secret, value, key_provider))
         .transpose()?;
 
-    match existing_id {
+    match existing {
         None => {
-            let id = new_id();
-            let ts = now();
-            db.write(|conn| {
-                conn.execute(
-                    "INSERT INTO variables (id, scope, owner_id, name, initial_value, current_value,
-                        is_secret, initial_readable, current_readable, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 1, ?8, ?8)",
-                    params![
-                        id,
-                        scope.as_str(),
-                        owner_id,
-                        name,
-                        initial_encoded
-                            .clone()
-                            .or_else(|| Some(String::new())),
-                        current_encoded.clone().or_else(|| Some(String::new())),
-                        is_secret as i64,
-                        ts,
-                    ],
-                )?;
-                Ok(())
+            let id = db.write(|conn| {
+                insert_variable_row(
+                    conn,
+                    scope,
+                    owner_id,
+                    &name,
+                    None,
+                    initial_encoded.clone().or_else(|| Some(String::new())),
+                    current_encoded.clone().or_else(|| Some(String::new())),
+                    is_secret,
+                    true,
+                )
             })?;
             get_variable(db, &id, key_provider)
         }
@@ -489,6 +752,9 @@ pub fn upsert_variable(
 ///
 /// 源文档只有单一值，因此把同一个值同时写入初始值与当前值（design D13）；
 /// secret 值先经 AEAD 加密才落库，密钥不可用时直接失败、明文不落库。
+/// 启用状态与描述由源文档给出，并落在该归属的末尾
+/// （spec: 导入集合变量的禁用状态与描述）。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn insert_variable(
     conn: &Connection,
     scope: Scope,
@@ -496,31 +762,24 @@ pub(crate) fn insert_variable(
     name: &str,
     is_secret: bool,
     value: &str,
+    enabled: bool,
+    description: Option<&str>,
     key_provider: &dyn KeyProvider,
 ) -> AppResult<()> {
-    if !scope.is_persisted() {
-        return Err(AppError::invalid_input(format!(
-            "作用域 {} 不落盘，不能持久化",
-            scope.as_str()
-        )));
-    }
+    require_persisted_scope(scope)?;
     let name = require_name(name)?;
     let encoded = encode_value(is_secret, value, key_provider)?;
-    let ts = now();
 
-    conn.execute(
-        "INSERT INTO variables (id, scope, owner_id, name, initial_value, current_value,
-            is_secret, initial_readable, current_readable, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, 1, 1, ?7, ?7)",
-        params![
-            new_id(),
-            scope.as_str(),
-            owner_id,
-            name,
-            encoded,
-            is_secret as i64,
-            ts,
-        ],
+    insert_variable_row(
+        conn,
+        scope,
+        owner_id,
+        &name,
+        normalize_description(description),
+        Some(encoded.clone()),
+        Some(encoded),
+        is_secret,
+        enabled,
     )?;
     Ok(())
 }
@@ -689,14 +948,24 @@ fn layer_for(
 ) -> AppResult<BTreeMap<String, String>> {
     let variables = list_variables(db, scope, owner_id, key_provider)?;
     let mut map = BTreeMap::new();
+    // 列表顺序即生效顺序（`ORDER BY sort_order, name`），顺序覆写因此恰好得到
+    // 「同名组里最靠下的**启用**条目胜出」；被禁用的条目直接跳过，全组禁用时该名字缺席
+    // （spec: 作用域优先级）。
     for variable in variables {
-        // 不可读的 secret 无法参与解析，按未定义处理
-        if let Some(value) = variable.current.plaintext() {
-            if variable.is_secret {
-                secret_names.insert(variable.name.clone());
-            }
-            map.insert(variable.name.clone(), value.to_string());
+        if !variable.enabled {
+            continue;
         }
+        // 不可读的 secret 无法参与解析，按未定义处理
+        let Some(value) = variable.current.plaintext() else {
+            continue;
+        };
+        // 掩码身份跟随**生效**的那一条：靠下的非 secret 条目会摘掉上面那条留下的名字
+        if variable.is_secret {
+            secret_names.insert(variable.name.clone());
+        } else {
+            secret_names.remove(&variable.name);
+        }
+        map.insert(variable.name.clone(), value.to_string());
     }
     Ok(map)
 }
@@ -1033,5 +1302,372 @@ mod tests {
 
     fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    // ---- 顺序与同名组 ----
+
+    /// 建一个环境并返回 id：同名组的用例都在环境作用域上做。
+    fn environment(db: &Db, workspace_id: &str) -> String {
+        create_environment(db, workspace_id, "同名组环境").unwrap().id
+    }
+
+    /// 某归属下按列表顺序的名称。
+    fn names_in_order(db: &Db, scope: Scope, owner_id: &str, key: &MemoryKeyProvider) -> Vec<String> {
+        list_variables(db, scope, owner_id, key)
+            .unwrap()
+            .into_iter()
+            .map(|variable| variable.name)
+            .collect()
+    }
+
+    #[test]
+    fn list_variables_follows_sort_order_not_name_order() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([20u8; 32]);
+        let (workspace_id, collection_id) = setup(&db);
+        let env = environment(&db, &workspace_id);
+
+        // 故意按非名称序新增：顺序应当跟随新增（末尾追加），而不是回落到名称序
+        for (name, value) in [("zeta", "1"), ("alpha", "2"), ("mid", "3")] {
+            create_variable(&db, Scope::Environment, &env, name, value, false, None, &key).unwrap();
+        }
+        assert_eq!(names_in_order(&db, Scope::Environment, &env, &key), vec!["zeta", "alpha", "mid"]);
+
+        // 重排按下标重写，且只动这个归属
+        let ids: Vec<Id> = list_variables(&db, Scope::Environment, &env, &key)
+            .unwrap()
+            .into_iter()
+            .map(|variable| variable.id)
+            .collect();
+        let reordered = vec![ids[2].clone(), ids[1].clone(), ids[0].clone()];
+        reorder_variables(&db, Scope::Environment, &env, &reordered).unwrap();
+
+        let ids_after: Vec<Id> = list_variables(&db, Scope::Environment, &env, &key)
+            .unwrap()
+            .into_iter()
+            .map(|variable| variable.id)
+            .collect();
+        assert_eq!(ids_after, reordered, "列表顺序应等于重排给定的顺序");
+        assert!(
+            list_variables(&db, Scope::Collection, &collection_id, &key).unwrap().is_empty(),
+            "重排不应波及其它归属"
+        );
+    }
+
+    #[test]
+    fn reorder_variables_rejects_ids_outside_the_owner() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([20u8; 32]);
+        let (workspace_id, collection_id) = setup(&db);
+        let env = environment(&db, &workspace_id);
+
+        let mine = create_variable(&db, Scope::Environment, &env, "mine", "1", false, None, &key).unwrap();
+        let other = create_variable(&db, Scope::Collection, &collection_id, "other", "2", false, None, &key).unwrap();
+
+        let err = reorder_variables(
+            &db,
+            Scope::Environment,
+            &env,
+            &[mine.id.clone(), other.id.clone()],
+        )
+        .expect_err("不属于该归属的条目应被拒绝");
+        assert_eq!(err.code, ErrorCode::NotFound);
+
+        // 整批拒绝：合法的那一项也不应被写进去
+        let rows = list_variables(&db, Scope::Environment, &env, &key).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sort_order, 0, "失败后不应留下半批写入");
+    }
+
+    #[test]
+    fn the_last_enabled_row_of_a_group_wins() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([21u8; 32]);
+        let (workspace_id, collection_id) = setup(&db);
+
+        // 「新增一行」永远新增，因此同名条目可以共存
+        create_variable(&db, Scope::Collection, &collection_id, "host", "first", false, None, &key).unwrap();
+        create_variable(&db, Scope::Collection, &collection_id, "host", "second", false, None, &key).unwrap();
+
+        let layers = load_scope_layers(&db, &workspace_id, Some(&collection_id), None, BTreeMap::new(), BTreeMap::new(), &key).unwrap();
+        assert_eq!(layers.lookup("host"), Some("second"), "靠下的启用条目生效");
+    }
+
+    #[test]
+    fn disabling_the_effective_row_falls_back_to_the_previous_enabled_row() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([22u8; 32]);
+        let (workspace_id, collection_id) = setup(&db);
+
+        create_variable(&db, Scope::Collection, &collection_id, "host", "first", false, None, &key).unwrap();
+        let second = create_variable(&db, Scope::Collection, &collection_id, "host", "second", false, None, &key).unwrap();
+
+        update_variable(&db, &second.id, VariablePatch { enabled: Some(false), ..Default::default() }, &key).unwrap();
+
+        let layers = load_scope_layers(&db, &workspace_id, Some(&collection_id), None, BTreeMap::new(), BTreeMap::new(), &key).unwrap();
+        assert_eq!(layers.lookup("host"), Some("first"), "生效条被禁用后退回上一条可用的");
+    }
+
+    #[test]
+    fn a_fully_disabled_group_is_undefined() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([23u8; 32]);
+        let (workspace_id, collection_id) = setup(&db);
+
+        let first = create_variable(&db, Scope::Collection, &collection_id, "host", "first", false, None, &key).unwrap();
+        let second = create_variable(&db, Scope::Collection, &collection_id, "host", "second", false, None, &key).unwrap();
+
+        for id in [first.id, second.id] {
+            update_variable(&db, &id, VariablePatch { enabled: Some(false), ..Default::default() }, &key).unwrap();
+        }
+
+        let layers = load_scope_layers(&db, &workspace_id, Some(&collection_id), None, BTreeMap::new(), BTreeMap::new(), &key).unwrap();
+        assert_eq!(layers.lookup("host"), None, "全组禁用时该名字按未定义处理");
+    }
+
+    #[test]
+    fn masking_follows_the_effective_row() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([24u8; 32]);
+        let (workspace_id, collection_id) = setup(&db);
+
+        create_variable(&db, Scope::Collection, &collection_id, "token", "plain-above", false, None, &key).unwrap();
+        let secret = create_variable(&db, Scope::Collection, &collection_id, "token", "secret-below", true, None, &key).unwrap();
+
+        let layers = load_scope_layers(&db, &workspace_id, Some(&collection_id), None, BTreeMap::new(), BTreeMap::new(), &key).unwrap();
+        assert_eq!(layers.lookup("token"), Some("secret-below"));
+        assert!(layers.is_secret("token"), "生效条是 secret 时该名字按 secret 处理");
+
+        // 把生效条改成非 secret：掩码身份应随之摘掉
+        update_variable(&db, &secret.id, VariablePatch { is_secret: Some(false), ..Default::default() }, &key).unwrap();
+
+        let layers = load_scope_layers(&db, &workspace_id, Some(&collection_id), None, BTreeMap::new(), BTreeMap::new(), &key).unwrap();
+        assert_eq!(layers.lookup("token"), Some("secret-below"), "切换 secret 不改变取值");
+        assert!(!layers.is_secret("token"), "生效条非 secret 时不应再掩码");
+    }
+
+    // ---- 按名写入（脚本与导入） ----
+
+    #[test]
+    fn upsert_targets_the_effective_row_and_never_adds_duplicates() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([25u8; 32]);
+        let (_, collection_id) = setup(&db);
+
+        create_variable(&db, Scope::Collection, &collection_id, "host", "first", false, None, &key).unwrap();
+        create_variable(&db, Scope::Collection, &collection_id, "host", "second", false, None, &key).unwrap();
+
+        upsert_variable(&db, Scope::Collection, &collection_id, "host", false, Some("patched"), Some("patched"), &key).unwrap();
+
+        let rows = list_variables(&db, Scope::Collection, &collection_id, &key).unwrap();
+        assert_eq!(rows.len(), 2, "按名写入不应凭空造出同名条目");
+        assert_eq!(rows[0].current.plaintext(), Some("first"), "被遮蔽的那条不应被改动");
+        assert_eq!(rows[1].current.plaintext(), Some("patched"), "写入落在生效的那一条");
+
+        // 新名称追加到末尾
+        let created = upsert_variable(&db, Scope::Collection, &collection_id, "added", false, Some("v"), Some("v"), &key).unwrap();
+        let rows = list_variables(&db, Scope::Collection, &collection_id, &key).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2].id, created.id, "新名称应追加到末尾");
+        assert_eq!(rows[2].sort_order, 2);
+    }
+
+    #[test]
+    fn upsert_writes_the_last_row_when_the_whole_group_is_disabled() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([26u8; 32]);
+        let (_, collection_id) = setup(&db);
+
+        let first = create_variable(&db, Scope::Collection, &collection_id, "host", "first", false, None, &key).unwrap();
+        let second = create_variable(&db, Scope::Collection, &collection_id, "host", "second", false, None, &key).unwrap();
+        for id in [first.id.clone(), second.id.clone()] {
+            update_variable(&db, &id, VariablePatch { enabled: Some(false), ..Default::default() }, &key).unwrap();
+        }
+
+        upsert_variable(&db, Scope::Collection, &collection_id, "host", false, Some("patched"), Some("patched"), &key).unwrap();
+
+        let rows = list_variables(&db, Scope::Collection, &collection_id, &key).unwrap();
+        assert_eq!(rows.len(), 2, "全组禁用时按名写入也不新增条目");
+        assert_eq!(rows[0].current.plaintext(), Some("first"));
+        assert_eq!(rows[1].current.plaintext(), Some("patched"), "落在最靠后的一条");
+        assert!(!rows[1].enabled, "写入不改变启用状态");
+    }
+
+    // ---- 按 id 更新（编辑器） ----
+
+    #[test]
+    fn create_variable_appends_and_allows_duplicate_names() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([27u8; 32]);
+        let (_, collection_id) = setup(&db);
+
+        let first = create_variable(&db, Scope::Collection, &collection_id, "dup", "a", false, Some("第一条"), &key).unwrap();
+        let second = create_variable(&db, Scope::Collection, &collection_id, "dup", "b", false, None, &key).unwrap();
+
+        assert_eq!(first.sort_order, 0);
+        assert_eq!(second.sort_order, 1, "新增落在末尾");
+        assert_eq!(first.description.as_deref(), Some("第一条"));
+        assert_eq!(second.description, None);
+
+        let rows = list_variables(&db, Scope::Collection, &collection_id, &key).unwrap();
+        assert_eq!(rows.len(), 2, "同名条目共存");
+    }
+
+    #[test]
+    fn update_variable_renames_by_id_and_accepts_an_existing_name() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([28u8; 32]);
+        let (_, collection_id) = setup(&db);
+
+        create_variable(&db, Scope::Collection, &collection_id, "taken", "x", false, None, &key).unwrap();
+        let target = create_variable(&db, Scope::Collection, &collection_id, "mine", "y", false, None, &key).unwrap();
+
+        let renamed = update_variable(
+            &db,
+            &target.id,
+            VariablePatch { name: Some("taken".to_string()), ..Default::default() },
+            &key,
+        )
+        .expect("改成一个已存在的名称应被接受");
+
+        assert_eq!(renamed.name, "taken");
+        assert_eq!(renamed.sort_order, 1, "改名不改变位置");
+        assert_eq!(renamed.current.plaintext(), Some("y"), "改名不动取值");
+
+        let rows = list_variables(&db, Scope::Collection, &collection_id, &key).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].id, target.id, "改名的条目仍留在原位置");
+    }
+
+    #[test]
+    fn update_variable_rejects_an_empty_name() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([29u8; 32]);
+        let (_, collection_id) = setup(&db);
+
+        let variable = create_variable(&db, Scope::Collection, &collection_id, "keep", "v", false, None, &key).unwrap();
+        let err = update_variable(
+            &db,
+            &variable.id,
+            VariablePatch { name: Some("   ".to_string()), ..Default::default() },
+            &key,
+        )
+        .expect_err("空名称应被拒绝");
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+
+        let rows = list_variables(&db, Scope::Collection, &collection_id, &key).unwrap();
+        assert_eq!(rows[0].name, "keep", "拒绝后名称保持原值");
+    }
+
+    #[test]
+    fn update_variable_writes_and_clears_the_description() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([30u8; 32]);
+        let (_, collection_id) = setup(&db);
+
+        let variable = create_variable(&db, Scope::Collection, &collection_id, "doc", "v", false, None, &key).unwrap();
+
+        let described = update_variable(
+            &db,
+            &variable.id,
+            VariablePatch { description: Some("这是描述".to_string()), ..Default::default() },
+            &key,
+        )
+        .unwrap();
+        assert_eq!(described.description.as_deref(), Some("这是描述"));
+
+        let cleared = update_variable(
+            &db,
+            &variable.id,
+            VariablePatch { description: Some(String::new()), ..Default::default() },
+            &key,
+        )
+        .unwrap();
+        assert_eq!(cleared.description, None, "空字符串等价于清空描述");
+
+        // 不传描述时保持原样
+        update_variable(
+            &db,
+            &variable.id,
+            VariablePatch { description: Some("保留".to_string()), ..Default::default() },
+            &key,
+        )
+        .unwrap();
+        let kept = update_variable(
+            &db,
+            &variable.id,
+            VariablePatch { enabled: Some(true), ..Default::default() },
+            &key,
+        )
+        .unwrap();
+        assert_eq!(kept.description.as_deref(), Some("保留"));
+    }
+
+    #[test]
+    fn update_variable_refuses_a_secret_toggle_when_the_value_is_unreadable() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([31u8; 32]);
+        let (_, collection_id) = setup(&db);
+
+        let secret = create_variable(&db, Scope::Collection, &collection_id, "token", "s3cret", true, None, &key).unwrap();
+        let locked = UnavailableKeyProvider;
+
+        let err = update_variable(
+            &db,
+            &secret.id,
+            VariablePatch { is_secret: Some(false), ..Default::default() },
+            &locked,
+        )
+        .expect_err("值不可读时不应允许切换 secret 标记");
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+        assert!(err.message.contains("不可解密"), "错误应说明原因：{}", err.message);
+
+        let rows = list_variables(&db, Scope::Collection, &collection_id, &key).unwrap();
+        assert!(rows[0].is_secret, "拒绝后该变量仍是 secret");
+        assert_eq!(rows[0].current.plaintext(), Some("s3cret"), "取值未被破坏");
+    }
+
+    #[test]
+    fn update_variable_toggles_secret_without_changing_the_value() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([32u8; 32]);
+        let (_, collection_id) = setup(&db);
+
+        let variable = create_variable(&db, Scope::Collection, &collection_id, "token", "plain-text", false, None, &key).unwrap();
+
+        let toggled = update_variable(
+            &db,
+            &variable.id,
+            VariablePatch { is_secret: Some(true), ..Default::default() },
+            &key,
+        )
+        .unwrap();
+        assert!(toggled.is_secret);
+        assert_eq!(toggled.current.plaintext(), Some("plain-text"), "切换标记不改变取值");
+
+        // 落库形态已加密：库里读不到明文
+        let raw = db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT current_value FROM variables WHERE id = ?1",
+                    [&toggled.id],
+                    |row| row.get::<_, Option<String>>(0),
+                )?)
+            })
+            .unwrap()
+            .unwrap_or_default();
+        assert!(!contains_bytes(raw.as_bytes(), b"plain-text"), "secret 值不应以明文落库");
+    }
+
+    #[test]
+    fn create_variable_rejects_an_empty_name() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::from_bytes([33u8; 32]);
+        let (_, collection_id) = setup(&db);
+
+        let err = create_variable(&db, Scope::Collection, &collection_id, "  ", "v", false, None, &key)
+            .expect_err("空名称应被拒绝");
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+        assert!(list_variables(&db, Scope::Collection, &collection_id, &key).unwrap().is_empty());
     }
 }

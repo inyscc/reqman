@@ -150,7 +150,13 @@ export interface Variable {
   scope: Scope;
   owner_id: string;
   name: string;
+  /** 可选描述，供界面呈现，不参与解析。 */
+  description?: string | null;
   is_secret: boolean;
+  /** 是否参与解析。被禁用的条目仍留在列表里，但不进入作用域。 */
+  enabled: boolean;
+  /** 在所属（作用域 + 归属）内的呈现顺序；同名组里最靠后的启用条目生效。 */
+  sort_order: number;
   initial: StoredValue;
   current: StoredValue;
 }

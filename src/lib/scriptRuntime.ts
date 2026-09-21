@@ -29,6 +29,7 @@ import type { SandboxContext } from 'postman-sandbox';
 // `instanceof Error` 判断会把可读原因退化成 `[object Object]`——实机冒烟（10.4）抓到的就是这个。
 import { describeError, type Commands } from './commands';
 import { emptyBody } from './types';
+import { effectiveByName } from './variables';
 import type { CookieView, ResponsePayload, SavedRequest, StoredValue, Variable } from './types';
 
 export type ScriptListen = 'prerequest' | 'test';
@@ -316,7 +317,11 @@ function readScopeValues(raw: unknown): ScopeValues {
 
 function scopesOf(variables: Variable[]): ScopeValues {
   const out: ScopeValues = {};
-  for (const variable of variables) out[variable.name] = valueOf(variable.current);
+  // 同名组里最靠下的启用条目生效，禁用条目整个不进入沙箱可见的作用域——
+  // 与 Rust 侧的解析规则同源（见 lib/variables.ts 的说明）
+  for (const [name, variable] of effectiveByName(variables)) {
+    out[name] = valueOf(variable.current);
+  }
   return out;
 }
 
@@ -864,8 +869,11 @@ async function persistWrites(
     existing: Variable[],
     values: ScopeValues,
   ) => {
+    // 按名定位的是**生效的那一条**（最靠下的启用条目），与脚本读到的值同源；
+    // 用「第一条同名」会在重复键下更新被遮蔽的行，甚至因两行值相同而静默跳过写入
+    const effective = effectiveByName(existing);
     for (const name of Object.keys(values)) {
-      const current = existing.find((variable) => variable.name === name);
+      const current = effective.get(name);
       if (current && valueOf(current.current) === values[name]) continue;
 
       if (scope === 'global') {

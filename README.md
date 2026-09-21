@@ -73,7 +73,7 @@ openspec validate add-postman-io --strict   # 规划产物一致性
 - **无法强制 HTTP/2**：依赖镜像没有 `h2 >= 0.4.14`，reqwest 的 `http2` 特性装不上。请求设置为 HTTP/2 时会显式降级并记录警告，响应里会给出实际协商到的协议版本。
 - **需要图形会话才能验证的部分**：webview 的热更新，以及系统文件/保存对话框（`pick_upload_file`、`backup_export`、`backup_restore`、`response_save_full`）。这些命令的下层逻辑都有测试覆盖，对话框那一跳只经过编译验证——因为路径从不来自前端，由后端拉起系统对话框取得。
 - **交付目标是 Windows 安装包**，当前开发与验证在 Linux 上进行；Windows 上的构建与冒烟需要在 Windows 机器或 CI runner 上完成。
-- **数据库迁移只向前**：schema 迁移按 `user_version` 单向推进，不提供回退。引入新迁移后，旧版本应用不再保证能读该数据库。
+- **数据库迁移只向前**：schema 迁移按 `user_version` 单向推进，不提供回退。引入新迁移后，旧版本应用不再保证能读该数据库。**变量表在 `user_version` 4 被重建过**（去掉 `(scope, owner_id, name)` 的唯一约束以支持同名共存，并新增启用 / 描述 / 顺序三列；变更见 `openspec/changes/rework-collection-tree-and-variable-model/`）：迁移为既有变量补上「全部启用 + 描述为空 + 按名称排序」，取值与 secret 标记原样保留，因此**降级到旧版本后该表不可用、也没有自动还原路径**——需要回退时请从 `backup_export` 的备份恢复。
 - **curl 导出可能含 secret 明文**：curl 是「拿去直接跑」的命令，按设计取变量解析后的真实取值，因此引用 secret 变量时命令里是明文（命令只随返回值交给界面，不写入日志）。界面会就此给出提示。
 - **脚本 console 的 secret 掩码是取值匹配，可被绕过**：脚本读到的 secret 是明文，界面上的脚本输出按「取值匹配」替换为掩码——脚本做一次编码变换（如 base64）即可让明文不出现原样。这只挡无意泄漏，不承诺挡住有意外发；真正的防线是脚本执行门禁与 `pm.sendRequest` 的目标策略。
 - **Cookie 的作用域是应用级、按域共享**：Cookie 不随工作区分区。在同一目标域获得的登录态，切换工作区后依然有效（界面有明确标注）；这在多工作区隔离的预期上可能反直觉，属有意设计。

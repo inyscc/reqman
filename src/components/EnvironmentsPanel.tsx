@@ -145,7 +145,7 @@ export function EnvironmentsPanel({
 
       <div className="env-list" role="listbox" aria-label="环境列表">
         <div
-          className="env-row"
+          className={`env-row ${environmentId === null ? 'active' : ''}`}
           onMouseEnter={() => setActiveId('globals')}
           onMouseLeave={() => {
             if (menuId !== 'globals') setActiveId(null);
@@ -184,10 +184,18 @@ export function EnvironmentsPanel({
           return (
             <div
               key={environment.id}
-              className="env-row"
+              className={`env-row ${
+                environmentId === environment.id ? 'active' : ''
+              }`}
               onMouseEnter={() => setActiveId(environment.id)}
               onMouseLeave={() => {
                 if (menuId !== environment.id) setActiveId(null);
+              }}
+              // 与集合树同款：右键与「⋯」是同一份菜单、同一个展开状态，
+              // 且打开菜单不改变激活的环境（spec: Environments tab 的环境管理）
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setMenuId(environment.id);
               }}
             >
               {renamingId === environment.id ? (

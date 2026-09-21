@@ -130,6 +130,9 @@ button:not(:disabled):active {
   transform: scale(0.97);
 }
 
+/* 注意：这条会给**任何**按钮染上边框色。自带「透明边框占位」的按钮
+   （`.session-tab` / `.env-item`）必须自己把悬停态的边框压回透明，
+   否则悬停时会凭空长出一圈浅灰描边——看起来像「边框怎么也去不掉」。 */
 button:hover:not(:disabled) {
   border-color: var(--border-strong);
 }
@@ -350,7 +353,8 @@ main.main {
 .session-tabs {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  /* 标签之间只留一点缝：间距一大，无边框的标签又会被读出「一个个方块」 */
+  gap: var(--space-1);
   flex: 1 1 auto;
   min-width: 0;
   overflow-x: auto;
@@ -366,22 +370,43 @@ main.main {
   align-items: center;
   gap: var(--space-2);
   flex: 0 1 auto;
-  min-width: 0;
+  /* 最小宽度必须容得下「种类图标 + 一点名字 + 关闭按钮」：标签再多也只该压缩
+     名字，不能压到内容以下——否则内容会溢出标签盒，× 跑到标签外面去。
+     （原先这里是 min-width: 0，标签一多就把 × 挤出去了。） */
+  min-width: 96px;
   max-width: 260px;
   padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--border);
+  /* 无边框：标签的边界由底色说出来，不描边（Postman 的做法）。
+     透明边框保留 1px 占位，激活时尺寸不变、整条不重排。 */
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  background: var(--panel-2);
-  color: var(--text);
+  background: transparent;
+  color: var(--muted);
   font: inherit;
   cursor: pointer;
   text-align: left;
 }
 
-/* 激活态只换底色与描边，不改宽度：宽度随激活变化会让每次切换整条重排 */
+/* 两个状态，只有这两个有底色：悬停（临时）与激活（常驻）。
+   其余标签一律透明——一排等宽的方框会在标题栏里切出一堆无意义的边界。 */
+@media (hover: hover) and (pointer: fine) {
+  .session-tab:hover {
+    background: var(--panel-2);
+    /* 透明边框只用来占位，悬停时也不许染色（见文件上方 button:hover 的说明） */
+    border-color: transparent;
+    color: var(--text);
+  }
+}
+
+.session-tab:focus-visible {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
 .session-tab.active {
-  background: var(--panel);
-  border-color: var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 500;
 }
 
 .session-tab .session-tab-name {
@@ -1076,12 +1101,165 @@ main.main {
   padding: var(--space-4) 0;
 }
 
-/* 环境变量编辑器现在铺在主区（design D8）：VariablesPanel 原先是给 260px 侧栏写的，
- * 放进宽区域后操作列与「写入」按钮会被挤成两行，这里按宽版重排。 */
-.var-editor th.var-actions,
-.var-editor td.var-actions {
-  width: 132px;
-  white-space: nowrap;
+/* 变量行的开关与操作**不占一列**：它们属于「这一条变量」，跟在 key 那一列的末尾
+   横向排开（Postman 变量列表就是这么摆的）。占成一列会把值挤窄，还会竖着堆成几行。 */
+.var-key-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.var-key-line .var-name-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 两列：key（勾选 + 名称 + 描述 + 本行操作）与值。key 列宽默认占 46%，
+   拖表头中线时由内联的 `--key-width` 接管——Postman 的表格中线是可拖的。 */
+.variable-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.variable-table th:first-child {
+  width: var(--key-width, 46%);
+}
+
+/* 表头中线：一条 1px 的线 + 一圈抓取区（命中区比线宽，才抓得住）。
+   抓取区必须**完全落在单元格内**：伸出单元格的那一半会被表格滚动容器裁掉，
+   那里的点击落到隔壁表头上，表现为「这条线拖不动」。 */
+.col-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.col-resize::after {
+  content: '';
+  position: absolute;
+  top: 25%;
+  bottom: 25%;
+  right: 1px;
+  width: 1px;
+  background: var(--border);
+}
+
+.col-resize:hover::after {
+  background: var(--accent);
+}
+
+.var-row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  margin-left: auto;
+}
+
+/* 与既有的行操作纪律一致：hover 或行内焦点时才显现，默认不占视觉重量 */
+tbody tr .var-row-actions {
+  opacity: 0;
+  transition: opacity 120ms var(--ease-out);
+}
+
+tbody tr:hover .var-row-actions,
+tbody tr:focus-within .var-row-actions {
+  opacity: 1;
+}
+
+/* 变量行的操作统一成图标按钮：同一处只出现一种控件形态，且尺寸、间距、按下
+   反馈一致——眼睛扫过去只要分辨形状，不用先分辨「这是个按钮还是个勾选框」。 */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    transform 120ms var(--ease-out),
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.icon-btn:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+/* 按下去要有反馈，否则图标按钮按了像没按 */
+.icon-btn:active {
+  transform: scale(0.94);
+}
+
+/* 开关类图标用自己的颜色说出「已开启」（锁已锁上） */
+.icon-btn[aria-pressed='true'] {
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn {
+    transition: none;
+  }
+
+  .icon-btn:active {
+    transform: none;
+  }
+}
+
+/* 值那一列：输入框与它的操作同行同高。揭示前后不只是「不该换行」——
+   高度必须一模一样，否则点一下眼睛整页高度就跳一次。 */
+.var-value-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 28px;
+}
+
+.var-value-line input,
+.var-value-line .var-mask {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 掩码与输入框共用同一套盒模型（同样的内边距），高度才对得上——
+   否则「掩码 → 输入框」这一换就是行高跳一次，看起来像整页刷新。 */
+.var-value-line .var-mask {
+  display: flex;
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+}
+
+/* key 那一列：勾选框紧贴名称，不参与伸缩 */
+.var-key-line > .checkbox {
+  flex: none;
+}
+
+/* key 与描述的配色照 Postman：启用的 key 是正文色、半粗；「取消使用」的整行
+   （key、值）退成灰——勾没勾一眼可辨；描述永远比 key 弱一号（浅灰 + 小一号）。 */
+.variable-table .var-name-input {
+  font-weight: 500;
+}
+
+.variable-table tr[data-disabled] .var-name-input,
+.variable-table tr[data-disabled] .var-value-input {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.variable-table .var-desc {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .var-editor .row > input {
@@ -1140,25 +1318,16 @@ main.main {
 }
 
 /* 环境行（spec: Environments tab 的列表观感与搜索）：行高明显大于集合树中的请求行
- * ——环境列表短、行要好点，因此刻意不再与 .node 同一密度。 */
+* ——环境列表短、行要好点，因此刻意不再与 .node 同一密度。 */
 .env-item {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   min-height: 32px;
   padding: var(--space-2);
-  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   text-align: left;
-}
-
-/* 激活态：行首勾选标记 + 整行浅底。spec 明确要求不用文字徽标（「使用中」）与行内
-   强调色竖条——两者都曾让这一栏显得比内容更像告警。 */
-.env-item.active {
-  background: var(--accent-soft);
-  border-color: transparent;
-  color: var(--text);
 }
 
 /* 勾选标记固定占位：未激活的行留同样宽度，名称因此始终对齐 */
@@ -1170,13 +1339,39 @@ main.main {
 }
 
 /* 环境行：选项按钮 + 行内「⋯」按钮 + 就地改名输入（change:
- * add-collection-search-and-env-management，design D5/D6）。 */
+ * add-collection-search-and-env-management，design D5/D6）。
+ *
+ * 行的**表面**（悬停底 / 激活底 / 圆角）画在这一层，而不是画在选项按钮上：
+ * 「⋯」是这一行的一部分，若表面只跟着按钮走，⋯ 一出现（悬停与激活时）按钮
+ * 就收缩，用户会看到底色框忽然变窄——像阴影缩小了一下。画在行容器上，
+ * 无论 ⋯ 在与不在，底色范围都是整行。 */
 .env-row {
   position: relative;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-1);
+  border-radius: var(--radius-sm);
+}
+
+/* 悬停不画底色块：环境行比树行高一截，同样一块浅底在这里会读成「一个大按钮框」。
+   悬停的反馈只有两件事——行内的「⋯」出现，名字的颜色变化。 */
+.env-row:hover .env-name {
+  color: var(--accent);
+}
+
+/* 选项按钮自己不带任何边框：它的那圈透明边框只用于占位，而全局的
+   `button:hover` 会把它染成 --border-strong，于是悬停时长出一圈直角描边。
+   行的表面由 .env-row 统一承担（含圆角），这里把边框钉回透明。 */
+.env-item,
+.env-item:hover:not(:disabled) {
+  border-color: transparent;
+}
+
+/* 激活态：行首勾选标记 + 整行浅底。spec 明确要求不用文字徽标（「使用中」）与行内
+   强调色竖条——两者都曾让这一栏显得比内容更像告警。 */
+.env-row.active {
+  background: var(--accent-soft);
 }
 
 .env-row > .env-item {
@@ -1283,6 +1478,23 @@ main.main {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* 与集合树同款：原生滚动条收成 0 宽，滚动指示交给悬浮条——
+     占位型滚动条出现时行宽会变，行右端的删除按钮就会跟着跳。 */
+  scrollbar-width: none;
+}
+
+.table-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 悬浮滚动条的定位上下文（表格容器外面这一层） */
+.table-scroll-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .stack {
@@ -1469,6 +1681,46 @@ input.switch.switch-danger {
   min-height: 0;
   overflow: auto;
   padding: 0 0 var(--space-4);
+  /* 原生滚动条收成 0 宽：占位型滚动条一出现，行宽就少 6px，右对齐的「⋯」
+     会跟着左移——看起来像「每次出现滚动条，⋯ 都刷新了位置」。
+     滚动指示改由 OverlayScrollbar 悬浮绘制，不占行宽。 */
+  scrollbar-width: none;
+}
+
+.tree-root::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 树的容器是悬浮滚动条的定位上下文（thumb 的 top 以滚动容器的偏移量为基准） */
+.sidebar-body > .stack {
+  position: relative;
+}
+
+.overlay-scrollbar {
+  position: absolute;
+  right: 2px;
+  width: 6px;
+  border-radius: 3px;
+  background: var(--scrollbar-thumb);
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 120ms var(--ease-out);
+}
+
+/* 悬停容器或正在拖动时可见：静止时它不该抢视线 */
+.overlay-scrollbar[data-active='true'] {
+  opacity: 1;
+}
+
+.overlay-scrollbar:active {
+  cursor: grabbing;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay-scrollbar {
+    transition: none;
+  }
 }
 
 /* Collections tab 的工具栏（change: add-collection-search-and-env-management）：
@@ -1487,6 +1739,98 @@ input.switch.switch-danger {
 /* 树行禁选：单击 / 双击行名都不会选中名称文字（change: polish-sidebar-and-tables） */
 .node {
   user-select: none;
+}
+
+/* 集合面板的头部不带工具栏的「带」：Postman 的集合标题直接坐在页面背景上，
+   没有灰底也没有全宽分隔线——分隔感由标题与页签之间的留白承担。 */
+.entity-pane > .pane-header {
+  border-bottom: none;
+  background: transparent;
+  padding-bottom: var(--space-2);
+}
+
+/* 集合面板的页签行（照 Postman 集合页抄）：名称下方独立一行、左对齐的纯文字
+   页签；激活项是浅灰圆角块，不是描边按钮——描边按钮会把「页签」做成「操作」。 */
+.panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-2);
+}
+
+.panel-tab {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.panel-tab:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.panel-tab.active {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+/* 实体名称是这一页的标题：层级必须是 名称 > 页签 > 正文里的任何粗体。
+   大一号 + 半粗 + 大字收紧字距（tracking 随字号变化，Apple typography）。 */
+.entity-name {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* 页签上的绿点：Postman 的「这一页有内容」提示——有变量 / 有脚本才出现。
+   用比 --ok 更亮的信号绿：这个小尺寸的圆点要当「指示灯」读，深绿会发闷。 */
+.panel-tab .tab-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 8px;
+  border-radius: 50%;
+  background: #2ea44f;
+  vertical-align: 0;
+}
+
+/* 拖拽落点（change: rework-collection-tree-and-variable-model）：
+   上 / 下半区 = 插入线（同级排序）；目录行中间区域 = 整行高亮（移入）。
+   指示只画在落点所在的那一行上，没有合法落点时界面上什么都不出现。 */
+.node.drop-before::after,
+.node.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.node.drop-before::after {
+  top: -1px;
+}
+
+.node.drop-after::after {
+  bottom: -1px;
+}
+
+.node.drop-into {
+  background: var(--accent-soft);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* 被拖动的那一行淡出：留下位置感，但不抢落点的视觉焦点 */
+.node.dragging {
+  opacity: 0.45;
 }
 
 .tree-toolbar > .tree-search {
@@ -1634,6 +1978,16 @@ input.switch.switch-danger {
   color: var(--muted);
 }
 
+/* 树上就地改名的输入框：占住名字原来的位置，字号与树一致，
+   因此进入与退出编辑都不改变行的布局（高度、右边「⋯」的位置都不动）。 */
+.node-rename {
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--space-1);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
 .tree-name {
   overflow: hidden;
   white-space: nowrap;
@@ -1644,9 +1998,14 @@ input.switch.switch-danger {
    方法选择框三处共用同一形态与同一组颜色语义。
    配色按「是否幂等」分两组——颜色只表达这个请求会不会改数据，方法之间的区分由
    文字承担。形态是轻量的彩色大写文字，不加深色底：它 SHALL NOT 比名称更重。 */
+/* 约束：标记的宽度只由它自己的文字决定，**不带任何为某处对齐用的固定宽度**。
+   间距一律由容器（`.node` / `.session-tab` 的 gap）说了算，因此集合树里
+   「图标→名称」「徽章→名称」与标签里「标记→名称」的距离处处相同。
+   （原先这里有一条 min-width: 42px 想让方法列对齐，代价是 GET 右边凭空多出
+   一段空白——同一个间距在树里、标签里各是三样，得不偿失；规格也没有要求对齐，
+   只要求形态与配色一致、权重不重于名称。） */
 .method-badge {
   flex: none;
-  min-width: 42px;
   font-size: var(--text-xs);
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -2019,7 +2378,6 @@ td textarea:focus {
   color: var(--muted);
 }
 
-.ghost-row .var-actions,
 .ghost-row label {
   color: var(--muted);
   white-space: nowrap;

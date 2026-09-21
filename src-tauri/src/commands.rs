@@ -14,7 +14,7 @@ use crate::storage::model::{
     AuthConfig, Collection, Environment, Folder, ProxyConfig, SavedRequest, Scope, Variable,
     Workspace,
 };
-use crate::storage::workspace::CollectionTree;
+use crate::storage::workspace::{CollectionTree, NodeKind};
 use crate::storage::{backup, cookies as storage_cookies, requests, variables, workspace};
 use crate::variables::RequestPreview;
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,31 @@ pub struct SetVariableArgs {
     pub initial: Option<String>,
     /// `None` 表示保持当前值不变。
     pub current: Option<String>,
+}
+
+/// 新增一个变量（界面的「新增一行」）。
+///
+/// 与 [`SetVariableArgs`] 的区别是**永远新增**：填入已存在的名称会新增一条同名条目，
+/// 而不是覆盖既有条目（spec: 变量表格的重复键与拖拽排序）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateVariableArgs {
+    pub scope: Scope,
+    pub owner_id: String,
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub is_secret: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `children_reorder` 的一项：一个子条目的 id 与其种类。
+///
+/// 顺序即入参顺序（下标就是 `sort_order`），因此目录与请求可以任意交错。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReorderItem {
+    pub id: String,
+    pub kind: NodeKind,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,15 +199,17 @@ pub fn reorder_children(
     state: &AppState,
     collection_id: &str,
     parent_folder_id: Option<String>,
-    folder_ids: Vec<String>,
-    request_ids: Vec<String>,
+    items: Vec<ReorderItem>,
 ) -> AppResult<()> {
+    let items: Vec<(String, NodeKind)> = items
+        .into_iter()
+        .map(|item| (item.id, item.kind))
+        .collect();
     workspace::reorder_children(
         &state.db,
         collection_id,
         parent_folder_id.as_deref(),
-        &folder_ids,
-        &request_ids,
+        &items,
     )
 }
 
@@ -317,6 +344,42 @@ pub fn set_variable(state: &AppState, args: SetVariableArgs) -> AppResult<Variab
 
 pub fn delete_variable(state: &AppState, id: &str) -> AppResult<()> {
     variables::delete_variable(&state.db, id)
+}
+
+/// 新增一条变量，落在所属归属的末尾。
+pub fn create_variable(state: &AppState, args: CreateVariableArgs) -> AppResult<Variable> {
+    let variable = variables::create_variable(
+        &state.db,
+        args.scope,
+        &args.owner_id,
+        &args.name,
+        &args.value,
+        args.is_secret,
+        args.description.as_deref(),
+        state.key_provider.as_ref(),
+    )?;
+    Ok(masked(variable))
+}
+
+/// 按 id 就地更新：名称、值与描述可就地改，启用状态与 secret 标记可就地切换。
+pub fn update_variable(
+    state: &AppState,
+    id: &str,
+    patch: variables::VariablePatch,
+) -> AppResult<Variable> {
+    let variable =
+        variables::update_variable(&state.db, id, patch, state.key_provider.as_ref())?;
+    Ok(masked(variable))
+}
+
+/// 按给定顺序重写某个（作用域 + 归属）下全部条目的顺序。
+pub fn reorder_variables(
+    state: &AppState,
+    scope: Scope,
+    owner_id: &str,
+    ordered_ids: &[String],
+) -> AppResult<()> {
+    variables::reorder_variables(&state.db, scope, owner_id, ordered_ids)
 }
 
 /// 显式揭示一个 secret 变量的明文。
@@ -684,16 +747,9 @@ pub fn children_reorder(
     state: State<'_, AppState>,
     collection_id: String,
     parent_folder_id: Option<String>,
-    folder_ids: Vec<String>,
-    request_ids: Vec<String>,
+    items: Vec<ReorderItem>,
 ) -> AppResult<()> {
-    reorder_children(
-        &state,
-        &collection_id,
-        parent_folder_id,
-        folder_ids,
-        request_ids,
-    )
+    reorder_children(&state, &collection_id, parent_folder_id, items)
 }
 
 #[tauri::command]
@@ -814,6 +870,30 @@ pub fn variable_set(state: State<'_, AppState>, args: SetVariableArgs) -> AppRes
 #[tauri::command]
 pub fn variable_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     delete_variable(&state, &id)
+}
+
+#[tauri::command]
+pub fn variable_create(state: State<'_, AppState>, args: CreateVariableArgs) -> AppResult<Variable> {
+    create_variable(&state, args)
+}
+
+#[tauri::command]
+pub fn variable_update(
+    state: State<'_, AppState>,
+    id: String,
+    patch: variables::VariablePatch,
+) -> AppResult<Variable> {
+    update_variable(&state, &id, patch)
+}
+
+#[tauri::command]
+pub fn variable_reorder(
+    state: State<'_, AppState>,
+    scope: Scope,
+    owner_id: String,
+    ordered_ids: Vec<String>,
+) -> AppResult<()> {
+    reorder_variables(&state, scope, &owner_id, &ordered_ids)
 }
 
 #[tauri::command]

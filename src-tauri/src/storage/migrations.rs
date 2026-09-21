@@ -145,6 +145,60 @@ CREATE TABLE cookies (
 CREATE INDEX idx_cookies_domain ON cookies(domain);
 "#;
 
+/// 版本 4：变量表重建——去掉 `UNIQUE(scope, owner_id, name)`，并补上启用状态、
+/// 描述与顺序三列（openspec/changes/rework-collection-tree-and-variable-model，
+/// spec: 环境与变量持久化）。
+///
+/// SQLite 无法就地删除表级唯一约束，只能重建：建新表 → 拷贝 → 删旧表 → 改名 →
+/// 重建索引。既有记录的可见行为必须保持不变，因此回填取确定值：
+/// `enabled = 1`（迁移前每条变量都参与解析）、`description = NULL`、
+/// `sort_order` 按 `(scope, owner_id, name, id)` 的序计数得出——旧库受唯一约束限制
+/// 不可能出现同名重复，所以这个顺序等价于迁移前的 `ORDER BY name`。
+///
+/// 顺序用相关子查询而不是窗口函数：迁移是纯 SQL 字符串，不依赖 SQLite 版本特性。
+pub const REBUILD_VARIABLES: &str = r#"
+CREATE TABLE variables_new (
+    id                TEXT PRIMARY KEY,
+    scope             TEXT NOT NULL,
+    owner_id          TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    description       TEXT,
+    initial_value     TEXT,
+    current_value     TEXT,
+    is_secret         INTEGER NOT NULL DEFAULT 0,
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    initial_readable  INTEGER NOT NULL DEFAULT 1,
+    current_readable  INTEGER NOT NULL DEFAULT 1,
+    sort_order        INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+
+INSERT INTO variables_new (
+    id, scope, owner_id, name, description,
+    initial_value, current_value, is_secret, enabled,
+    initial_readable, current_readable, sort_order,
+    created_at, updated_at
+)
+SELECT
+    id, scope, owner_id, name, NULL,
+    initial_value, current_value, is_secret, 1,
+    initial_readable, current_readable,
+    (
+        SELECT COUNT(*) FROM variables AS earlier
+        WHERE earlier.scope = variables.scope
+          AND earlier.owner_id = variables.owner_id
+          AND (earlier.name < variables.name
+               OR (earlier.name = variables.name AND earlier.id < variables.id))
+    ),
+    created_at, updated_at
+FROM variables;
+
+DROP TABLE variables;
+ALTER TABLE variables_new RENAME TO variables;
+CREATE INDEX idx_variables_owner ON variables(scope, owner_id);
+"#;
+
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -161,10 +215,15 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "add_cookies",
         sql: ADD_COOKIES,
     },
+    Migration {
+        version: 4,
+        name: "rebuild_variables",
+        sql: REBUILD_VARIABLES,
+    },
 ];
 
 /// 当前代码期望的 schema 版本。
-pub const LATEST_VERSION: i64 = 3;
+pub const LATEST_VERSION: i64 = 4;
 
 /// 迁移前备份文件的位置。
 pub fn backup_path_for(db_path: &Path) -> PathBuf {
@@ -458,6 +517,104 @@ mod tests {
             [ts],
         )
         .expect("host_only 不同应视为不同 Cookie");
+    }
+
+    #[test]
+    fn upgrading_from_v3_rebuilds_variables_without_changing_existing_rows() {
+        let dir = TempDir::new("migrate-v4-upgrade");
+        let (path, mut conn) = open_file_db(&dir);
+
+        // 先落 v3，再写入既有变量：故意按非名称序插入，以便验证回填顺序是确定的
+        assert_eq!(migrate(&mut conn, Some(&path), &MIGRATIONS[..3]).unwrap(), 3);
+
+        let ts = "2026-01-01T00:00:00Z";
+        conn.execute(
+            "INSERT INTO workspaces (id, name, created_at, updated_at) VALUES ('w1','工作区',?1,?1)",
+            [ts],
+        )
+        .expect("写入工作区");
+
+        for (id, name, value, secret) in [
+            ("v2", "beta", "b", 0),
+            ("v1", "alpha", "a", 1),
+            ("v3", "gamma", "c", 0),
+        ] {
+            conn.execute(
+                "INSERT INTO variables (id, scope, owner_id, name, initial_value, current_value,
+                    is_secret, initial_readable, current_readable, created_at, updated_at)
+                 VALUES (?1,'global','w1',?2,?3,?3,?4,1,1,?5,?5)",
+                (id, name, value, secret, ts),
+            )
+            .expect("写入变量");
+        }
+
+        // 升级到 v4
+        assert_eq!(
+            migrate(&mut conn, Some(&path), MIGRATIONS).unwrap(),
+            LATEST_VERSION
+        );
+
+        type RawRow = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            Option<String>,
+            i64,
+        );
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, initial_value, current_value, is_secret, enabled, description, sort_order
+                 FROM variables ORDER BY sort_order",
+            )
+            .expect("准备查询");
+        let rows: Vec<RawRow> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })
+            .expect("读取变量")
+            .collect::<Result<Vec<RawRow>, _>>()
+            .expect("解析行");
+        drop(stmt);
+
+        assert_eq!(
+            rows.iter().map(|row| row.1.as_str()).collect::<Vec<_>>(),
+            ["alpha", "beta", "gamma"],
+            "回填顺序应确定地落在名称序上，等价于迁移前的 ORDER BY name"
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.7).collect::<Vec<_>>(),
+            [0, 1, 2],
+            "sort_order 应为连续下标"
+        );
+        assert_eq!(rows[0].2.as_deref(), Some("a"), "初始值原样保留");
+        assert_eq!(rows[0].3.as_deref(), Some("a"), "当前值原样保留");
+        assert_eq!(rows[0].4, 1, "secret 标记不变");
+        for row in &rows {
+            assert_eq!(row.5, 1, "既有变量应保持启用");
+            assert_eq!(row.6, None, "既有变量没有描述");
+        }
+
+        // 重建的目的：唯一约束确实移除，同名条目从此可以共存
+        conn.execute(
+            "INSERT INTO variables (id, scope, owner_id, name, initial_value, current_value,
+                is_secret, initial_readable, current_readable, sort_order, created_at, updated_at)
+             VALUES ('v4','global','w1','alpha','x','x',0,1,1,3,?1,?1)",
+            [ts],
+        )
+        .expect("重建后同名变量应可共存");
     }
 
     #[test]

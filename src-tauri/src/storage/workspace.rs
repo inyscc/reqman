@@ -553,31 +553,37 @@ fn is_descendant(db: &Db, ancestor_id: &str, candidate_id: &str) -> AppResult<bo
     })
 }
 
+/// 重写某个父级下全部子条目的顺序：下标即 `sort_order`。
+///
+/// 入参是**一个有序列表**（每项带种类），而不是「文件夹列表 + 请求列表」两个独立序列——
+/// 后者给两类各自从 0 编号，表达不出「目录与请求交错」的顺序，而 `collection_tree`
+/// 恰恰是按共享的 `sort_order` 混排的。
+///
+/// 逐项校验「该 id 以该种类挂在这个父级下」，任一不满足则整批回滚。
 pub fn reorder_children(
     db: &Db,
     collection_id: &str,
     parent_folder_id: Option<&str>,
-    folder_ids: &[Id],
-    request_ids: &[Id],
+    items: &[(Id, NodeKind)],
 ) -> AppResult<()> {
     db.write_tx(|conn| {
         let tx = conn.transaction()?;
-        for (index, id) in folder_ids.iter().enumerate() {
-            let changed = tx.execute(
-                "UPDATE folders SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND parent_folder_id IS ?4",
-                params![index as i64, id, collection_id, parent_folder_id],
-            )?;
+        for (index, (id, kind)) in items.iter().enumerate() {
+            let changed = match kind {
+                NodeKind::Folder => tx.execute(
+                    "UPDATE folders SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND parent_folder_id IS ?4",
+                    params![index as i64, id, collection_id, parent_folder_id],
+                )?,
+                NodeKind::Request => tx.execute(
+                    "UPDATE requests SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND folder_id IS ?4",
+                    params![index as i64, id, collection_id, parent_folder_id],
+                )?,
+            };
             if changed == 0 {
-                return Err(AppError::not_found(format!("文件夹不存在或不属于该父级：{}", id)));
-            }
-        }
-        for (index, id) in request_ids.iter().enumerate() {
-            let changed = tx.execute(
-                "UPDATE requests SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND folder_id IS ?4",
-                params![index as i64, id, collection_id, parent_folder_id],
-            )?;
-            if changed == 0 {
-                return Err(AppError::not_found(format!("请求不存在或不属于该父级：{}", id)));
+                return Err(AppError::not_found(format!(
+                    "条目不存在或不属于该父级：{}",
+                    id
+                )));
             }
         }
         tx.commit()?;
@@ -877,11 +883,79 @@ mod tests {
         let a = requests::create_request(&db, &collection.id, None, "A", "GET", "https://a.test").unwrap();
         let b = requests::create_request(&db, &collection.id, None, "B", "GET", "https://b.test").unwrap();
 
-        reorder_children(&db, &collection.id, None, &[], &[b.id.clone(), a.id.clone()]).unwrap();
+        reorder_children(
+            &db,
+            &collection.id,
+            None,
+            &[
+                (b.id.clone(), NodeKind::Request),
+                (a.id.clone(), NodeKind::Request),
+            ],
+        )
+        .unwrap();
 
         let tree = collection_tree(&db, &collection.id).unwrap();
         let names: Vec<_> = tree.children.iter().map(|n| n.name.clone()).collect();
         assert_eq!(names, vec!["B", "A"]);
+    }
+
+    #[test]
+    fn reorder_children_keeps_folders_and_requests_interleaved() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let ws = self::list(&db).unwrap().remove(0);
+        let collection = create_collection(&db, &ws.id, "集合").unwrap();
+
+        let folder = create_folder(&db, &collection.id, None, "目录").unwrap();
+        let first = requests::create_request(&db, &collection.id, None, "P", "GET", "https://p.test").unwrap();
+        let second = requests::create_request(&db, &collection.id, None, "Q", "GET", "https://q.test").unwrap();
+
+        // 请求、目录、请求——顺序本身没法用「两个独立序列」表达
+        reorder_children(
+            &db,
+            &collection.id,
+            None,
+            &[
+                (first.id.clone(), NodeKind::Request),
+                (folder.id.clone(), NodeKind::Folder),
+                (second.id.clone(), NodeKind::Request),
+            ],
+        )
+        .unwrap();
+
+        let tree = collection_tree(&db, &collection.id).unwrap();
+        let shape: Vec<_> = tree
+            .children
+            .iter()
+            .map(|node| match node.kind {
+                NodeKind::Folder => "folder",
+                NodeKind::Request => "request",
+            })
+            .collect();
+        assert_eq!(shape, vec!["request", "folder", "request"]);
+    }
+
+    #[test]
+    fn reorder_children_rejects_entries_outside_the_parent() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let ws = self::list(&db).unwrap().remove(0);
+        let collection = create_collection(&db, &ws.id, "集合").unwrap();
+        let folder = create_folder(&db, &collection.id, None, "目录").unwrap();
+        let inside = requests::create_request(&db, &collection.id, Some(&folder.id), "内部", "GET", "https://i.test").unwrap();
+
+        // 这个请求挂在目录下，不属于集合根：整批要拒绝，且不能留下半批写入
+        let err = reorder_children(
+            &db,
+            &collection.id,
+            None,
+            &[(inside.id.clone(), NodeKind::Request)],
+        )
+        .expect_err("不属于该父级的条目应被拒绝");
+        assert_eq!(err.code, crate::error::ErrorCode::NotFound);
+
+        let tree = collection_tree(&db, &collection.id).unwrap();
+        assert_eq!(tree.children.len(), 1, "集合根下只有那个目录");
+        assert_eq!(tree.children[0].kind, NodeKind::Folder);
+        assert_eq!(tree.children[0].children.len(), 1, "请求仍在目录里");
     }
 
     #[test]

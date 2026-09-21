@@ -1,7 +1,17 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { FolderIcon } from './icons';
 import { NodeMenu, type MenuItem } from './NodeMenu';
+import { OverlayScrollbar } from './OverlayScrollbar';
 import type { CollectionTree, TreeNode } from '../lib/types';
+import {
+  buildMove,
+  type ContainerParent,
+  type DragNode,
+  type DropTarget,
+  type RowRef,
+  type TreeMove,
+  type TreeParent,
+} from '../lib/treeMoves';
 
 /** 树中被选中的实体：集合或文件夹（脚本编辑入口，任务 5.2）。 */
 export interface EntitySelection {
@@ -28,6 +38,17 @@ export interface WorkspaceTreeProps {
   /** 选中实体并把焦点交给面包屑的名称输入框。 */
   onRenameEntity: (entity: EntitySelection) => void;
   onRenameRequest: (id: string) => void;
+  /**
+   * 树上就地改名的提交口（spec: 在集合树里就地重命名）。
+   * 与面板头输入框走同一条写入路径，因此两处改名互为同一份真相；
+   * 空名与未变化的判断交给调用方。
+   */
+  onRenameCommit: (target: RenameTarget, name: string) => void;
+  /**
+   * 拖拽落定：把一次「改变顺序 / 改变归属」交给调用方写入后端。
+   * 未产生实际变化（拖回原处、跨集合、拖进自己的后代）时不会被调用。
+   */
+  onMove: (move: TreeMove) => void;
   /** 工具栏的导入入口；与底栏的导入/导出按钮打开同一个模态。 */
   onImport: () => void;
 }
@@ -60,6 +81,42 @@ interface TreeView {
   setActive: (id: string | null) => void;
   setMenu: (id: string | null) => void;
   setConfirm: (id: string | null) => void;
+
+  // ---- 拖拽（change: rework-collection-tree-and-variable-model）----
+  /** 搜索态下不可拖拽：树被强制全展开，落点没有意义。 */
+  draggable: boolean;
+  /** 正在被拖动的节点；null 表示当前没有拖拽。 */
+  drag: DragNode | null;
+  /** 当前落点；null 表示这一处没有合法落点，于是不呈现任何指示。 */
+  drop: DropTarget | null;
+  beginDrag: (node: DragNode) => void;
+  /** 指针落在某一行上：解算落点并返回（不合法为 null）。 */
+  hoverRow: (
+    row: RowRef,
+    rect: { top: number; height: number },
+    clientY: number,
+  ) => DropTarget | null;
+  /** 悬停在折叠的目录上：排队一次自动展开，否则没法把条目拖进看不见的层级。 */
+  hoverFolder: (id: string, expanded: boolean) => void;
+  /** 放下：把落点翻译成一次写入交给 `onMove`。 */
+  commit: (target: DropTarget) => void;
+  endDrag: () => void;
+  /** 该行此刻该呈现的落点指示类名；没有则空串。 */
+  dropClass: (id: string) => string;
+
+  // ---- 树上就地改名 ----
+  /** 正在就地改名的行 id；null 表示没有行在编辑。 */
+  renamingId: string | null;
+  startRename: (id: string) => void;
+  cancelRename: () => void;
+  commitRename: (target: RenameTarget, name: string) => void;
+}
+
+/** 树上就地改名的目标：集合、文件夹或请求。 */
+export interface RenameTarget {
+  kind: 'collection' | 'folder' | 'request';
+  id: string;
+  collectionId: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +214,56 @@ function MoreButton({ id, view }: { id: string; view: TreeView }) {
   );
 }
 
+/**
+ * 集合 / 文件夹 / 请求三种行共用的拖拽手势。
+ *
+ * 与 HTML5 DnD 的约定：只有 `dragover` 里 `preventDefault` 过的目标才允许放下。
+ * 因此「没有合法落点」不是等到放下时才报错，而是压根不呈现落点、也不允许放下——
+ * 跨集合拖动就是这么被挡掉的。
+ */
+function dragHandlers(
+  row: RowRef,
+  view: TreeView,
+  onHoverContainer: () => void = () => {},
+) {
+  return {
+    draggable: view.draggable,
+    onDragStart: (event: DragEvent<HTMLElement>) => {
+      if (!view.draggable) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', row.id);
+      view.beginDrag({
+        id: row.id,
+        kind: row.kind,
+        collectionId: row.collectionId,
+        parentFolderId: row.parent.kind === 'folder' ? row.parent.folderId : null,
+      });
+    },
+    onDragEnd: () => view.endDrag(),
+    onDragOver: (event: DragEvent<HTMLElement>) => {
+      if (!view.drag) return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const target = view.hoverRow(row, rect, event.clientY);
+      if (!target) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      onHoverContainer();
+    },
+    onDrop: (event: DragEvent<HTMLElement>) => {
+      if (!view.drag) return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const target = view.hoverRow(row, rect, event.clientY);
+      // 没有落点就什么都不做：不写入、也不报错
+      if (!target) return;
+      event.preventDefault();
+      view.commit(target);
+    },
+  };
+}
+
 /** 收集整棵树里全部目录 id（集合根 + 全部后代文件夹），供工具栏「全部折叠」一次写入。 */
 function collectDirectoryIds(trees: CollectionTree[]): string[] {
   const ids: string[] = [];
@@ -182,6 +289,8 @@ function EntryRow({
   name,
   kind,
   collectionId,
+  parent,
+  index,
   selected,
   actions,
   view,
@@ -191,6 +300,10 @@ function EntryRow({
   name: string;
   kind: 'collection' | 'folder';
   collectionId: string;
+  /** 该行所属父级：集合行是工作区根，文件夹行是集合根或外层文件夹。 */
+  parent: TreeParent;
+  /** 该行在父级子列表中的位置，落点判定据此算出插入下标。 */
+  index: number;
   selected: boolean;
   actions: TreeActions;
   view: TreeView;
@@ -201,6 +314,7 @@ function EntryRow({
   const revealed = view.activeId === id || view.menuId === id;
   const entity: EntitySelection = { kind, id, collectionId };
   const reveal = useRowReveal(id, view);
+  const row: RowRef = { id, kind, collectionId, parent, index };
 
   // 新建的条目落在这一行下面，所以先确保这一行是展开的（否则新条目生出来就被折叠藏住）。
   const menu: MenuItem[] = [
@@ -219,7 +333,7 @@ function EntryRow({
       },
     },
     { label: '编辑脚本', onSelect: () => actions.onSelectEntity(entity) },
-    { label: '重命名', onSelect: () => actions.onRenameEntity(entity) },
+    { label: '重命名', onSelect: () => view.startRename(id) },
     {
       label: kind === 'folder' ? '删除文件夹' : '删除集合',
       danger: true,
@@ -228,23 +342,44 @@ function EntryRow({
     },
   ];
 
+  const className = [
+    'node',
+    selected ? 'selected' : '',
+    view.dropClass(id),
+    view.drag?.id === id ? 'dragging' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
   return (
     <li>
       <div
-        className={`node ${selected ? 'selected' : ''}`}
+        className={className}
         role="button"
         tabIndex={0}
-        title={`${expanded ? '折叠' : '展开'} ${name}`}
+        title={`打开 ${name}（${expanded ? '折叠' : '展开'}）`}
+        {...dragHandlers(row, view, () => view.hoverFolder(id, expanded))}
         onClick={(event) => {
           // 双击的第二击不重复切换，否则会「展开后又立刻折回」地闪一下
           if (event.detail === 2) return;
+          // 单击目录行 = 打开该实体的面板 + 切换展开（spec: 集合树的展开、折叠与打开）。
+          // 搜索态下 onToggle 是空操作，但打开面板与折叠无关，因此照常执行。
           actions.onToggle(id);
+          actions.onSelectEntity(entity);
         }}
         onKeyDown={(event) => {
           // Enter 只归行容器自己。行内还有折叠箭头、「⋯」与菜单项，它们的 keydown 会
           // 冒泡到这里，而浏览器对聚焦的按钮按 Enter 还会再补一次 click——不拦住就会
           // 出现「在箭头上按 Enter 净零无效」「在「⋯」上按 Enter 把目录折叠掉」。
-          if (event.key === 'Enter' && event.target === event.currentTarget) actions.onToggle(id);
+          if (event.key === 'Enter' && event.target === event.currentTarget) {
+            actions.onToggle(id);
+            actions.onSelectEntity(entity);
+          }
+        }}
+        // 与请求行同款：右键与「⋯」是同一份菜单、同一个展开状态
+        onContextMenu={(event) => {
+          event.preventDefault();
+          view.setMenu(id);
         }}
         {...reveal}
       >
@@ -263,7 +398,28 @@ function EntryRow({
           {expanded ? '▾' : '▸'}
         </button>
         {kind === 'folder' && <FolderIcon className="tree-icon" aria-hidden="true" />}
-        <span className="tree-name">{name}</span>
+        {view.renamingId === id ? (
+          <input
+            className="node-rename"
+            autoFocus
+            defaultValue={name}
+            aria-label={`重命名 ${name}`}
+            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === 'Enter') {
+                view.commitRename({ kind, id, collectionId }, event.currentTarget.value);
+              }
+              if (event.key === 'Escape') view.cancelRename();
+            }}
+            onBlur={(event) =>
+              view.commitRename({ kind, id, collectionId }, event.currentTarget.value)
+            }
+          />
+        ) : (
+          <span className="tree-name">{name}</span>
+        )}
         <span className="grow" />
         {revealed && <MoreButton id={id} view={view} />}
         {view.menuId === id && <NodeMenu items={menu} onClose={() => view.setMenu(null)} />}
@@ -302,29 +458,51 @@ function EntryRow({
 
 function RequestRow({
   node,
+  parent,
+  index,
   selected,
   actions,
   view,
 }: {
   node: TreeNode;
+  parent: ContainerParent;
+  index: number;
   selected: boolean;
   actions: TreeActions;
   view: TreeView;
 }) {
   const revealed = view.activeId === node.id || view.menuId === node.id;
   const reveal = useRowReveal(node.id, view);
+  // 请求行不含「移入」语义——它装不下任何东西，因此只有上 / 下半区
+  const row: RowRef = {
+    id: node.id,
+    kind: 'request',
+    collectionId: parent.collectionId,
+    parent,
+    index,
+  };
   const menu: MenuItem[] = [
-    { label: '重命名', onSelect: () => actions.onRenameRequest(node.id) },
+    { label: '重命名', onSelect: () => view.startRename(node.id) },
     { label: '复制', onSelect: () => actions.onDuplicateRequest(node.id) },
     { label: '删除', danger: true, onSelect: () => actions.onDeleteRequest(node.id) },
   ];
 
+  const className = [
+    'node',
+    selected ? 'selected' : '',
+    view.dropClass(node.id),
+    view.drag?.id === node.id ? 'dragging' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
   return (
     <li>
       <div
-        className={`node ${selected ? 'selected' : ''}`}
+        className={className}
         role="button"
         tabIndex={0}
+        {...dragHandlers(row, view)}
         onClick={() => actions.onSelectRequest(node.id)}
         onKeyDown={(event) => {
           // 同 EntryRow：Enter 只归行容器自己，别让「⋯」与菜单项上的 Enter 顺带把请求打开
@@ -344,7 +522,34 @@ function RequestRow({
         <span className="method-badge" data-method={node.request?.method ?? 'GET'}>
           {node.request?.method ?? 'GET'}
         </span>
-        <span className="tree-name">{node.name}</span>
+        {view.renamingId === node.id ? (
+          <input
+            className="node-rename"
+            autoFocus
+            defaultValue={node.name}
+            aria-label={`重命名 ${node.name}`}
+            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === 'Enter') {
+                view.commitRename(
+                  { kind: 'request', id: node.id, collectionId: parent.collectionId },
+                  event.currentTarget.value,
+                );
+              }
+              if (event.key === 'Escape') view.cancelRename();
+            }}
+            onBlur={(event) =>
+              view.commitRename(
+                { kind: 'request', id: node.id, collectionId: parent.collectionId },
+                event.currentTarget.value,
+              )
+            }
+          />
+        ) : (
+          <span className="tree-name">{node.name}</span>
+        )}
         <span className="grow" />
         {revealed && <MoreButton id={node.id} view={view} />}
         {view.menuId === node.id && (
@@ -360,22 +565,24 @@ function RequestRow({
 
 function TreeNodes({
   nodes,
-  collectionId,
+  parent,
   selectedRequestId,
   selectedEntity,
   actions,
   view,
 }: {
   nodes: TreeNode[];
-  collectionId: string;
+  parent: ContainerParent;
   selectedRequestId: string | null;
   selectedEntity: EntitySelection | null;
   actions: TreeActions;
   view: TreeView;
 }) {
+  const collectionId = parent.collectionId;
+
   return (
     <ul className="tree">
-      {nodes.map((node) =>
+      {nodes.map((node, index) =>
         node.kind === 'folder' ? (
           <EntryRow
             key={node.id}
@@ -383,13 +590,15 @@ function TreeNodes({
             name={node.name}
             kind="folder"
             collectionId={collectionId}
+            parent={parent}
+            index={index}
             selected={selectedEntity?.kind === 'folder' && selectedEntity.id === node.id}
             actions={actions}
             view={view}
           >
             <TreeNodes
               nodes={node.children}
-              collectionId={collectionId}
+              parent={{ kind: 'folder', collectionId, folderId: node.id }}
               selectedRequestId={selectedRequestId}
               selectedEntity={selectedEntity}
               actions={actions}
@@ -400,6 +609,8 @@ function TreeNodes({
           <RequestRow
             key={node.id}
             node={node}
+            parent={parent}
+            index={index}
             selected={selectedRequestId === node.id}
             actions={actions}
             view={view}
@@ -515,6 +726,8 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     onDuplicateRequest,
     onRenameEntity,
     onRenameRequest,
+    onRenameCommit,
+    onMove,
     onImport,
   } = props;
 
@@ -524,6 +737,15 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
   const [confirmId, setConfirmId] = useState<string | null>(null);
   /** 搜索词：组件内视图态，`App` 不知情（design D1）。 */
   const [query, setQuery] = useState('');
+  /** 拖拽视图态：被拖动的节点与当前落点。 */
+  const [dragNode, setDragNode] = useState<DragNode | null>(null);
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  /** 悬停在折叠目录上时排队的那次自动展开（Postman 行为：不用先手动展开再拖）。 */
+  const autoExpand = useRef<{ id: string; timer: number } | null>(null);
+  /** 真正滚动的那个列表；悬浮滚动条只读它的几何。 */
+  const treeScrollRef = useRef<HTMLUListElement>(null);
+  /** 正在就地改名的行 id（spec: 在集合树里就地重命名）。 */
+  const [renamingId, setRenamingId] = useState<string | null>(null);
 
   const searching = query.trim() !== '';
   const visible = useMemo(() => filterTrees(trees, query), [trees, query]);
@@ -564,6 +786,78 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     setCollapsed(new Set(collectDirectoryIds(trees)));
   };
 
+  // ---- 拖拽 ----
+
+  const clearAutoExpand = () => {
+    if (!autoExpand.current) return;
+    window.clearTimeout(autoExpand.current.timer);
+    autoExpand.current = null;
+  };
+
+  const endDrag = () => {
+    clearAutoExpand();
+    setDragNode(null);
+    setDropTarget(null);
+  };
+
+  /**
+   * 落点解算：上 / 下半区 = 同级排序；目录行的中间区域 = 移入该目录（追加到末尾）。
+   * 解算结果同时决定「画不画指示」——不合法的落点压根不画，松手也不报错。
+   */
+  const hoverRow = (row: RowRef, rect: { top: number; height: number }, clientY: number) => {
+    if (!dragNode || searching) {
+      setDropTarget(null);
+      return null;
+    }
+
+    const ratio = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+    const canHold = row.kind === 'collection' || row.kind === 'folder';
+    const target: DropTarget =
+      canHold && ratio > 0.3 && ratio < 0.7
+        ? {
+            parent:
+              row.kind === 'collection'
+                ? { kind: 'collection', collectionId: row.id }
+                : { kind: 'folder', collectionId: row.collectionId, folderId: row.id },
+            index: Number.POSITIVE_INFINITY,
+            marker: { rowId: row.id, position: 'into' },
+          }
+        : {
+            parent: row.parent,
+            index: ratio < 0.5 ? row.index : row.index + 1,
+            marker: { rowId: row.id, position: ratio < 0.5 ? 'before' : 'after' },
+          };
+
+    const resolved = buildMove(trees, dragNode, target) ? target : null;
+    setDropTarget(resolved);
+    return resolved;
+  };
+
+  const hoverFolder = (id: string, expanded: boolean) => {
+    if (!dragNode || searching || expanded) return;
+    if (autoExpand.current?.id === id) return;
+    clearAutoExpand();
+    const timer = window.setTimeout(() => {
+      autoExpand.current = null;
+      actions.onExpand(id);
+    }, 500);
+    autoExpand.current = { id, timer };
+  };
+
+  const commit = (target: DropTarget) => {
+    clearAutoExpand();
+    setDragNode(null);
+    setDropTarget(null);
+    if (!dragNode) return;
+    const move = buildMove(trees, dragNode, target);
+    if (move) onMove(move);
+  };
+
+  const dropClass = (id: string) => {
+    if (!dropTarget || dropTarget.marker.rowId !== id) return '';
+    return `drop-${dropTarget.marker.position}`;
+  };
+
   const view: TreeView = {
     collapsed,
     searching,
@@ -573,6 +867,23 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     setActive: setActiveId,
     setMenu: setMenuId,
     setConfirm: setConfirmId,
+    draggable: !searching,
+    drag: dragNode,
+    drop: dropTarget,
+    beginDrag: setDragNode,
+    hoverRow,
+    hoverFolder,
+    commit,
+    endDrag,
+    dropClass,
+    renamingId,
+    startRename: setRenamingId,
+    cancelRename: () => setRenamingId(null),
+    commitRename: (target, name) => {
+      // 先收起输入框，再交给调用方决定写不写：不留半开的编辑态
+      setRenamingId(null);
+      onRenameCommit(target, name);
+    },
   };
 
   return (
@@ -594,14 +905,16 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
         </div>
       )}
 
-      <ul className="tree tree-root">
-        {visible.map((tree) => (
+      <ul className="tree tree-root" ref={treeScrollRef}>
+        {visible.map((tree, index) => (
           <EntryRow
             key={tree.collection.id}
             id={tree.collection.id}
             name={tree.collection.name}
             kind="collection"
             collectionId={tree.collection.id}
+            parent={{ kind: 'root' }}
+            index={index}
             selected={
               selectedEntity?.kind === 'collection' && selectedEntity.id === tree.collection.id
             }
@@ -610,7 +923,7 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
           >
             <TreeNodes
               nodes={tree.children}
-              collectionId={tree.collection.id}
+              parent={{ kind: 'collection', collectionId: tree.collection.id }}
               selectedRequestId={selectedRequestId}
               selectedEntity={selectedEntity}
               actions={actions}
@@ -619,6 +932,10 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
           </EntryRow>
         ))}
       </ul>
+
+      {/* 滚动条悬浮在内容之上，不占行宽：原生滚动条一出现一消失，
+          右对齐的「⋯」就会跟着左右跳 */}
+      <OverlayScrollbar targetRef={treeScrollRef} />
     </div>
   );
 }

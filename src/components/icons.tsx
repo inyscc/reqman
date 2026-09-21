@@ -39,3 +39,65 @@ export function CollectionIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+// ---------------------------------------------------------------------------
+// 变量行的操作图标（change: rework-collection-tree-and-variable-model）
+//
+// 同一处控件必须是**同一种形态**：这一排全是图标按钮，尺寸、描边、按下反馈一致。
+// 之前那里混了「✎ 字符 + Secure 文字勾选框 + 删除/揭示 文字按钮」三种形态，
+// 眼睛扫过去要先分辨种类才能分辨语义——这是纯粹的噪音。
+// ---------------------------------------------------------------------------
+
+const GLYPH = { width: 14, height: 14, viewBox: '0 0 16 16', focusable: 'false' } as const;
+
+/** 统一的描边参数：粗细与端点一致，四个图标才像一套。 */
+const STROKE = {
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 1.4,
+  strokeLinecap: 'round',
+  strokeLinejoin: 'round',
+} as const;
+
+/** 铅笔：编辑描述 / 改值（放在哪一列就是改哪一列）。 */
+export function PencilIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...GLYPH} {...props}>
+      <path {...STROKE} d="M11.1 2.6l2.3 2.3-7.7 7.7H3.4v-2.3z" />
+      <path {...STROKE} d="M9.6 4.1l2.3 2.3" />
+    </svg>
+  );
+}
+
+/** 锁：secret 标记。`locked` 时锁梁闭合，未锁时锁梁开口——状态画在形状上。 */
+export function LockIcon({ locked, ...rest }: { locked: boolean } & SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...GLYPH} {...rest}>
+      <rect {...STROKE} x="3.4" y="7" width="9.2" height="6.4" rx="1.6" />
+      <path {...STROKE} d={locked ? 'M5.6 7V5.3a2.4 2.4 0 0 1 4.8 0V7' : 'M5.6 7V5.3a2.4 2.4 0 0 1 4.6-.9'} />
+    </svg>
+  );
+}
+
+/** 垃圾桶：删除。 */
+export function TrashIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...GLYPH} {...props}>
+      <path {...STROKE} d="M3.2 4.6h9.6" />
+      <path {...STROKE} d="M6.3 4.6V3.2h3.4v1.4" />
+      <path {...STROKE} d="M4.6 4.6l.6 8.2h5.6l.6-8.2" />
+      <path {...STROKE} d="M6.8 7v3.6M9.2 7v3.6" />
+    </svg>
+  );
+}
+
+/** 眼睛：明文开关。`off` 时加一道斜线，读作「点它会盖回去」。 */
+export function EyeIcon({ off = false, ...rest }: { off?: boolean } & SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...GLYPH} {...rest}>
+      <path {...STROKE} d="M1.8 8s2.5-3.9 6.2-3.9S14.2 8 14.2 8s-2.5 3.9-6.2 3.9S1.8 8 1.8 8z" />
+      <circle {...STROKE} cx="8" cy="8" r="1.7" />
+      {off && <path {...STROKE} d="M2.6 13.4L13.4 2.6" />}
+    </svg>
+  );
+}

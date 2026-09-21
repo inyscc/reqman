@@ -335,6 +335,71 @@ describe('会话标签行的溢出（真实引擎）', () => {
       await page.close();
     }
   });
+
+  it('标签被挤到最窄时，关闭按钮仍在标签内（× 不溢出）', async () => {
+    const page = await openApp({ width: 1000, height: 640 });
+    try {
+      for (let index = 1; index <= REQUEST_COUNT; index += 1) {
+        await page.getByRole('button', { name: `GET 请求 ${index}`, exact: true }).click();
+      }
+      await page.getByLabel('请求地址').waitFor();
+
+      // 逐个比：每个标签的关闭位必须落在标签盒内（原先 min-width: 0 会让标签被压到
+      // 内容以下，× 于是跑到标签外面）
+      const escaping = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll<HTMLElement>('.session-tab'));
+        return rows
+          .map((tab) => {
+            const close = tab.querySelector('.session-tab-close') as HTMLElement | null;
+            if (!close) return null;
+            return Math.round(close.getBoundingClientRect().right - tab.getBoundingClientRect().right);
+          })
+          .filter((value): value is number => value !== null && value > 1);
+      });
+
+      expect(escaping).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('树滚动条不占行宽（真实引擎）', () => {
+  it('滚动条出现与否，行右端的 ⋯ 一动不动', async () => {
+    const page = await openApp({ width: 1000, height: 360 });
+    try {
+      const measure = async () => {
+        // 悬停第一行让右端的「⋯」出现，再量它的右缘
+        await page.locator('.tree-root .node').first().hover();
+        return page.evaluate(() => {
+          const root = document.querySelector('.tree-root') as HTMLElement;
+          const more = document.querySelector('.node-more') as HTMLElement | null;
+          return {
+            // 占位型滚动条会让 offsetWidth 比 clientWidth 大
+            gutter: root.offsetWidth - root.clientWidth,
+            scrollable: root.scrollHeight > root.clientHeight,
+            moreRight: more ? Math.round(more.getBoundingClientRect().right) : null,
+            overlay: document.querySelector('[data-testid="overlay-scrollbar"]') !== null,
+          };
+        });
+      };
+
+      // 窗口矮：12 条请求装不下，树必须滚动
+      const short = await measure();
+      expect(short.scrollable).toBe(true);
+      expect(short.gutter, '滚动条占了行宽').toBe(0);
+      expect(short.overlay, '没有绘制悬浮滚动条').toBe(true);
+      expect(short.moreRight).not.toBeNull();
+
+      // 窗口变高：滚动条消失。行宽与 ⋯ 的位置都必须和刚才一模一样
+      await page.setViewportSize({ width: 1000, height: 900 });
+      const tall = await measure();
+      expect(tall.scrollable).toBe(false);
+      expect(tall.moreRight).toBe(short.moreRight);
+    } finally {
+      await page.close();
+    }
+  });
 });
 
 describe('变量浮层的锚定（真实引擎）', () => {
@@ -542,6 +607,64 @@ describe('cURL 快照标签（真实引擎）', () => {
 });
 
 describe('环境列表的密度（真实引擎）', () => {
+  it('行的底色包住行内的 ⋯（三点不是框外的东西）', async () => {
+    const page = await openApp({ width: 1100, height: 700 });
+    try {
+      await page.getByRole('tab', { name: 'Environments' }).click();
+      await page.locator('.env-item').first().waitFor();
+
+      // 悬停让「⋯」出现。取第二个行：第一个是 Globals，它没有行操作菜单。
+      await page.locator('.env-row').nth(1).hover();
+
+      const geometry = await page.evaluate(() => {
+        const row = document.querySelectorAll('.env-row')[1] as HTMLElement;
+        const more = row.querySelector('.node-more') as HTMLElement | null;
+        const round = (value: number) => Math.round(value * 100) / 100;
+        return {
+          moreRight: more ? round(more.getBoundingClientRect().right) : null,
+          rowRight: round(row.getBoundingClientRect().right),
+          background: getComputedStyle(row).backgroundColor,
+        };
+      });
+
+      expect(geometry.moreRight).not.toBeNull();
+      // ⋯ 在被画的底色范围内（底色画在行容器上，而不是只画在选项按钮上）
+      expect(geometry.moreRight!).toBeLessThanOrEqual(geometry.rowRight + 0.5);
+      expect(geometry.background, '行的表面是透明的，底色没画在行上').not.toBe(
+        'rgba(0, 0, 0, 0)',
+      );
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('悬停环境行不会凭空长出一圈边框', async () => {
+    const page = await openApp({ width: 1100, height: 700 });
+    try {
+      await page.getByRole('tab', { name: 'Environments' }).click();
+      await page.locator('.env-item').first().waitFor();
+
+      // 悬停第二个行（真实环境行）
+      await page.locator('.env-row').nth(1).hover();
+
+      const borders = await page.evaluate(() => {
+        const row = document.querySelectorAll('.env-row')[1] as HTMLElement;
+        const item = row.querySelector('.env-item') as HTMLElement;
+        return {
+          item: getComputedStyle(item).borderTopColor,
+          rowWidth: getComputedStyle(row).borderTopWidth,
+        };
+      });
+
+      // 全站的 `button:hover` 会给按钮染边框色：自带透明边框占位的按钮必须自己压回透明。
+      // （行容器是 div，没有边框时 border-color 会沿用文字色，所以按宽度断言。）
+      expect(borders.item, '选项按钮悬停时长出了边框').toBe('rgba(0, 0, 0, 0)');
+      expect(borders.rowWidth, '行容器不该有边框').toBe('0px');
+    } finally {
+      await page.close();
+    }
+  });
+
   it('环境行的行高明显大于集合树中的请求行', async () => {
     const page = await openApp({ width: 1100, height: 700 });
     try {
@@ -582,11 +705,14 @@ describe('变量表的表面（真实引擎）', () => {
     try {
       await page.getByRole('tab', { name: 'Environments' }).click();
       await page.getByTestId('environment-editor').waitFor();
-      await page.locator('.var-editor tbody td input').first().waitFor();
+      // 行首现在是启用勾选框，静默态要看的是可编辑的值单元格
+      await page.locator('.variable-table tbody td input.var-value-input').first().waitFor();
 
       const style = await page.evaluate(() => {
-        const th = document.querySelector('.var-editor thead th') as HTMLElement;
-        const input = document.querySelector('.var-editor tbody td input') as HTMLElement;
+        const th = document.querySelector('.variable-table thead th') as HTMLElement;
+        const input = document.querySelector(
+          '.variable-table tbody td input.var-value-input',
+        ) as HTMLElement;
         const cell = input.closest('td') as HTMLElement;
         return {
           headerPosition: getComputedStyle(th).position,

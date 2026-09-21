@@ -181,6 +181,10 @@ interface Harness {
   /** 变量就地编辑（change: add-variable-inline-editing）。 */
   variableSet: ReturnType<typeof vi.fn>;
   variableDelete: ReturnType<typeof vi.fn>;
+  /** 变量表格的新契约（rework-collection-tree-and-variable-model）。 */
+  variableCreate: ReturnType<typeof vi.fn>;
+  variableUpdate: ReturnType<typeof vi.fn>;
+  variableReorder: ReturnType<typeof vi.fn>;
   /** 请求保存（change: reduce-explicit-save-and-add-controls：出口清洗）。 */
   requestSave: ReturnType<typeof vi.fn>;
   /** 解析预览（同上：出口清洗要同时覆盖预览）。 */
@@ -335,7 +339,14 @@ function harness(options: {
   // secret 的记账口径与真后端一致——列表里给的是掩码，明文只能经 secretReveal 取。
   const variableStore: Variable[] = (options.variables ?? []).map((entry) => ({ ...entry }));
   let variableSeq = 0;
-  const variableList = vi.fn(async () => variableStore.map((entry) => ({ ...entry })));
+  /** 按归属取变量并按顺序返回——真后端如此，界面上的行序与「谁生效」都依赖它。 */
+  const variableList = vi.fn(async (scope: Variable['scope'], ownerId: string) =>
+    variableStore
+      .filter((entry) => entry.scope === scope && entry.owner_id === ownerId)
+      .sort((left, right) => left.sort_order - right.sort_order)
+      .map((entry) => ({ ...entry })),
+  );
+  const globalsList = vi.fn(async (workspaceId: string) => variableList('global', workspaceId));
   const variableSet = vi.fn(
     async (args: {
       scope: Variable['scope'];
@@ -365,12 +376,82 @@ function harness(options: {
         scope: args.scope,
         owner_id: args.owner_id,
         name: args.name,
+        description: null,
         is_secret: isSecret,
+        enabled: true,
+        sort_order: variableStore.filter(
+          (entry) => entry.scope === args.scope && entry.owner_id === args.owner_id,
+        ).length,
         initial: { state: 'value', value: stored },
         current: { state: 'value', value: stored },
       };
       variableStore.push(created);
       return { ...created };
+    },
+  );
+  /** 界面的「新增一行」：永远新增，同名也照新增（与真后端一致）。 */
+  const variableCreate = vi.fn(
+    async (args: {
+      scope: Variable['scope'];
+      owner_id: string;
+      name: string;
+      value: string;
+      is_secret?: boolean;
+      description?: string | null;
+    }) => {
+      const stored = args.is_secret ? '******' : args.value;
+      const created: Variable = {
+        id: `v-new-${++variableSeq}`,
+        scope: args.scope,
+        owner_id: args.owner_id,
+        name: args.name,
+        description: args.description ?? null,
+        is_secret: args.is_secret ?? false,
+        enabled: true,
+        sort_order: variableStore.filter(
+          (entry) => entry.scope === args.scope && entry.owner_id === args.owner_id,
+        ).length,
+        initial: { state: 'value', value: stored },
+        current: { state: 'value', value: stored },
+      };
+      variableStore.push(created);
+      return { ...created };
+    },
+  );
+  /** 按 id 就地更新：patch 缺省即不变（与真后端一致）。 */
+  const variableUpdate = vi.fn(
+    async (
+      id: string,
+      patch: {
+        name?: string;
+        value?: string;
+        description?: string;
+        is_secret?: boolean;
+        enabled?: boolean;
+      },
+    ) => {
+      const found = variableStore.find((entry) => entry.id === id);
+      if (!found) throw new Error(`变量不存在：${id}`);
+      if (patch.name !== undefined) found.name = patch.name;
+      if (patch.description !== undefined) found.description = patch.description || null;
+      if (patch.enabled !== undefined) found.enabled = patch.enabled;
+      if (patch.is_secret !== undefined) found.is_secret = patch.is_secret;
+      if (patch.value !== undefined) {
+        const stored = found.is_secret ? '******' : patch.value;
+        found.initial = { state: 'value', value: stored };
+        found.current = { state: 'value', value: stored };
+      }
+      return { ...found };
+    },
+  );
+  const variableReorder = vi.fn(
+    async (scope: Variable['scope'], ownerId: string, orderedIds: string[]) => {
+      orderedIds.forEach((id, index) => {
+        const found = variableStore.find(
+          (entry) => entry.id === id && entry.scope === scope && entry.owner_id === ownerId,
+        );
+        if (found) found.sort_order = index;
+      });
     },
   );
   const variableDelete = vi.fn(async (id: string) => {
@@ -424,13 +505,16 @@ function harness(options: {
     },
     variableList,
     variableSet,
+    variableCreate,
+    variableUpdate,
+    variableReorder,
     variableDelete,
     secretReveal,
     cookieList,
     cookiePut,
     cookieDelete,
     cookieQuery: async () => [],
-    globalsList: variableList,
+    globalsList,
     globalsSet: async () => {
       throw new Error('未使用');
     },
@@ -492,6 +576,9 @@ function harness(options: {
     environmentDelete,
     variableSet,
     variableDelete,
+    variableCreate,
+    variableUpdate,
+    variableReorder,
     requestSave,
     variablesPreview,
   };
@@ -577,7 +664,10 @@ describe('前端数据流骨架', () => {
       scope: 'global',
       owner_id: 'w1',
       name: 'baseUrl',
+      description: null,
       is_secret: false,
+      enabled: true,
+      sort_order: 0,
       initial: { state: 'value', value: 'https://api.test' },
       current: { state: 'value', value: 'https://api.test' },
     };
@@ -590,13 +680,15 @@ describe('前端数据流骨架', () => {
 
     // 集合树让位给环境列表；变量编辑在主区而不是侧栏（change:
     // add-collection-search-and-env-management，design D8）
-    expect(await screen.findByText('baseUrl')).toBeTruthy();
+    expect(await screen.findByLabelText('变量名 baseUrl')).toBeTruthy();
     expect(screen.getByRole('listbox', { name: '环境列表' })).toBeTruthy();
     expect(screen.queryByText('我的请求')).toBeNull();
 
     const panel = screen.getByTestId('environments-panel');
     expect(within(panel).queryByText('baseUrl')).toBeNull();
-    expect(within(screen.getByTestId('environment-editor')).getByText('baseUrl')).toBeTruthy();
+    expect(
+      within(screen.getByTestId('environment-editor')).getByLabelText('变量名 baseUrl'),
+    ).toBeTruthy();
 
     // 侧栏不再重复 tab 名：工具栏只有图标按钮
     expect(within(panel).queryByText('环境')).toBeNull();
@@ -794,7 +886,7 @@ describe('前端数据流骨架', () => {
     expect(container.querySelector('.response-region')).toBeTruthy();
 
     // 选中集合（不是请求）时响应栏再次消失
-    openEntityPanel('我的集合');
+    await openEntityPanel('我的集合');
     await screen.findByTestId('entity-script-panel');
     expect(container.querySelector('.response-region')).toBeNull();
     expect(main.className).not.toContain('with-response');
@@ -846,7 +938,7 @@ describe('前端数据流骨架', () => {
     expect(masked.textContent).toBe('******');
     expect(screen.queryByText('PLAINTEXT_SECRET')).toBeNull();
 
-    fireEvent.click(screen.getByText('揭示'));
+    fireEvent.click(screen.getByLabelText('揭示 apiKey'));
 
     // 揭示后该值变成可就地编辑的输入框（change: add-variable-inline-editing），
     // 因此断言从 textContent 改为输入框的 value——意图不变：明文可见
@@ -1327,7 +1419,7 @@ describe('脚本编辑', () => {
     await openRequest();
 
     // 经「⋯」菜单进入集合脚本面板
-    openEntityPanel('我的集合');
+    await openEntityPanel('我的集合');
     await screen.findByTestId('entity-script-panel');
     // 实体面板头改为可编辑的名称输入框（design D2），不再渲染「集合 · 名称」静态文本
     expect((screen.getByLabelText('集合名称') as HTMLInputElement).value).toBe('我的集合');
@@ -1359,7 +1451,7 @@ describe('脚本编辑', () => {
     render(<App client={client} />);
     await openRequest();
 
-    openEntityPanel('我的文件夹');
+    await openEntityPanel('我的文件夹');
     await screen.findByTestId('entity-script-panel');
     // 实体面板头改为可编辑的名称输入框（design D2），不再渲染「文件夹 · 名称」静态文本
     expect((screen.getByLabelText('文件夹名称') as HTMLInputElement).value).toBe('我的文件夹');
@@ -1404,9 +1496,14 @@ function openNodeMenu(name: string) {
 }
 
 /** 打开集合 / 文件夹的脚本面板：入口在「⋯」菜单里（单击目录行改为切换展开）。 */
-function openEntityPanel(name: string) {
+async function openEntityPanel(name: string) {
   openNodeMenu(name);
   fireEvent.click(tree().getByText('编辑脚本'));
+  // 集合面板默认停在变量页（spec: 集合面板的变量与脚本站签），脚本用例要显式切过去；
+  // 文件夹没有页签栏，因此这个按钮不存在。实体是异步取回的，先等面板挂载再找页签。
+  await screen.findByTestId('entity-script-panel');
+  const scriptsTab = screen.queryByTestId('entity-tab-scripts');
+  if (scriptsTab) fireEvent.click(scriptsTab);
 }
 
 describe('集合树的折叠与目录操作', () => {
@@ -1514,7 +1611,7 @@ describe('集合树的折叠与目录操作', () => {
     render(<App client={client} />);
     await tree().findByText('我的集合');
 
-    openEntityPanel('我的集合');
+    await openEntityPanel('我的集合');
     await screen.findByLabelText('集合名称');
     // 改名走失焦提交（不再有「保存名称」按钮）
     expect(screen.queryByText('保存名称')).toBeNull();
@@ -1536,7 +1633,7 @@ describe('集合树的折叠与目录操作', () => {
     fireEvent.blur(screen.getByLabelText('集合名称'));
     expect(collectionRename).toHaveBeenCalledTimes(1);
 
-    openEntityPanel('我的文件夹');
+    await openEntityPanel('我的文件夹');
     await screen.findByLabelText('文件夹名称');
     const folderName = screen.getByLabelText('文件夹名称');
     fireEvent.change(folderName, { target: { value: '改名后的文件夹' } });
@@ -2375,7 +2472,10 @@ describe('变量就地编辑（add-variable-inline-editing）', () => {
       scope: 'global',
       owner_id: 'w1',
       name: 'baseUrl',
+      description: null,
       is_secret: false,
+      enabled: true,
+      sort_order: 0,
       initial: { state: 'value', value: 'https://api.test' },
       current: { state: 'value', value: 'https://api.test' },
       ...overrides,
@@ -2401,31 +2501,25 @@ describe('变量就地编辑（add-variable-inline-editing）', () => {
 
   const valueInput = (name: string) => screen.getByLabelText(`变量值 ${name}`) as HTMLInputElement;
 
-  it('改值走 variable_set，列表刷新后显示新值（spec: 编辑非 secret 变量的值）', async () => {
-    const { client, variableSet } = harness({ variables: [variableFixture()] });
+  it('改值走 variable_update，列表刷新后显示新值（spec: 编辑非 secret 变量的值）', async () => {
+    const { client, variableUpdate } = harness({ variables: [variableFixture()] });
     await openVariables(client);
 
-    const input = valueInput('baseUrl');
+    const input = (await screen.findByLabelText('变量值 baseUrl')) as HTMLInputElement;
     expect(input.value).toBe('https://api.test');
 
     fireEvent.change(input, { target: { value: 'https://staging.test' } });
     fireEvent.blur(input);
 
-    await waitFor(() => expect(variableSet).toHaveBeenCalledTimes(1));
-    expect(variableSet).toHaveBeenCalledWith({
-      scope: 'global',
-      owner_id: 'w1',
-      name: 'baseUrl',
-      is_secret: false,
-      initial: 'https://staging.test',
-      current: 'https://staging.test',
-    });
+    await waitFor(() => expect(variableUpdate).toHaveBeenCalledTimes(1));
+    // 提交按 id 进行，且只带变化的字段（值同时写初始值与当前值）
+    expect(variableUpdate).toHaveBeenCalledWith('v-base', { value: 'https://staging.test' });
     // 外层刷新后输入框显示写进去的新值
     await waitFor(() => expect(valueInput('baseUrl').value).toBe('https://staging.test'));
   });
 
   it('值没变或按 Esc 都不发写请求（spec: 值没有变化时不提交）', async () => {
-    const { client, variableSet } = harness({ variables: [variableFixture()] });
+    const { client, variableUpdate } = harness({ variables: [variableFixture()] });
     await openVariables(client);
 
     const input = await screen.findByLabelText('变量值 baseUrl');
@@ -2435,23 +2529,23 @@ describe('变量就地编辑（add-variable-inline-editing）', () => {
     await waitFor(() => expect(valueInput('baseUrl').value).toBe('https://api.test'));
 
     fireEvent.blur(valueInput('baseUrl'));
-    expect(variableSet).not.toHaveBeenCalled();
+    expect(variableUpdate).not.toHaveBeenCalled();
   });
 
   it('点「删除」引起的那次失焦不顺手写值（design D2）', async () => {
-    const { client, variableSet, variableDelete } = harness({ variables: [variableFixture()] });
+    const { client, variableUpdate, variableDelete } = harness({ variables: [variableFixture()] });
     await openVariables(client);
 
     fireEvent.focus(await screen.findByLabelText('变量值 baseUrl'));
-    fireEvent.click(screen.getByText('删除'));
+    fireEvent.click(screen.getByLabelText('删除 baseUrl'));
 
     await waitFor(() => expect(variableDelete).toHaveBeenCalledWith('v-base'));
-    expect(variableSet).not.toHaveBeenCalled();
+    expect(variableUpdate).not.toHaveBeenCalled();
   });
 
   it('提交失败时回滚并提示（spec: 提交失败时回滚并提示）', async () => {
-    const { client, variableSet } = harness({ variables: [variableFixture()] });
-    variableSet.mockRejectedValueOnce({ code: 'io', message: '写不进去' });
+    const { client, variableUpdate } = harness({ variables: [variableFixture()] });
+    variableUpdate.mockRejectedValueOnce({ code: 'io', message: '写不进去' });
     await openVariables(client);
 
     const input = await screen.findByLabelText('变量值 baseUrl');
@@ -2463,7 +2557,7 @@ describe('变量就地编辑（add-variable-inline-editing）', () => {
   });
 
   it('未揭示的 secret 保持掩码，编辑态是空输入框且留空不发请求（spec: secret 三条场景）', async () => {
-    const { client, variableSet } = harness({ variables: [secretFixture()] });
+    const { client, variableUpdate } = harness({ variables: [secretFixture()] });
     await openVariables(client);
 
     // 掩码可见、没有明文、也没有可编辑的输入框
@@ -2480,7 +2574,7 @@ describe('变量就地编辑（add-variable-inline-editing）', () => {
     // 留空失焦：不写请求，退回掩码
     fireEvent.blur(input);
     await waitFor(() => expect(screen.getByTestId('masked-apiKey')).toBeTruthy());
-    expect(variableSet).not.toHaveBeenCalled();
+    expect(variableUpdate).not.toHaveBeenCalled();
   });
 
   it('已揭示的 secret 可编辑，提交后仍保持 secret 并以掩码呈现（spec: 已揭示的 secret 变量可编辑且保持 secret）', async () => {
@@ -2490,27 +2584,49 @@ describe('变量就地编辑（add-variable-inline-editing）', () => {
       initial: { state: 'value', value: 'PLAINTEXT_SECRET' },
       current: { state: 'value', value: 'PLAINTEXT_SECRET' },
     };
-    const { client, variableSet } = harness({ variables: [secret], revealed });
+    const { client, variableUpdate } = harness({ variables: [secret], revealed });
     await openVariables(client);
 
-    fireEvent.click(screen.getByText('揭示'));
+    fireEvent.click(await screen.findByLabelText('揭示 apiKey'));
     const input = await screen.findByLabelText('变量值 apiKey');
     expect((input as HTMLInputElement).value).toBe('PLAINTEXT_SECRET');
 
     fireEvent.change(input, { target: { value: 'ROTATED_SECRET' } });
     fireEvent.blur(input);
 
-    await waitFor(() => expect(variableSet).toHaveBeenCalledTimes(1));
-    // is_secret 必须显式带上，否则后端会把它降级成普通变量（design D3）
-    expect(variableSet.mock.calls[0][0]).toMatchObject({
-      name: 'apiKey',
-      is_secret: true,
-      current: 'ROTATED_SECRET',
-    });
+    await waitFor(() => expect(variableUpdate).toHaveBeenCalledTimes(1));
+    // patch 不含 is_secret：改值不改变该变量的 secret 身份
+    expect(variableUpdate).toHaveBeenCalledWith('v-key', { value: 'ROTATED_SECRET' });
 
     // 改完重新盖回掩码：明文要看再点「揭示」
     await waitFor(() => expect(screen.getByTestId('masked-apiKey').textContent).toBe('******'));
     expect(screen.queryByText('ROTATED_SECRET')).toBeNull();
+  });
+
+  it('揭示后可以再隐藏：明文的开关是来回切换的（change: rework-collection-tree-and-variable-model）', async () => {
+    const secret = secretFixture();
+    const revealedVariable: Variable = {
+      ...secret,
+      initial: { state: 'value', value: 'PLAINTEXT_SECRET' },
+      current: { state: 'value', value: 'PLAINTEXT_SECRET' },
+    };
+    const { client, secretReveal } = harness({ variables: [secret], revealed: revealedVariable });
+    await openVariables(client);
+
+    // 揭示：掩码旁出现明文输入框，开关变成「隐藏」
+    fireEvent.click(await screen.findByLabelText('揭示 apiKey'));
+    expect((await screen.findByLabelText('变量值 apiKey') as HTMLInputElement).value).toBe(
+      'PLAINTEXT_SECRET',
+    );
+    const hide = screen.getByLabelText('隐藏 apiKey');
+    expect(screen.queryByLabelText('揭示 apiKey')).toBeNull();
+
+    // 隐藏：盖回掩码，开关变回揭示（同一个位置、同一个图标按钮），且不发写请求
+    fireEvent.click(hide);
+    await waitFor(() => expect(screen.getByTestId('masked-apiKey').textContent).toBe('******'));
+    expect(screen.queryByText('PLAINTEXT_SECRET')).toBeNull();
+    expect(screen.getByLabelText('揭示 apiKey')).toBeTruthy();
+    expect(secretReveal).toHaveBeenCalledTimes(1);
   });
 
   it('不可读的变量不可编辑（spec: 不可读的变量不可编辑）', async () => {
@@ -2529,18 +2645,33 @@ describe('变量就地编辑（add-variable-inline-editing）', () => {
     expect(screen.queryByLabelText('修改 broken')).toBeNull();
   });
 
-  it('名称列保持只读（spec: 名称不可就地编辑）', async () => {
-    const { client } = harness({ variables: [variableFixture()] });
+  it('名称可以就地修改，改成已存在的名称被接受（spec: 名称可以就地修改）', async () => {
+    const other = variableFixture({ id: 'v-other', name: 'taken', sort_order: 1 });
+    const { client, variableUpdate } = harness({ variables: [variableFixture(), other] });
     await openVariables(client);
 
-    const row = (await screen.findByText('baseUrl')).closest('tr') as HTMLElement;
-    const textboxes = within(row).getAllByRole('textbox');
-    expect(textboxes).toHaveLength(1);
-    expect(textboxes[0].getAttribute('aria-label')).toBe('变量值 baseUrl');
+    const name = (await screen.findByLabelText('变量名 baseUrl')) as HTMLInputElement;
+    fireEvent.change(name, { target: { value: 'taken' } });
+    fireEvent.blur(name);
+
+    await waitFor(() => expect(variableUpdate).toHaveBeenCalledWith('v-base', { name: 'taken' }));
+  });
+
+  it('名称清空被拒绝并还原（spec: 名称清空被拒绝）', async () => {
+    const { client, variableUpdate } = harness({ variables: [variableFixture()] });
+    await openVariables(client);
+
+    const name = (await screen.findByLabelText('变量名 baseUrl')) as HTMLInputElement;
+    fireEvent.change(name, { target: { value: '   ' } });
+    fireEvent.blur(name);
+
+    await waitFor(() => expect(screen.getByTestId('variable-error')).toBeTruthy());
+    expect(variableUpdate).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('变量名 baseUrl') as HTMLInputElement).value).toBe('baseUrl');
   });
 
   it('幽灵行新增变量：填名称与值后失焦提交，列表出现新变量且末行回到空态（spec: 变量表通过幽灵行新增）', async () => {
-    const { client, variableSet } = harness({ variables: [variableFixture()] });
+    const { client, variableCreate } = harness({ variables: [variableFixture()] });
     await openVariables(client);
 
     // 没有「写入」按钮，只有表格末尾的空行
@@ -2552,49 +2683,250 @@ describe('变量就地编辑（add-variable-inline-editing）', () => {
     fireEvent.change(ghostValue, { target: { value: 'abc' } });
     fireEvent.blur(ghostValue);
 
-    await waitFor(() => expect(variableSet).toHaveBeenCalledTimes(1));
-    expect(variableSet).toHaveBeenCalledWith({
+    await waitFor(() => expect(variableCreate).toHaveBeenCalledTimes(1));
+    // 新增走 variable_create（永远新增），不是按名 upsert
+    expect(variableCreate).toHaveBeenCalledWith({
       scope: 'global',
       owner_id: 'w1',
       name: 'token',
+      value: 'abc',
       is_secret: false,
-      initial: 'abc',
-      current: 'abc',
     });
 
-    // 列表里出现新变量，幽灵行回到空态
-    await waitFor(() => expect(screen.getByText('token')).toBeTruthy());
+    // 列表里出现新变量（名称现在是输入框），幽灵行回到空态
+    await waitFor(() => expect(screen.getByLabelText('变量名 token')).toBeTruthy());
     expect((screen.getByLabelText('新增变量的名称') as HTMLInputElement).value).toBe('');
     expect((screen.getByLabelText('新增变量的值') as HTMLInputElement).value).toBe('');
   });
 
-  it('幽灵行的名称是新增入口：提交走 variable_set 的 upsert，不是改名', async () => {
-    const { client, variableSet } = harness({ variables: [variableFixture()] });
+  it('幽灵行填入重名会新增一条同名条目，而不是覆盖既有条目（spec: 幽灵行填入重名新增一条同名变量）', async () => {
+    const { client, variableCreate, variableUpdate } = harness({ variables: [variableFixture()] });
     await openVariables(client);
 
     const name = (await screen.findByLabelText('新增变量的名称')) as HTMLInputElement;
     fireEvent.change(name, { target: { value: 'baseUrl' } });
     fireEvent.blur(name);
 
-    await waitFor(() => expect(variableSet).toHaveBeenCalledTimes(1));
-    // 定位键仍是「作用域 + 归属 + 名称」，id 与 secret 标记不由这里改动
-    expect(variableSet.mock.calls[0][0]).toMatchObject({
+    await waitFor(() => expect(variableCreate).toHaveBeenCalledTimes(1));
+    expect(variableCreate.mock.calls[0][0]).toMatchObject({
       scope: 'global',
       owner_id: 'w1',
       name: 'baseUrl',
-      is_secret: false,
     });
+    expect(variableUpdate).not.toHaveBeenCalled();
+
+    // 两条同名条目并存，靠上的一条被标注为「被覆盖」
+    await waitFor(() => expect(screen.getAllByLabelText('变量名 baseUrl')).toHaveLength(2));
+    expect(screen.getByTestId('overwritten-baseUrl')).toBeTruthy();
   });
 
   it('幽灵行没填名称就离开不发写请求（spec: 空名称不提交）', async () => {
-    const { client, variableSet } = harness({ variables: [variableFixture()] });
+    const { client, variableCreate, variableUpdate } = harness({ variables: [variableFixture()] });
     await openVariables(client);
 
     const ghostValue = await screen.findByLabelText('新增变量的值');
     fireEvent.change(ghostValue, { target: { value: '只有值没有名字' } });
     fireEvent.blur(ghostValue);
 
-    expect(variableSet).not.toHaveBeenCalled();
+    expect(variableCreate).not.toHaveBeenCalled();
+    expect(variableUpdate).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 变量表格的新契约（change: rework-collection-tree-and-variable-model）
+// ---------------------------------------------------------------------------
+
+describe('变量表格与集合面板（rework-collection-tree-and-variable-model）', () => {
+  function variable(overrides: Partial<Variable> = {}): Variable {
+    return {
+      id: 'v-base',
+      scope: 'global',
+      owner_id: 'w1',
+      name: 'baseUrl',
+      description: null,
+      is_secret: false,
+      enabled: true,
+      sort_order: 0,
+      initial: { state: 'value', value: 'https://api.test' },
+      current: { state: 'value', value: 'https://api.test' },
+      ...overrides,
+    };
+  }
+
+  async function openVars(client: Commands) {
+    render(<App client={client} />);
+    await openEnvironments();
+  }
+
+  /** 会话标签行里按名字取标签（这个 describe 用不到多标签那一组的局部 helper）。 */
+  const sessionTab = (name: string) =>
+    screen.getAllByTestId('session-tab').find((tab) => tab.textContent?.includes(name)) as HTMLElement;
+
+  it('取消勾选即禁用该变量（spec: 启用状态可以就地切换）', async () => {
+    const { client, variableUpdate } = harness({ variables: [variable()] });
+    await openVars(client);
+
+    fireEvent.click(await screen.findByLabelText('启用变量 baseUrl'));
+
+    await waitFor(() =>
+      expect(variableUpdate).toHaveBeenCalledWith('v-base', { enabled: false }),
+    );
+  });
+
+  it('描述写在名称下方，可就地编辑（spec: 描述呈现在名称下方并可就地编辑）', async () => {
+    const { client, variableUpdate } = harness({ variables: [variable()] });
+    await openVars(client);
+
+    fireEvent.click(await screen.findByLabelText('描述 baseUrl'));
+    const input = await screen.findByLabelText('变量描述 baseUrl');
+    fireEvent.change(input, { target: { value: '接口前缀' } });
+    fireEvent.blur(input);
+
+    await waitFor(() =>
+      expect(variableUpdate).toHaveBeenCalledWith('v-base', { description: '接口前缀' }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('variable-desc-baseUrl').textContent).toBe('接口前缀'),
+    );
+  });
+
+  it('Secure 开关切换 secret 标记（spec: secret 标记可以切换且不改变取值）', async () => {
+    const { client, variableUpdate } = harness({ variables: [variable()] });
+    await openVars(client);
+
+    fireEvent.click(await screen.findByLabelText('标记为 secret baseUrl'));
+
+    await waitFor(() =>
+      expect(variableUpdate).toHaveBeenCalledWith('v-base', { is_secret: true }),
+    );
+  });
+
+  it('同名组里只有靠上的启用行带「被覆盖」标记（spec: 被覆盖的行有明确标记 / 生效行不呈现被覆盖标记）', async () => {
+    const lower = variable({ id: 'v-lower', sort_order: 1 });
+    const { client } = harness({ variables: [variable(), lower] });
+    await openVars(client);
+
+    const rows = await screen.findAllByTestId('variable-row-baseUrl');
+    expect(rows).toHaveLength(2);
+
+    const marks = screen.getAllByTestId('overwritten-baseUrl');
+    expect(marks).toHaveLength(1);
+    expect(marks[0].getAttribute('title')).toBe('该变量被下方同名变量覆盖');
+    // 标记挂在靠上的那一行（生效的是靠下的那条）
+    expect(marks[0].closest('tr')).toBe(rows[0]);
+  });
+
+  it('靠后的那条被禁用时标记消失，靠前的那条重新生效（spec: 禁用后标记转移）', async () => {
+    const disabledLower = variable({ id: 'v-lower', sort_order: 1, enabled: false });
+    const { client } = harness({ variables: [variable(), disabledLower] });
+    await openVars(client);
+
+    await screen.findAllByTestId('variable-row-baseUrl');
+    expect(screen.queryByTestId('overwritten-baseUrl')).toBeNull();
+  });
+
+  it('单行不呈现被覆盖标记（spec: 生效行不呈现被覆盖标记）', async () => {
+    const { client } = harness({ variables: [variable()] });
+    await openVars(client);
+
+    await screen.findByLabelText('变量名 baseUrl');
+    expect(screen.queryByTestId('overwritten-baseUrl')).toBeNull();
+  });
+
+  it('拖拽行改变顺序并落库（spec: 拖拽调整顺序）', async () => {
+    const second = variable({ id: 'v-2', name: 'second', sort_order: 1 });
+    const { client, variableReorder } = harness({ variables: [variable(), second] });
+    await openVars(client);
+
+    const rows = await screen.findAllByTestId(/^variable-row-/);
+    fireEvent.dragStart(rows[1]);
+    fireEvent.dragOver(rows[0]);
+    fireEvent.drop(rows[0]);
+
+    await waitFor(() =>
+      expect(variableReorder).toHaveBeenCalledWith('global', 'w1', ['v-2', 'v-base']),
+    );
+  });
+
+  it('拖拽落库失败时顺序回滚并提示（spec: 拖拽调整顺序）', async () => {
+    const second = variable({ id: 'v-2', name: 'second', sort_order: 1 });
+    const { client, variableReorder } = harness({ variables: [variable(), second] });
+    variableReorder.mockRejectedValueOnce({ code: 'io', message: '顺序写不进去' });
+    await openVars(client);
+
+    const rows = await screen.findAllByTestId(/^variable-row-/);
+    fireEvent.dragStart(rows[1]);
+    fireEvent.dragOver(rows[0]);
+    fireEvent.drop(rows[0]);
+
+    expect((await screen.findByTestId('variable-error')).textContent).toContain('顺序写不进去');
+    // 回滚到拖动前：第一行仍是原来的第一条
+    const after = screen.getAllByTestId(/^variable-row-/);
+    expect(within(after[0]).getByLabelText('变量名 baseUrl')).toBeTruthy();
+  });
+
+  it('集合面板默认停在变量页，切到脚本页后切走再切回仍在脚本页（spec: 集合面板的变量与脚本站签）', async () => {
+    const { client } = harness({
+      variables: [variable({ scope: 'collection', owner_id: 'c1' })],
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    openNodeMenu('我的集合');
+    fireEvent.click(tree().getByText('编辑脚本'));
+
+    // 默认变量页：集合变量的表格直接出现
+    expect(await screen.findByLabelText('变量名 baseUrl')).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('entity-tab-scripts'));
+    expect(await screen.findByLabelText('集合前置脚本')).toBeTruthy();
+
+    // 切到请求标签再切回：仍停在脚本页
+    fireEvent.click(sessionTab('我的请求'));
+    await screen.findByLabelText('请求地址');
+    fireEvent.click(sessionTab('我的集合'));
+    expect(await screen.findByLabelText('集合前置脚本')).toBeTruthy();
+  });
+
+  it('文件夹面板没有页签栏（spec: 文件夹面板没有页签栏）', async () => {
+    const folder = makeFolder({ id: 'f1', name: '我的文件夹' });
+    const { client } = harness({ folder });
+    render(<App client={client} />);
+    await openRequest();
+
+    await openEntityPanel('我的文件夹');
+
+    expect(screen.queryByTestId('entity-tab-variables')).toBeNull();
+    expect(await screen.findByLabelText('文件夹前置脚本')).toBeTruthy();
+  });
+
+  it('集合变量在变量页新增后出现在表格里（spec: 集合变量就地可维护）', async () => {
+    const { client, variableCreate } = harness();
+    render(<App client={client} />);
+    await openRequest();
+
+    openNodeMenu('我的集合');
+    fireEvent.click(tree().getByText('编辑脚本'));
+    await screen.findByTestId('entity-script-panel');
+
+    fireEvent.change(await screen.findByLabelText('新增变量的名称'), {
+      target: { value: 'cv' },
+    });
+    const ghostValue = screen.getByLabelText('新增变量的值');
+    fireEvent.change(ghostValue, { target: { value: '1' } });
+    fireEvent.blur(ghostValue);
+
+    await waitFor(() =>
+      expect(variableCreate).toHaveBeenCalledWith({
+        scope: 'collection',
+        owner_id: 'c1',
+        name: 'cv',
+        value: '1',
+        is_secret: false,
+      }),
+    );
+    await waitFor(() => expect(screen.getByLabelText('变量名 cv')).toBeTruthy());
   });
 });
 
@@ -2971,7 +3303,10 @@ describe('Ctrl+S', () => {
     scope: 'global',
     owner_id: 'w1',
     name: 'baseUrl',
+    description: null,
     is_secret: false,
+    enabled: true,
+    sort_order: 0,
     initial: { state: 'value', value: 'https://api.test' },
     current: { state: 'value', value: 'https://api.test' },
   };
@@ -3082,7 +3417,9 @@ describe('Ctrl+S', () => {
   });
 
   it('主区让给环境编辑器时不越权保存那个请求，也不在即时提交的界面产生副作用', async () => {
-    const { client, requestSave, variableSet } = harness({ variables: [variableFixture] });
+    const { client, requestSave, variableUpdate, variableCreate } = harness({
+      variables: [variableFixture],
+    });
     await openDirty(client);
 
     await openEnvironments();
@@ -3090,7 +3427,8 @@ describe('Ctrl+S', () => {
 
     // 变量面板是即写即提交的，没有「保存」这一说
     expect(requestSave).not.toHaveBeenCalled();
-    expect(variableSet).not.toHaveBeenCalled();
+    expect(variableUpdate).not.toHaveBeenCalled();
+    expect(variableCreate).not.toHaveBeenCalled();
 
     // 它只是不是「当前面」，不是被丢弃
     fireEvent.click(screen.getByRole('tab', { name: 'Collections' }));
@@ -3114,7 +3452,7 @@ describe('Ctrl+S', () => {
     const { client, folderSetScript } = harness({ folder: makeFolder() });
     render(<App client={client} />);
     await tree().findByText('我的文件夹');
-    openEntityPanel('我的文件夹');
+    await openEntityPanel('我的文件夹');
     fireEvent.change(await screen.findByLabelText('文件夹前置脚本'), {
       target: { value: 'console.log("folder");' },
     });
@@ -3364,7 +3702,7 @@ describe('页面内窗口控制', () => {
     expect(allPresent()).toBe(true);
 
     // 集合 / 文件夹实体脚本面板
-    openEntityPanel('我的文件夹');
+    await openEntityPanel('我的文件夹');
     await screen.findByLabelText('文件夹前置脚本');
     expect(allPresent()).toBe(true);
 
@@ -3545,7 +3883,7 @@ function nestedTrees(): CollectionTree[] {
 }
 
 /** 一个默认不选中、动作全是 spy 的 WorkspaceTree 渲染。 */
-function renderTree() {
+function renderTree(trees: CollectionTree[] = nestedTrees()) {
   const actions = {
     onSelectRequest: vi.fn(),
     onSelectEntity: vi.fn(),
@@ -3557,11 +3895,12 @@ function renderTree() {
     onDeleteRequest: vi.fn(),
     onRenameEntity: vi.fn(),
     onRenameRequest: vi.fn(),
+    onMove: vi.fn(),
     onImport: vi.fn(),
   };
   render(
     <WorkspaceTree
-      trees={nestedTrees()}
+      trees={trees}
       selectedRequestId={null}
       selectedEntity={null}
       {...actions}
@@ -3578,7 +3917,7 @@ function doubleClick(element: HTMLElement) {
 }
 
 describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
-  it('单击展开态目录行收起它，后代一并不可见，且不选中实体', () => {
+  it('单击展开态目录行收起它、后代一并不可见，并打开该实体的面板（spec: 单击目录行打开面板并切换展开）', () => {
     const { actions, view } = renderTree();
     const outer = view.getByLabelText('折叠 外层') as HTMLButtonElement;
     expect(outer.getAttribute('aria-expanded')).toBe('true');
@@ -3589,8 +3928,12 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     expect(view.queryByText('内层')).toBeNull();
     expect(view.queryByText('深处的请求')).toBeNull();
     expect(view.queryByText('外层请求')).toBeNull();
-    // 单击目录行是纯视图动作：不选中实体、不开脚本面板
-    expect(actions.onSelectEntity).not.toHaveBeenCalled();
+    // 单击目录行同时打开这个实体（M1：与请求行同款「单击即打开」）
+    expect(actions.onSelectEntity).toHaveBeenCalledTimes(1);
+    expect(actions.onSelectEntity.mock.calls[0][0]).toMatchObject({
+      kind: 'folder',
+      id: '外层',
+    });
   });
 
   it('再次单击恢复展开，后代自己的折叠状态被保留（不是递归展开）', () => {
@@ -3638,7 +3981,7 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     expect(view.getByLabelText('折叠 外层').getAttribute('aria-expanded')).toBe('true');
   });
 
-  it('Enter 与单击同义：切换展开而不是打开脚本面板', () => {
+  it('Enter 与单击同义：打开该实体的面板并切换展开（spec: Enter 与单击同义）', () => {
     const { actions, view } = renderTree();
     const outer = view.getByLabelText('折叠 外层') as HTMLButtonElement;
     const row = outer.closest('.node') as HTMLElement;
@@ -3646,7 +3989,7 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     fireEvent.keyDown(row, { key: 'Enter' });
 
     expect(view.getByLabelText('展开 外层').getAttribute('aria-expanded')).toBe('false');
-    expect(actions.onSelectEntity).not.toHaveBeenCalled();
+    expect(actions.onSelectEntity).toHaveBeenCalledTimes(1);
   });
 
   it('Enter 落在行内控件上不切换行（箭头 / 「⋯」/ 菜单项）', () => {
@@ -3775,17 +4118,18 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     await screen.findByLabelText('请求地址');
     expect(screen.getAllByTestId('session-tab')).toHaveLength(1);
 
-    // 单击目录行只切换展开：主区不切到脚本面板、请求仍在、标签不增不减
+    // 单击目录行 = 打开该实体的面板 + 切换展开：标签因此多一个，请求标签仍在
     fireEvent.click(tree().getByText('外层'));
     expect(tree().queryByText('深处的请求')).toBeNull();
-    expect(screen.queryByTestId('entity-script-panel')).toBeNull();
-    expect((screen.getByLabelText('请求地址') as HTMLInputElement).value).toBe(
-      'https://api.test/outer',
-    );
-    expect(screen.getAllByTestId('session-tab')).toHaveLength(1);
+    expect(await screen.findByTestId('entity-script-panel')).toBeTruthy();
+    expect(screen.getAllByTestId('session-tab')).toHaveLength(2);
 
-    // 入口在菜单里
-    openEntityPanel('外层');
+    // 再点一次只是聚焦同一个实体标签，不重复新增
+    fireEvent.click(tree().getByText('外层'));
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
+
+    // 菜单里的「编辑脚本」仍是该面板脚本页的直达入口
+    await openEntityPanel('外层');
     await waitFor(() => expect(screen.queryByTestId('entity-script-panel')).not.toBeNull());
   });
 
@@ -3820,6 +4164,356 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
 // ---------------------------------------------------------------------------
 // 多标签会话（change: add-multi-tab-sessions）
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 集合树的拖拽排序与移动（change: rework-collection-tree-and-variable-model）
+// ---------------------------------------------------------------------------
+
+/** 两个集合；第一个集合根下是「请求 A、文件夹 F（含请求 B）」。 */
+function dndTrees(): CollectionTree[] {
+  return [
+    {
+      collection,
+      children: [
+        requestNode('A', 'https://api.test/a'),
+        folderNode('F', [requestNode('B', 'https://api.test/b')]),
+      ],
+    },
+    {
+      collection: { ...collection, id: 'c2', name: '另一个集合' },
+      children: [requestNode('C', 'https://api.test/c')],
+    },
+  ];
+}
+
+/** jsdom 的矩形全是 0，落点解算要有高度才成立：给行一个 20px 高的矩形。 */
+function stubRect(element: HTMLElement, height = 20) {
+  element.getBoundingClientRect = () =>
+    ({
+      top: 0,
+      bottom: height,
+      left: 0,
+      right: 0,
+      width: 0,
+      height,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    }) as DOMRect;
+}
+
+/** jsdom 不实现 DataTransfer，落点手势需要它来标记拖拽意图。 */
+const dataTransfer = () => ({
+  effectAllowed: '',
+  dropEffect: '',
+  setData: vi.fn(),
+  getData: vi.fn(),
+});
+
+/**
+ * 派发一个拖拽事件。
+ *
+ * 走 `MouseEvent` 而不是 `fireEvent.dragOver`：jsdom 没有 DragEvent，RTL 造出来的
+ * 事件带不上 `clientY`，而落点解算全靠它（落点比例 = 指针纵向位置 / 行高）。
+ */
+function fireDrag(
+  type: 'dragstart' | 'dragover' | 'drop',
+  element: HTMLElement,
+  ratio: number,
+  transfer: ReturnType<typeof dataTransfer>,
+) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientY: ratio * 20 });
+  Object.defineProperty(event, 'dataTransfer', { value: transfer });
+  // 拖拽是「连续」事件：React 会把它攒起来批处理，必须过一次 act 才能让
+  // 上一步（dragstart 记下的拖动项）在下一步（dragover 解算落点）里可见
+  act(() => {
+    element.dispatchEvent(event);
+  });
+}
+
+/** 把 `from` 那一行拖到 `to` 那一行上，`ratio` 是纵向落点（0 顶 / 1 底）。 */
+function dragOver(view: ReturnType<typeof within>, from: string, to: string, ratio: number) {
+  const source = view.getByText(from).closest('.node') as HTMLElement;
+  const target = view.getByText(to).closest('.node') as HTMLElement;
+  stubRect(target);
+  const transfer = dataTransfer();
+  fireDrag('dragstart', source, 0, transfer);
+  fireDrag('dragover', target, ratio, transfer);
+  return { source, target, transfer };
+}
+
+function dropOn(target: HTMLElement, ratio: number, transfer: ReturnType<typeof dataTransfer>) {
+  fireDrag('drop', target, ratio, transfer);
+}
+
+/** 树里各行的名称，按界面从上到下的顺序。 */
+function rowNames(): string[] {
+  return Array.from(document.querySelectorAll('[data-testid="workspace-tree"] .tree-name')).map(
+    (element) => element.textContent ?? '',
+  );
+}
+
+describe('集合树的拖拽排序与移动（rework-collection-tree-and-variable-model）', () => {
+  it('同级拖拽改变顺序：插入线落在该行之后，并重排该父级', () => {
+    const { actions, view } = renderTree(dndTrees());
+    const { target, transfer } = dragOver(view, 'A', 'F', 0.9);
+
+    expect(target.className).toContain('drop-after');
+    dropOn(target, 0.9, transfer);
+    expect(actions.onMove).toHaveBeenCalledWith({
+      kind: 'reorder-children',
+      collectionId: 'c1',
+      parentFolderId: null,
+      items: [
+        { id: 'F', kind: 'folder' },
+        { id: 'A', kind: 'request' },
+      ],
+    });
+  });
+
+  it('文件夹与请求可以交错：拖到目录行的中间区域是「移入」', () => {
+    const { actions, view } = renderTree(dndTrees());
+    const { target, transfer } = dragOver(view, 'A', 'F', 0.5);
+
+    expect(target.className).toContain('drop-into');
+    dropOn(target, 0.5, transfer);
+    expect(actions.onMove).toHaveBeenCalledWith({
+      kind: 'move-request',
+      id: 'A',
+      collectionId: 'c1',
+      folderId: 'F',
+    });
+  });
+
+  it('跨集合拖动不呈现落点：松手不写入、也不报错', () => {
+    const { actions, view } = renderTree(dndTrees());
+    const { target, transfer } = dragOver(view, 'A', 'C', 0.9);
+
+    expect(target.className).not.toContain('drop-');
+    dropOn(target, 0.9, transfer);
+    expect(actions.onMove).not.toHaveBeenCalled();
+  });
+
+  it('把文件夹拖进它自己的后代被拒绝：无落点、顺序不变', () => {
+    const { actions, view } = renderTree();
+    const { target, transfer } = dragOver(view, '外层', '内层', 0.5);
+
+    expect(target.className).not.toContain('drop-');
+    dropOn(target, 0.5, transfer);
+    expect(actions.onMove).not.toHaveBeenCalled();
+  });
+
+  it('集合之间只支持排序：拖进另一个集合无落点，排在它之后才写入', () => {
+    const { actions, view } = renderTree(dndTrees());
+
+    const into = dragOver(view, '我的集合', '另一个集合', 0.5);
+    expect(into.target.className).not.toContain('drop-');
+    dropOn(into.target, 0.5, into.transfer);
+    expect(actions.onMove).not.toHaveBeenCalled();
+
+    const after = dragOver(view, '我的集合', '另一个集合', 0.9);
+    expect(after.target.className).toContain('drop-after');
+    dropOn(after.target, 0.9, after.transfer);
+    expect(actions.onMove).toHaveBeenCalledWith({
+      kind: 'reorder-collections',
+      orderedIds: ['c2', 'c1'],
+    });
+  });
+
+  it('拖回原处不产生写入，也不呈现落点', () => {
+    const { actions, view } = renderTree(dndTrees());
+    const { target, transfer } = dragOver(view, 'A', 'A', 0.9);
+
+    expect(target.className).not.toContain('drop-');
+    dropOn(target, 0.9, transfer);
+    expect(actions.onMove).not.toHaveBeenCalled();
+  });
+
+  it('搜索态下不可拖拽', () => {
+    const { actions, view } = renderTree(dndTrees());
+    fireEvent.change(view.getByLabelText('搜索请求'), { target: { value: 'api.test' } });
+
+    const row = view.getByText('A').closest('.node') as HTMLElement;
+    expect(row.getAttribute('draggable')).toBe('false');
+
+    const target = view.getByText('F').closest('.node') as HTMLElement;
+    const transfer = dataTransfer();
+    stubRect(target);
+    fireDrag('dragstart', row, 0, transfer);
+    fireDrag('dragover', target, 0.9, transfer);
+
+    expect(target.className).not.toContain('drop-');
+    expect(actions.onMove).not.toHaveBeenCalled();
+  });
+
+  it('拖拽不改变选中与已打开内容', () => {
+    const { actions, view } = renderTree(dndTrees());
+    const { target, transfer } = dragOver(view, 'A', 'F', 0.9);
+    dropOn(target, 0.9, transfer);
+
+    expect(actions.onMove).toHaveBeenCalledTimes(1);
+    expect(actions.onSelectRequest).not.toHaveBeenCalled();
+    expect(actions.onSelectEntity).not.toHaveBeenCalled();
+  });
+
+  it('落定后界面立刻跟上：先就地重排，再写后端', async () => {
+    const childrenReorder = vi.fn(async () => undefined);
+    const { client } = harness();
+    render(<App client={{ ...client, workspaceTree: async () => dndTrees(), childrenReorder }} />);
+    await within(screen.getByTestId('workspace-tree')).findByText('A');
+    const view = within(screen.getByTestId('workspace-tree'));
+
+    const { target, transfer } = dragOver(view, 'A', 'F', 0.9);
+    dropOn(target, 0.9, transfer);
+
+    // 乐观重排：不等后端返回，界面已经是新顺序
+    expect(rowNames()).toEqual(['我的集合', 'F', 'B', 'A', '另一个集合', 'C']);
+    await waitFor(() =>
+      expect(childrenReorder).toHaveBeenCalledWith('c1', null, [
+        { id: 'F', kind: 'folder' },
+        { id: 'A', kind: 'request' },
+      ]),
+    );
+  });
+
+  it('悬停在折叠的目录上会自动展开它（否则没法拖进看不见的层级）', async () => {
+    const { view } = renderTree();
+    fireEvent.click(view.getByLabelText('折叠 内层'));
+    expect(view.getByLabelText('展开 内层')).toBeTruthy();
+
+    dragOver(view, '外层请求', '内层', 0.5);
+
+    // 自动展开带 500ms 延时：这里等它，不打断拖拽
+    await waitFor(() => expect(view.getByLabelText('折叠 内层')).toBeTruthy(), { timeout: 2000 });
+  });
+
+  it('移进嵌在深处的文件夹：条目真的挂进去，而不是消失', async () => {
+    const requestMove = vi.fn(async () => undefined);
+    const { client } = harness();
+    render(
+      <App client={{ ...client, workspaceTree: async () => nestedTrees(), requestMove }} />,
+    );
+    const view = within(screen.getByTestId('workspace-tree'));
+    await view.findByText('外层请求');
+
+    const { target, transfer } = dragOver(view, '外层请求', '内层', 0.5);
+    dropOn(target, 0.5, transfer);
+
+    await waitFor(() =>
+      expect(requestMove).toHaveBeenCalledWith('外层请求', '内层'),
+    );
+    // 乐观重排必须递归到那一层：目标父级不在集合根时，条目不能被摘下后丢掉
+    expect(rowNames()).toContain('外层请求');
+    expect(screen.queryByTestId('app-error')).toBeNull();
+  });
+
+  it('侧栏拖拽不触发窗口拖拽（spec: 窗口拖拽能力的边界收窄）', async () => {
+    const startDragging = vi.fn(async () => undefined);
+    const closer = {
+      onCloseRequested: async () => () => undefined,
+      close: async () => undefined,
+      minimize: async () => undefined,
+      toggleMaximize: async () => undefined,
+      startDragging,
+      startResizeDragging: async () => undefined,
+      isMaximized: async () => false,
+      onResized: async () => () => undefined,
+    };
+    const { client } = harness();
+    render(
+      <App
+        client={{ ...client, workspaceTree: async () => dndTrees() }}
+        windowCloser={closer as never}
+      />,
+    );
+    const scope = within(screen.getByTestId('workspace-tree'));
+    await scope.findByText('A');
+
+    const { target, transfer } = dragOver(scope, 'A', 'F', 0.9);
+    dropOn(target, 0.9, transfer);
+
+    expect(startDragging).not.toHaveBeenCalled();
+  });
+
+  it('写入失败时回滚整棵树并提示原因', async () => {
+    const childrenReorder = vi.fn(async () => {
+      throw new Error('顺序写入失败');
+    });
+    const workspaceTree = vi.fn(async () => dndTrees());
+    const { client } = harness();
+    render(<App client={{ ...client, workspaceTree, childrenReorder }} />);
+    await within(screen.getByTestId('workspace-tree')).findByText('A');
+    const view = within(screen.getByTestId('workspace-tree'));
+
+    const { target, transfer } = dragOver(view, 'A', 'F', 0.9);
+    dropOn(target, 0.9, transfer);
+
+    await waitFor(() => expect(screen.getByTestId('app-error')).toBeTruthy());
+    // 回滚：整棵树重新加载，顺序回到拖动前
+    await waitFor(() => expect(workspaceTree.mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() =>
+      expect(rowNames()).toEqual(['我的集合', 'A', 'F', 'B', '另一个集合', 'C']),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 树上就地改名（change: allow-in-tree-rename）
+// ---------------------------------------------------------------------------
+
+describe('树上就地改名（allow-in-tree-rename）', () => {
+  it('集合：菜单「重命名」→ 行内输入框 → 回车提交走 collection_rename', async () => {
+    const { client, collectionRename } = harness();
+    render(<App client={client} />);
+    await tree().findByText('我的集合');
+
+    openNodeMenu('我的集合');
+    fireEvent.click(screen.getByText('重命名'));
+
+    const input = await screen.findByLabelText('重命名 我的集合');
+    expect((input as HTMLInputElement).value).toBe('我的集合');
+
+    fireEvent.change(input, { target: { value: '云报警' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => expect(collectionRename).toHaveBeenCalledWith('c1', '云报警'));
+    // 提交后输入框收起：不留半开的编辑态
+    await waitFor(() => expect(screen.queryByLabelText('重命名 我的集合')).toBeNull());
+  });
+
+  it('请求：失焦提交按名字保存；Esc 取消一个字都不写', async () => {
+    const { client, requestSave } = harness();
+    render(<App client={client} />);
+    await tree().findByText('我的集合');
+
+    // 按「哪一行带方法徽章」定位请求行，不依赖请求名
+    const requestRow = () =>
+      Array.from(document.querySelectorAll('.node')).find((node) =>
+        node.querySelector('.method-badge'),
+      ) as HTMLElement;
+    const openRename = async () => {
+      fireEvent.mouseOver(requestRow());
+      fireEvent.click(within(requestRow()).getByLabelText('更多操作'));
+      fireEvent.click(screen.getByText('重命名'));
+      await waitFor(() => expect(document.querySelector('.node-rename')).not.toBeNull());
+      return document.querySelector('.node-rename') as HTMLInputElement;
+    };
+
+    const first = await openRename();
+    fireEvent.change(first, { target: { value: '改名后的请求' } });
+    fireEvent.blur(first);
+    await waitFor(() => expect(requestSave).toHaveBeenCalled());
+    expect((requestSave.mock.calls[0][0] as { name: string }).name).toBe('改名后的请求');
+
+    // Esc 取消：不写库，输入框直接消失
+    const second = await openRename();
+    fireEvent.change(second, { target: { value: '不要这个名字' } });
+    fireEvent.keyDown(second, { key: 'Escape' });
+
+    expect(document.querySelector('.node-rename')).toBeNull();
+    expect(requestSave).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('多标签会话（add-multi-tab-sessions）', () => {
   /** 按名称取到对应的会话标签按钮。 */
@@ -3900,7 +4594,7 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     render(<App client={client} />);
     await openRequest();
     // 打开集合脚本面板并制造改动（这一处不再有未保存标记：它走自动保存）
-    openEntityPanel('我的集合');
+    await openEntityPanel('我的集合');
     await screen.findByTestId('entity-script-panel');
     fireEvent.change(screen.getByLabelText('集合前置脚本'), {
       target: { value: 'console.log("c");' },
@@ -3923,7 +4617,7 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     render(<App client={client} />);
     await openRequest();
 
-    openEntityPanel('我的集合');
+    await openEntityPanel('我的集合');
     await screen.findByTestId('entity-script-panel');
     fireEvent.change(screen.getByLabelText('集合前置脚本'), {
       target: { value: 'console.log("collection");' },
@@ -3947,7 +4641,7 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     expect(reqTab.tagName).toBe('BUTTON');
     expect(within(reqTab).getByText('GET')).toBeTruthy();
 
-    openEntityPanel('我的集合');
+    await openEntityPanel('我的集合');
     await screen.findByTestId('entity-script-panel');
     const entityTab = screen.getAllByTestId('session-tab')[1];
     expect(entityTab.getAttribute('data-tab-kind')).toBe('entity');
@@ -4219,7 +4913,10 @@ describe('环境变量的只读浮层（spec: 环境变量的只读浮层）', (
       scope: 'global',
       owner_id: 'w1',
       name: 'baseUrl',
+      description: null,
       is_secret: false,
+      enabled: true,
+      sort_order: 0,
       initial: { state: 'value', value: 'https://api.test' },
       current: { state: 'value', value: 'https://api.test' },
       ...overrides,
@@ -4261,6 +4958,34 @@ describe('环境变量的只读浮层（spec: 环境变量的只读浮层）', (
     expect(container.querySelector('.request-region')).toBe(region);
     expect(container.querySelector('.response-region')).toBe(response);
     expect(container.querySelector('.sidebar')).toBe(sidebar);
+  });
+
+  it('被禁用的变量标注为禁用，且不把它的值呈现为生效值（spec: 禁用的变量不被呈现为生效值）', async () => {
+    const off = peekVariable({ id: 'v-off', name: 'offVar', enabled: false });
+    const { client } = harness({ variables: [off] });
+    render(<App client={client} />);
+    await screen.findByText('我的集合');
+
+    await openPeek();
+
+    const item = await screen.findByTestId('peek-scope-offVar');
+    expect(within(item).getByTestId('peek-disabled-offVar')).toBeTruthy();
+    expect(item.textContent).not.toContain('https://api.test');
+  });
+
+  it('同名条目逐条列出，只有被遮蔽的那条带标注（spec: 同名条目按生效关系标注）', async () => {
+    const upper = peekVariable();
+    const lower = peekVariable({ id: 'v-lower', sort_order: 1 });
+    const { client } = harness({ variables: [upper, lower] });
+    render(<App client={client} />);
+    await screen.findByText('我的集合');
+
+    await openPeek();
+
+    const items = await screen.findAllByTestId('peek-scope-baseUrl');
+    expect(items).toHaveLength(2);
+    expect(within(items[0]).getByTestId('peek-shadowed-baseUrl')).toBeTruthy();
+    expect(within(items[1]).queryByTestId('peek-shadowed-baseUrl')).toBeNull();
   });
 
   it('分两段：本请求用到的变量（区分未解析）与当前作用域的全部变量', async () => {

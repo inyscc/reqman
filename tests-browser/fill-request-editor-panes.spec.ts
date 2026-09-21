@@ -184,12 +184,18 @@ describe('键值表满高容器（真实引擎）', () => {
           tableOverflow: table.scrollHeight - table.clientHeight,
           paneOverflow: pane.scrollHeight - pane.clientHeight,
           tableScrollable: getComputedStyle(table).overflowY === 'auto' || getComputedStyle(table).overflow === 'auto',
+          // 占位型滚动条会让 offsetWidth 比 clientWidth 大——行右端的删除按钮
+          // 就会随滚动条的出现而左右跳
+          gutter: table.offsetWidth - table.clientWidth,
+          overlay: document.querySelector('[data-testid="overlay-scrollbar"]') !== null,
         };
       });
 
       expect(geometry.tableOverflow, '表格没有撑到需要滚动').toBeGreaterThan(40);
       expect(geometry.tableScrollable, '表格容器不可滚动').toBe(true);
       expect(geometry.paneOverflow, '滚动溢出扩张到了正文区').toBeLessThanOrEqual(1);
+      expect(geometry.gutter, '滚动条占了表格的行宽').toBe(0);
+      expect(geometry.overlay, '没有绘制悬浮滚动条').toBe(true);
 
       // 滚动发生在表格容器内部
       const scrolled = await page.evaluate(() => {

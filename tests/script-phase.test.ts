@@ -17,7 +17,10 @@ function variable(name: string, value: string): Variable {
     scope: 'environment',
     owner_id: 'env',
     name,
+    description: null,
     is_secret: false,
+    enabled: true,
+    sort_order: 0,
     initial: { state: 'value', value },
     current: { state: 'value', value },
   };
@@ -134,6 +137,37 @@ describe('脚本执行编排', () => {
     expect(result.error).toBeNull();
     // 最后一段读到的是请求层写入的值，而不是集合层或文件夹层的
     expect(result.console.map((entry) => entry.args)).toEqual([['x=', '2']]);
+  }, 30_000);
+
+  it('按名写入落在生效的那一条，被禁用的条目读不到（spec: 脚本对变量的读写）', async () => {
+    // 同名两条：靠上的是 secret、靠下的是明文——生效的是靠下的那条；
+    // 第三条被禁用，因此不该出现在脚本可见的作用域里
+    const shadowed: Variable = {
+      ...variable('host', 'first'),
+      id: 'v-first',
+      is_secret: true,
+      sort_order: 0,
+    };
+    const effectiveRow: Variable = { ...variable('host', 'second'), id: 'v-second', sort_order: 1 };
+    const hidden: Variable = { ...variable('off', 'never'), id: 'v-off', enabled: false };
+    const { commands, variableSetCalls } = fakeCommands([shadowed, effectiveRow, hidden]);
+
+    const result = await runScriptPhase(commands, target, 'prerequest', [
+      'console.log("host=", pm.environment.get("host"));',
+      'pm.environment.set("seen", String(pm.environment.get("off")));',
+      'pm.environment.set("host", "patched");',
+    ]);
+
+    expect(result.error).toBeNull();
+    // 读到的是生效条的值
+    expect(result.console.map((entry) => entry.args)).toEqual([['host=', 'second']]);
+
+    const byName = new Map(variableSetCalls.map((call) => [String(call.name), call]));
+    // 禁用条目不进作用域：读出来是 undefined
+    expect(byName.get('seen')).toMatchObject({ current: 'undefined' });
+    // 回写定位到生效的那一条：is_secret 取自它（false），而不是被遮蔽的 secret 条
+    expect(byName.get('host')).toMatchObject({ is_secret: false, current: 'patched' });
+    expect(result.written).toContain('host');
   }, 30_000);
 
   it('三个层级都没有脚本时不载入变量，也不报错', async () => {
@@ -254,7 +288,10 @@ describe('脚本执行编排', () => {
       scope: 'environment',
       owner_id: 'e1',
       name: 'token',
+      description: null,
       is_secret: true,
+      enabled: true,
+      sort_order: 0,
       initial: { state: 'unreadable' },
       current: { state: 'unreadable' },
     };
@@ -445,7 +482,10 @@ describe('脚本执行编排', () => {
       scope: 'environment',
       owner_id: 'e1',
       name: 'token',
+      description: null,
       is_secret: true,
+      enabled: true,
+      sort_order: 0,
       initial: { state: 'unreadable' },
       current: { state: 'unreadable' },
     };

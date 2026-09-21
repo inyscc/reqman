@@ -39,6 +39,10 @@ pub struct ParsedVariable {
     pub name: String,
     pub value: String,
     pub is_secret: bool,
+    /// 源文档中的启用状态；禁用的变量照常导入，只是不参与解析。
+    pub enabled: bool,
+    /// 源文档中的描述（可选）。
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -698,7 +702,10 @@ fn map_scripts(events: &[EventDoc]) -> (Option<String>, Option<String>) {
 // 变量
 // ---------------------------------------------------------------------------
 
-/// 映射变量列表。禁用的变量被跳过并记录，不静默导入为启用状态（design D7）。
+/// 映射变量列表。
+///
+/// 禁用的变量**不再被跳过**：它随变量一起导入，只是带有禁用状态，因此不参与解析
+/// （spec: 导入集合变量的禁用状态与描述）。只有缺少名称这种真正无法映射的条目才被丢弃并记录。
 fn parse_variables(docs: &[VariableDoc], report: &mut ImportReport) -> Vec<ParsedVariable> {
     let mut out = Vec::with_capacity(docs.len());
 
@@ -716,15 +723,6 @@ fn parse_variables(docs: &[VariableDoc], report: &mut ImportReport) -> Vec<Parse
             continue;
         };
 
-        let enabled = doc.enabled.unwrap_or(!doc.disabled);
-        if !enabled {
-            report.skipped_items.push(SkippedItem {
-                name: name.to_string(),
-                reason: "源文档中该变量被禁用".to_string(),
-            });
-            continue;
-        }
-
         let raw_value = value_to_string(doc.value.as_ref());
         // 识别本系统导出的 secret 占位符：还原为 secret 变量且值置空（design D8）
         let placeholder = super::secret_placeholder_name(&raw_value);
@@ -738,6 +736,9 @@ fn parse_variables(docs: &[VariableDoc], report: &mut ImportReport) -> Vec<Parse
                 raw_value
             },
             is_secret,
+            // 集合变量用 `disabled`，环境 / 全局变量用 `enabled`，两者都识别
+            enabled: doc.enabled.unwrap_or(!doc.disabled),
+            description: doc.description.as_ref().and_then(DescriptionField::text),
         });
     }
 
@@ -1146,12 +1147,13 @@ mod tests {
     // ---- 变量与环境 ----
 
     #[test]
-    fn disabled_variables_are_skipped_and_reported() {
+    fn disabled_variables_are_imported_as_disabled() {
         let document = parse(json!({
             "values": [
                 { "key": "keep", "value": "1", "enabled": true },
                 { "key": "off", "value": "2", "enabled": false },
-                { "key": "secret", "value": "s", "enabled": true, "type": "secret" }
+                { "key": "secret", "value": "s", "enabled": true, "type": "secret" },
+                { "key": "described", "value": "3", "description": "一段描述" }
             ],
             "_postman_variable_scope": "environment",
             "name": "开发环境"
@@ -1161,11 +1163,39 @@ mod tests {
             panic!("应为环境");
         };
         assert_eq!(environment.name, "开发环境");
-        assert_eq!(environment.variables.len(), 2, "禁用变量不应被导入");
-        assert!(!environment.variables[0].is_secret);
-        assert!(environment.variables[1].is_secret, "secret 标记应保持");
+        assert_eq!(environment.variables.len(), 4, "禁用变量照常进入中间表示");
+        assert!(environment.variables[0].enabled);
+        assert!(!environment.variables[1].enabled, "禁用状态应被保留");
+        assert!(!environment.variables[1].is_secret);
+        assert!(environment.variables[2].is_secret, "secret 标记应保持");
+        assert_eq!(
+            environment.variables[3].description.as_deref(),
+            Some("一段描述"),
+            "描述应被保留"
+        );
+        assert!(
+            document.report.skipped_items.is_empty(),
+            "禁用不再计入被跳过的条目：{:?}",
+            document.report.skipped_items
+        );
+    }
+
+    #[test]
+    fn unnamed_variables_are_still_skipped_and_reported() {
+        let document = parse(json!({
+            "values": [
+                { "key": "keep", "value": "1" },
+                { "key": "   ", "value": "2" }
+            ],
+            "_postman_variable_scope": "globals"
+        }));
+
+        let ParsedPayload::Globals(variables) = &document.payload else {
+            panic!("应为全局变量");
+        };
+        assert_eq!(variables.len(), 1, "缺名称的条目无法映射，仍被丢弃");
         assert_eq!(document.report.skipped_items.len(), 1);
-        assert_eq!(document.report.skipped_items[0].name, "off");
+        assert_eq!(document.report.skipped_items[0].reason, "变量缺少名称");
     }
 
     #[test]
@@ -1181,9 +1211,13 @@ mod tests {
         let ParsedPayload::Globals(variables) = &document.payload else {
             panic!("应为全局变量");
         };
-        assert_eq!(variables.len(), 1);
+        assert_eq!(variables.len(), 2, "禁用变量同样进入中间表示");
         assert_eq!(variables[0].name, "host");
         assert_eq!(variables[0].value, "api.test");
+        assert!(variables[0].enabled);
+        assert_eq!(variables[1].name, "off");
+        assert!(!variables[1].enabled);
+        assert_eq!(variables[1].description, None);
     }
 
     #[test]

@@ -15,7 +15,10 @@ function variable(name: string, value: string): Variable {
     scope: 'environment',
     owner_id: 'env',
     name,
+    description: null,
     is_secret: false,
+    enabled: true,
+    sort_order: 0,
     initial: { state: 'value', value },
     current: { state: 'value', value },
   };

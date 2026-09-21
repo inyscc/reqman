@@ -4,7 +4,11 @@ import './App.css';
 import { BottomBar, type ModalKind } from './components/BottomBar';
 import { CookiePanel } from './components/CookiePanel';
 import { Dropdown } from './components/Dropdown';
-import { EntityScriptPanel, type EntitySaveStatus } from './components/EntityScriptPanel';
+import {
+  EntityScriptPanel,
+  type EntityInnerTab,
+  type EntitySaveStatus,
+} from './components/EntityScriptPanel';
 import { EnvironmentsPanel } from './components/EnvironmentsPanel';
 import { CollectionIcon, FolderIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
@@ -16,9 +20,10 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { SplitHandle } from './components/SplitHandle';
 import { VariablesPeek } from './components/VariablesPeek';
 import { VariablesPanel } from './components/VariablesPanel';
-import { WorkspaceTree, type EntitySelection } from './components/WorkspaceTree';
+import { WorkspaceTree, type EntitySelection, type RenameTarget } from './components/WorkspaceTree';
 import { commands as defaultCommands, describeError, type Commands } from './lib/commands';
 import { createEditingRegistry, SURFACE_PRIORITY } from './lib/editing';
+import { applyTreeMove, type TreeMove } from './lib/treeMoves';
 import { readSplitRatio, SPLIT_DEFAULT, writeSplitRatio } from './lib/layout';
 import {
   DEFAULT_PRESENTATION,
@@ -97,6 +102,8 @@ interface EntitySessionTab {
   entity: Collection | Folder | null;
   /** 已保存的脚本基线：保存成功后前移，未保存守卫据此判断。 */
   baseline: { pre: string; test: string } | null;
+  /** 集合面板的内层页签（变量 / 脚本）；文件夹不使用。 */
+  innerTab: EntityInnerTab;
 }
 
 type SessionTab = RequestSessionTab | EntitySessionTab;
@@ -271,6 +278,25 @@ function findRequest(trees: CollectionTree[], id: string): SavedRequest | null {
   return null;
 }
 
+/** 集合或文件夹当前的名字；找不到返回 undefined。 */
+function entityNameIn(trees: CollectionTree[], id: string): string | undefined {
+  const search = (nodes: TreeNode[]): string | undefined => {
+    for (const node of nodes) {
+      if (node.id === id) return node.name;
+      const found = search(node.children);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+
+  for (const tree of trees) {
+    if (tree.collection.id === id) return tree.collection.name;
+    const found = search(tree.children);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 export function App({ client = defaultCommands, windowCloser = tauriWindowCloser }: AppProps) {
   const requestStore = useMemo(() => createEntityStore<SavedRequest>(), []);
   /** 编辑面注册表：Ctrl+S 与未保存守卫共用它（见 lib/editing.ts）。 */
@@ -297,6 +323,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [entitySave, setEntitySave] = useState<({ key: string } & EntitySaveStatus) | null>(null);
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [environmentId, setEnvironmentId] = useState<string | null>(null);
+  /** 环境编辑器标题里正在编辑的名字；`null` 表示跟随后端的值。 */
+  const [environmentNameDraft, setEnvironmentNameDraft] = useState<string | null>(null);
   const [variables, setVariables] = useState<Variable[]>([]);
   /** 请求区与响应区的分栏比例（design D7）；以工作区为单位持久化。 */
   const [splitRatio, setSplitRatio] = useState(SPLIT_DEFAULT);
@@ -469,6 +497,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           collectionId,
           entity: loaded,
           baseline: { pre: entityPre(loaded), test: entityTest(loaded) },
+          // 集合面板默认停在变量页（spec: 集合面板的变量与脚本站签）
+          innerTab: 'variables',
         };
         setTabs((previous) =>
           previous.some((item) => item.id === key) ? previous : [...previous, next],
@@ -523,6 +553,35 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     },
     [client],
   );
+
+  /**
+   * 集合变量的加载（spec: 集合变量就地可维护）：只在激活的是集合面板时取一次，
+   * 写入后由 `collectionVariablesVersion` 触发重取。与只读浮层的按需读取互不依赖。
+   */
+  const [collectionVariables, setCollectionVariables] = useState<Variable[]>([]);
+  const [collectionVariablesVersion, setCollectionVariablesVersion] = useState(0);
+  const collectionVariablesOwner = activeEntityTab?.entityKind === 'collection'
+    ? activeEntityTab.entityId
+    : null;
+
+  useEffect(() => {
+    if (!collectionVariablesOwner) {
+      setCollectionVariables([]);
+      return;
+    }
+    let cancelled = false;
+    void client
+      .variableList('collection', collectionVariablesOwner)
+      .then((list) => {
+        if (!cancelled) setCollectionVariables(list);
+      })
+      .catch((caught) => {
+        if (!cancelled) setError(describeError(caught).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, collectionVariablesOwner, collectionVariablesVersion]);
 
   /**
    * 环境激活的唯一入口（design D4）：侧栏列表与主区环境选择器共用它。
@@ -617,6 +676,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               collectionId: 'collection_id' in loaded ? loaded.collection_id : entry.id,
               entity: loaded,
               baseline: { pre: entityPre(loaded), test: entityTest(loaded) },
+              innerTab: entry.innerTab ?? 'variables',
             });
           } catch {
             // 取不回的实体按「已删除」处理：丢弃而不是进入错误态
@@ -649,7 +709,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       tabs: tabs.map((item) =>
         item.kind === 'request'
           ? ({ kind: 'request', id: item.requestId } as const)
-          : ({ kind: 'entity', entityKind: item.entityKind, id: item.entityId } as const),
+          : ({
+              kind: 'entity',
+              entityKind: item.entityKind,
+              id: item.entityId,
+              innerTab: item.innerTab,
+            } as const),
       ),
       activeId: activeTabKey,
     };
@@ -769,6 +834,29 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
    * 变量的表格放在这里而不是 280px 的侧栏里——侧栏留给列表，编辑要有地方铺开。
    * 打开的请求不会丢：切回 Collections 即恢复。
    */
+  /**
+   * 环境编辑器的标题就是**环境名**，并且可以就地改（与集合/文件夹/请求的面板头同款）。
+   * 未激活环境时标题是 Globals，它没有实体可改名，因此不可编辑。
+   */
+  const activeEnvironment = environments.find((item) => item.id === environmentId) ?? null;
+
+  const commitEnvironmentName = async () => {
+    const draft = environmentNameDraft;
+    if (draft === null || !activeEnvironment) return;
+
+    setEnvironmentNameDraft(null);
+    const next = draft.trim();
+    if (next === '' || next === activeEnvironment.name) return;
+
+    setError(null);
+    try {
+      await client.environmentRename(activeEnvironment.id, next);
+      if (workspaceId) await loadEnvironments(workspaceId);
+    } catch (caught) {
+      setError(describeError(caught).message);
+    }
+  };
+
   const showEnvironmentEditor = sidebarTab === 'environments';
 
   const reloadAfterImport = useCallback(async () => {
@@ -1315,6 +1403,31 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     }
   };
 
+  /**
+   * 集合树拖拽落定：先就地重排让界面立刻跟上，再写后端；写失败就把整棵树重新
+   * 加载回来（回滚）并提示原因。拖拽只改顺序与归属——不动选中、不动已打开的
+   * 标签、不触发未保存守卫。
+   */
+  const moveNode = async (move: TreeMove) => {
+    const id = workspaceId;
+    setTrees((previous) => applyTreeMove(previous, move));
+    try {
+      if (move.kind === 'reorder-collections') {
+        if (!id) return;
+        await client.collectionReorder(id, move.orderedIds);
+      } else if (move.kind === 'reorder-children') {
+        await client.childrenReorder(move.collectionId, move.parentFolderId, move.items);
+      } else if (move.kind === 'move-folder') {
+        await client.folderMove(move.id, move.parentFolderId);
+      } else {
+        await client.requestMove(move.id, move.folderId);
+      }
+    } catch (caught) {
+      setError(describeError(caught).message);
+      if (id) await loadTree(id);
+    }
+  };
+
   const deleteRequestById = async (id: string) => {
     setError(null);
     try {
@@ -1324,6 +1437,57 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       if (workspaceId) await loadTree(workspaceId);
     } catch (caught) {
       setError(describeError(caught).message);
+    }
+  };
+
+  /**
+   * 树上就地改名的提交（spec: 在集合树里就地重命名）。
+   *
+   * 与面板头的输入框**同一条写入路径**：集合 / 文件夹走 rename 命令，请求走保存；
+   * 已打开的标签持有的是同一份数据的另一份拷贝，因此一并同步过去。
+   * 空名与「没改」都在这里被丢弃——界面已经把输入框收起来了，树会显示原名。
+   */
+  const renameFromTree = async (target: RenameTarget, rawName: string) => {
+    const name = rawName.trim();
+    if (name === '') return;
+
+    setError(null);
+    try {
+      if (target.kind === 'request') {
+        const current =
+          requestStore.get(target.id) ?? findRequest(treesRef.current, target.id);
+        if (!current || current.name === name) return;
+        await requestStore.update(
+          target.id,
+          { ...current, name },
+          (value) => client.requestSave(value),
+        );
+        setTabs((previous) =>
+          previous.map((item) =>
+            item.kind === 'request' && item.requestId === target.id
+              ? { ...item, draft: { ...item.draft, name } }
+              : item,
+          ),
+        );
+      } else {
+        if (entityNameIn(treesRef.current, target.id) === name) return;
+        const saved =
+          target.kind === 'collection'
+            ? await client.collectionRename(target.id, name)
+            : await client.folderRename(target.id, name);
+        setTabs((previous) =>
+          previous.map((item) =>
+            item.kind === 'entity' && item.entityId === target.id
+              ? { ...item, entity: saved }
+              : item,
+          ),
+        );
+      }
+
+      if (workspaceId) await loadTree(workspaceId);
+    } catch (caught) {
+      setError(describeError(caught).message);
+      if (workspaceId) await loadTree(workspaceId);
     }
   };
 
@@ -1630,6 +1794,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               onDuplicateRequest={(id) => void duplicateRequestById(id)}
               onRenameEntity={(entity) => renameEntity(entity)}
               onRenameRequest={(id) => renameRequest(id)}
+              onRenameCommit={(target, name) => void renameFromTree(target, name)}
+              onMove={(move) => void moveNode(move)}
               onImport={() => setModal('import-export')}
             />
           ) : workspaceId ? (
@@ -1859,13 +2025,32 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         <div className="request-region">
           {showEnvironmentEditor ? (
             /* 环境编辑器占主区（design D8）：变量表格需要宽度，侧栏只放列表 */
-            <div className="pane" data-testid="environment-editor">
+            <div className="pane entity-pane" data-testid="environment-editor">
+              {/* 面板头放的是**环境名**，与集合 / 文件夹 / 请求的面板头同一款式与同一字号 */}
+              <div className="pane-header">
+                <input
+                  className="crumb-name entity-name"
+                  aria-label="当前环境名称"
+                  value={environmentNameDraft ?? activeEnvironment?.name ?? 'Globals'}
+                  disabled={!activeEnvironment}
+                  onChange={(event) => setEnvironmentNameDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void commitEnvironmentName();
+                    if (event.key === 'Escape') setEnvironmentNameDraft(null);
+                  }}
+                  onBlur={() => void commitEnvironmentName()}
+                />
+                <span className="grow" />
+              </div>
+
               <div className="pane-body var-editor">
                 <VariablesPanel
                   client={client}
-                  workspaceId={workspaceId ?? ''}
-                  environmentId={environmentId}
+                  scope={environmentId ? 'environment' : 'global'}
+                  ownerId={environmentId ?? workspaceId ?? ''}
                   variables={variables}
+                  // 标题已经是环境名，面板内不再重复一行「环境变量」
+                  hideHeader
                   onChanged={() => {
                     if (workspaceId) void loadVariables(workspaceId, environmentId);
                   }}
@@ -1878,6 +2063,23 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               kind={activeEntityTab.entityKind}
               entity={entityDraft}
               nameRef={entityNameRef}
+              tab={activeEntityTab.innerTab}
+              variablesCount={collectionVariables.length}
+              onTab={(next) =>
+                patchEntityTab(activeEntityTab.id, (item) => ({ ...item, innerTab: next }))
+              }
+              variablesPane={
+                <VariablesPanel
+                  client={client}
+                  scope="collection"
+                  ownerId={activeEntityTab.entityId}
+                  // 页签已经说了「变量」，再放一行「集合变量」小节标题，
+                  // 只会在标题层级里跟集合名抢权重——这里由页签承担上下文
+                  hideHeader
+                  variables={collectionVariables}
+                  onChanged={() => setCollectionVariablesVersion((value) => value + 1)}
+                />
+              }
               onChange={(next) =>
                 patchEntityTab(activeEntityTab.id, (item) => ({ ...item, entity: next }))
               }

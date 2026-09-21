@@ -41,6 +41,29 @@ export interface CreateRequestArgs {
   url: string;
 }
 
+export interface CreateVariableArgs {
+  scope: Scope;
+  owner_id: string;
+  name: string;
+  value: string;
+  is_secret?: boolean;
+  description?: string | null;
+}
+
+/**
+ * 按 id 更新一个变量：缺省即「不变」。
+ *
+ * `description` 传空字符串表示清空（与 Rust 侧的约定一致）；
+ * `value` 同时写入初始值与当前值。
+ */
+export interface VariablePatch {
+  name?: string;
+  value?: string;
+  description?: string;
+  is_secret?: boolean;
+  enabled?: boolean;
+}
+
 export interface SetVariableArgs {
   scope: Scope;
   owner_id: string;
@@ -89,18 +112,17 @@ export function createCommands(call: Invoker) {
       call<Folder>('folder_set_script', { id, preRequestScript, testScript }),
     /** 取文件夹实体本身——文件夹级前后置脚本挂在实体上，树形接口不给。 */
     folderGet: (id: string) => call<Folder>('folder_get', { id }),
+    /**
+     * 重写某个父级下子条目的顺序：入参是一个**有序列表**，下标即 `sort_order`。
+     *
+     * 传一个有序列表而不是「文件夹列表 + 请求列表」两个独立序列，才能表达
+     * 「目录与请求交错」的顺序（渲染侧本来就按共享的 sort_order 混排）。
+     */
     childrenReorder: (
       collectionId: string,
       parentFolderId: string | null,
-      folderIds: string[],
-      requestIds: string[],
-    ) =>
-      call<void>('children_reorder', {
-        collectionId,
-        parentFolderId,
-        folderIds,
-        requestIds,
-      }),
+      items: { id: string; kind: 'folder' | 'request' }[],
+    ) => call<void>('children_reorder', { collectionId, parentFolderId, items }),
 
     // 请求
     requestGet: (id: string) => call<SavedRequest>('request_get', { id }),
@@ -129,6 +151,14 @@ export function createCommands(call: Invoker) {
     variableList: (scope: Scope, ownerId: string) =>
       call<Variable[]>('variable_list', { scope, ownerId }),
     variableSet: (args: SetVariableArgs) => call<Variable>('variable_set', { args }),
+    /** 新增一条变量（界面的「新增一行」）；同名时新增而非覆盖。 */
+    variableCreate: (args: CreateVariableArgs) => call<Variable>('variable_create', { args }),
+    /** 按 id 就地更新：名称、值、描述、启用状态与 secret 标记。 */
+    variableUpdate: (id: string, patch: VariablePatch) =>
+      call<Variable>('variable_update', { id, patch }),
+    /** 按给定顺序重写该归属下全部变量的顺序。 */
+    variableReorder: (scope: Scope, ownerId: string, orderedIds: string[]) =>
+      call<void>('variable_reorder', { scope, ownerId, orderedIds }),
     variableDelete: (id: string) => call<void>('variable_delete', { id }),
     /** 显式揭示 secret 明文，是拿到明文的唯一入口。 */
     secretReveal: (id: string) => call<Variable>('secret_reveal', { id }),

@@ -184,6 +184,9 @@ pub struct VariableDoc {
     /// `"secret"` 表示敏感变量。
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
+    /// 变量描述（字符串或 `{ content }` 两种写法都接受，与请求头同款）。
+    #[serde(default)]
+    pub description: Option<DescriptionField>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

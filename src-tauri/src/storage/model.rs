@@ -562,7 +562,13 @@ pub struct Variable {
     /// global 作用域下是工作区 id；environment 下是环境 id；collection 下是集合 id。
     pub owner_id: Id,
     pub name: String,
+    /// 可选描述，供界面呈现，不参与解析。
+    pub description: Option<String>,
     pub is_secret: bool,
+    /// 是否参与解析。被禁用的条目仍留在列表里，但不进入作用域。
+    pub enabled: bool,
+    /// 在所属（作用域 + 归属）内的呈现顺序；同名组里最靠后的**启用**条目生效。
+    pub sort_order: i64,
     /// 初始值（往返保真字段，不参与解析）。
     pub initial: StoredValue,
     /// 当前值（参与解析）。
@@ -570,8 +576,11 @@ pub struct Variable {
 }
 
 impl Variable {
-    /// 参与解析的值。不可读时视为未定义。
+    /// 参与解析的值。不可读或被禁用时视为未定义。
     pub fn resolvable_value(&self) -> Option<&str> {
+        if !self.enabled {
+            return None;
+        }
         self.current.plaintext()
     }
 }

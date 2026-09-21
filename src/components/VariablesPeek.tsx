@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { describeError } from '../lib/commands';
 import type { Commands } from '../lib/commands';
 import type { Variable } from '../lib/types';
+import { effectiveByName, isShadowed } from '../lib/variables';
 
 export interface VariablesPeekProps {
   client: Commands;
@@ -94,10 +95,15 @@ export function VariablesPeek({
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [open]);
 
-  /** 名称 → 变量：集合级先放、当前作用域后放，因此同名时作用域内的那份胜出。 */
+  /**
+   * 名称 → **生效**条目：集合级先放、当前作用域后放，因此同名时作用域内的那份胜出。
+   *
+   * 取的是各组里最靠下的启用条目（与解析同源），被禁用的条目根本不会进来——否则浮层
+   * 会把一条不参与解析的值呈现成「当前值」（spec: 环境变量的只读浮层）。
+   */
   const byName = new Map<string, Variable>();
-  for (const variable of collectionVariables) byName.set(variable.name, variable);
-  for (const variable of scopeVariables) byName.set(variable.name, variable);
+  for (const [name, variable] of effectiveByName(collectionVariables)) byName.set(name, variable);
+  for (const [name, variable] of effectiveByName(scopeVariables)) byName.set(name, variable);
   const unresolvedSet = new Set(unresolved);
 
   return (
@@ -161,12 +167,34 @@ export function VariablesPeek({
               <p className="muted">这个作用域里还没有变量。</p>
             ) : (
               <ul className="peek-list" data-testid="peek-scope-list">
-                {scopeVariables.map((variable) => (
-                  <li key={variable.id}>
-                    <code className="peek-name">{variable.name}</code>
-                    <span className="peek-value mono">{shownValue(variable)}</span>
-                  </li>
-                ))}
+                {/* 逐条列出（含同名与禁用），但不把不参与解析的条目的值呈现为当前值 */}
+                {scopeVariables.map((variable) => {
+                  const shadowed = isShadowed(variable, scopeVariables);
+                  return (
+                    <li key={variable.id} data-testid={`peek-scope-${variable.name}`}>
+                      <code className="peek-name">{variable.name}</code>
+                      {!variable.enabled ? (
+                        <span
+                          className="badge"
+                          title="该变量已禁用，不参与解析"
+                          data-testid={`peek-disabled-${variable.name}`}
+                        >
+                          已禁用
+                        </span>
+                      ) : shadowed ? (
+                        <span
+                          className="badge warn"
+                          title="该变量被下方同名变量覆盖"
+                          data-testid={`peek-shadowed-${variable.name}`}
+                        >
+                          被覆盖
+                        </span>
+                      ) : (
+                        <span className="peek-value mono">{shownValue(variable)}</span>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>

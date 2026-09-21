@@ -382,6 +382,11 @@ fn the_command_surface_is_the_audited_one() {
         "environment_set_proxy",
         "variable_list",
         "variable_set",
+        // 变量模型的扩展（rework-collection-tree-and-variable-model）：
+        // 编辑器按 id 增删改与排序都是具名的领域能力，不接受路径也不引入新的能力类别
+        "variable_create",
+        "variable_update",
+        "variable_reorder",
         "variable_delete",
         "secret_reveal",
         "globals_list",

@@ -4,6 +4,8 @@ import { isEmptyFormField, isEmptyKeyValue } from '../lib/rows';
 import { withParams, withUrl } from '../lib/url';
 import { Dropdown } from './Dropdown';
 import { CurlPanel, useCurlSnapshot } from './CurlSnapshot';
+import { OverlayScrollbar } from './OverlayScrollbar';
+import { TrashIcon } from './icons';
 import { ScriptPane } from './ScriptPane';
 import { CodeSurface } from './CodeSurface';
 import { monacoLanguage } from '../lib/codeSurface';
@@ -127,6 +129,8 @@ function KeyValueTable({
   const [pending, setPending] = useState<KeyValue>(EMPTY_ROW);
   const [ownedIndex, setOwnedIndex] = useState<number | null>(null);
   const ghostKeyRef = useRef<HTMLInputElement>(null);
+  /** 真正滚动的那个容器；悬浮滚动条只读它的几何。 */
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const owned = ownedIndex !== null && ownedIndex < rows.length ? ownedIndex : null;
   const ghost = owned === null ? pending : rows[owned];
@@ -173,8 +177,11 @@ function KeyValueTable({
 
   return (
     /* 满高滚动容器（spec: 请求编辑器正文区的满高与区域内滚动）：容器占满正文区
-       剩余高度，行多时在容器内滚动，表头吸顶（见 App.css 的 .table-scroll）。 */
-    <div className="table-scroll">
+       剩余高度，行多时在容器内滚动，表头吸顶（见 App.css 的 .table-scroll）。
+       外面这层是悬浮滚动条的定位上下文：滚动条不占行宽，行右端的删除按钮
+       因此不会因为滚动条的出现与消失而左右跳。 */
+    <div className="table-scroll-wrap">
+      <div className="table-scroll" ref={scrollRef}>
       <table>
         <thead>
           <tr>
@@ -227,12 +234,15 @@ function KeyValueTable({
                   />
                 </td>
                 <td>
+                  {/* 与变量表同一套操作按钮：图标、同一尺寸、hover / 聚焦才显现 */}
                   <button
-                    className="ghost row-delete"
+                    type="button"
+                    className="icon-btn row-delete"
                     aria-label="删除该行"
+                    title="删除该行"
                     onClick={() => onChange(rows.filter((_, i) => i !== index))}
                   >
-                    ×
+                    <TrashIcon aria-hidden="true" />
                   </button>
                 </td>
               </tr>
@@ -333,6 +343,8 @@ function KeyValueTable({
           )}
         </tbody>
       </table>
+      </div>
+      <OverlayScrollbar targetRef={scrollRef} />
     </div>
   );
 }
@@ -730,6 +742,8 @@ function FormDataEditor({
   const [pending, setPending] = useState<FormRow>(EMPTY_FIELD);
   const [ownedIndex, setOwnedIndex] = useState<number | null>(null);
   const ghostKeyRef = useRef<HTMLInputElement>(null);
+  /** 同上：悬浮滚动条要挂靠的那个滚动容器。 */
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const owned = ownedIndex !== null && ownedIndex < rows.length ? ownedIndex : null;
   const ghost = owned === null ? pending : rows[owned];
@@ -781,8 +795,9 @@ function FormDataEditor({
   };
 
   return (
-    /* 与 KeyValueTable 同款满高滚动容器（见上面的注释）。 */
-    <div className="table-scroll">
+    /* 与 KeyValueTable 同款满高滚动容器与悬浮滚动条（见上面的注释）。 */
+    <div className="table-scroll-wrap">
+      <div className="table-scroll" ref={scrollRef}>
       <table>
         <thead>
           <tr>
@@ -877,12 +892,15 @@ function FormDataEditor({
                   />
                 </td>
                 <td>
+                  {/* 与变量表同一套操作按钮：图标、同一尺寸、hover / 聚焦才显现 */}
                   <button
-                    className="ghost row-delete"
+                    type="button"
+                    className="icon-btn row-delete"
                     aria-label="删除该字段"
+                    title="删除该字段"
                     onClick={() => onChange(rows.filter((_, i) => i !== index))}
                   >
-                    ×
+                    <TrashIcon aria-hidden="true" />
                   </button>
                 </td>
               </tr>
@@ -1017,6 +1035,8 @@ function FormDataEditor({
           )}
         </tbody>
       </table>
+      </div>
+      <OverlayScrollbar targetRef={scrollRef} />
     </div>
   );
 }

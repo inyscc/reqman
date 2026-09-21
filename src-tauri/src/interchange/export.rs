@@ -149,6 +149,8 @@ fn load_variables(
                 name: variable.name,
                 value,
                 is_secret: variable.is_secret,
+                enabled: variable.enabled,
+                description: variable.description,
             }
         })
         .collect())
@@ -212,7 +214,11 @@ fn variable_value(variable: &ParsedVariable) -> Value {
     let mut entry = Map::new();
     entry.insert("key".into(), json!(variable.name));
     entry.insert("value".into(), json!(variable.value));
-    entry.insert("enabled".into(), json!(true));
+    // 与环境文档的既有写法一致：只写 `enabled`；读取侧本来就同时容忍 `enabled` 与 `disabled`
+    entry.insert("enabled".into(), json!(variable.enabled));
+    if let Some(description) = variable.description.as_ref().filter(|text| !text.is_empty()) {
+        entry.insert("description".into(), json!(description));
+    }
     if variable.is_secret {
         entry.insert("type".into(), json!("secret"));
     }
@@ -629,9 +635,12 @@ mod tests {
         assert_eq!(document["name"], "开发环境");
         assert_eq!(document["_postman_variable_scope"], "environment");
         let values = document["values"].as_array().expect("变量存在");
-        assert_eq!(values.len(), 1, "禁用变量不在库中，因此不导出");
+        assert_eq!(values.len(), 2, "禁用变量也在库中，因此照常导出并带禁用标记");
         assert_eq!(values[0]["key"], "host");
         assert_eq!(values[0]["value"], "dev.test");
+        assert_eq!(values[0]["enabled"], true);
+        assert_eq!(values[1]["key"], "off");
+        assert_eq!(values[1]["enabled"], false, "禁用状态应写出");
 
         // 重新导入回同一形状
         let db2 = Db::open_in_memory().expect("打开数据库");
@@ -641,9 +650,10 @@ mod tests {
         let reimported_id = reimported.environment_id.expect("应有环境");
         let variables =
             var_store::list_variables(&db2, Scope::Environment, &reimported_id, &key()).unwrap();
-        assert_eq!(variables.len(), 1);
+        assert_eq!(variables.len(), 2);
         assert_eq!(variables[0].name, "host");
         assert_eq!(variables[0].current.plaintext(), Some("dev.test"));
+        assert!(!variables[1].enabled, "禁用状态经往返保留");
 
         // 全局变量
         let globals_parsed = parse_document(
@@ -660,6 +670,85 @@ mod tests {
         let globals_document: Value = serde_json::from_str(&exported_globals).unwrap();
         assert_eq!(globals_document["_postman_variable_scope"], "globals");
         assert_eq!(globals_document["values"][0]["key"], "baseUrl");
+    }
+
+    #[test]
+    fn disabled_and_duplicated_variables_with_descriptions_survive_a_round_trip() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let ws = workspace_id(&db);
+        let environment = var_store::create_environment(&db, &ws, "往返环境").expect("建环境");
+
+        // 同名两条 + 一条禁用 + 一条带描述：三种新性状一起走一遍往返
+        var_store::create_variable(
+            &db,
+            Scope::Environment,
+            &environment.id,
+            "host",
+            "first",
+            false,
+            None,
+            &key(),
+        )
+        .expect("写入变量");
+        var_store::create_variable(
+            &db,
+            Scope::Environment,
+            &environment.id,
+            "host",
+            "second",
+            false,
+            Some("靠下的一条"),
+            &key(),
+        )
+        .expect("写入变量");
+        // 新增一律是启用的，禁用要显式切一次（spec: 启用状态可以就地切换）
+        let off = var_store::create_variable(
+            &db,
+            Scope::Environment,
+            &environment.id,
+            "off",
+            "never",
+            false,
+            None,
+            &key(),
+        )
+        .expect("写入变量");
+        var_store::update_variable(
+            &db,
+            &off.id,
+            var_store::VariablePatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+            &key(),
+        )
+        .expect("禁用该变量");
+
+        let exported = export_environment(&db, &environment.id, &key()).expect("导出环境");
+        let values = serde_json::from_str::<Value>(&exported).expect("合法 JSON")["values"].clone();
+        assert_eq!(
+            values.as_array().expect("变量数组").len(),
+            3,
+            "同名条目与禁用条目都要写出"
+        );
+
+        let db2 = Db::open_in_memory().expect("打开数据库");
+        let ws2 = workspace_id(&db2);
+        let reimported = import_document(&db2, &ws2, &parse_document(&exported).unwrap(), &key())
+            .expect("重新导入");
+        let id = reimported.environment_id.expect("应有环境");
+        let rows = var_store::list_variables(&db2, Scope::Environment, &id, &key()).unwrap();
+
+        assert_eq!(rows.len(), 3, "条目数量一致");
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            ["host", "host", "off"],
+            "先后顺序一致"
+        );
+        assert_eq!(rows[0].current.plaintext(), Some("first"));
+        assert_eq!(rows[1].current.plaintext(), Some("second"));
+        assert_eq!(rows[1].description.as_deref(), Some("靠下的一条"));
+        assert!(!rows[2].enabled, "禁用状态经往返保留");
     }
 
     // ---- 5.3 secret 占位符 ----

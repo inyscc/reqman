@@ -13,7 +13,13 @@ export const TABS_SCOPE = 'ui_tabs';
 
 export type PersistedTab =
   | { kind: 'request'; id: string }
-  | { kind: 'entity'; entityKind: 'collection' | 'folder'; id: string };
+  | {
+      kind: 'entity';
+      entityKind: 'collection' | 'folder';
+      id: string;
+      /** 集合面板停在哪个内层页签（spec: 集合面板的变量与脚本站签）。 */
+      innerTab?: 'variables' | 'scripts';
+    };
 
 export interface PersistedTabs {
   tabs: PersistedTab[];
@@ -35,7 +41,9 @@ function parseTab(value: unknown): PersistedTab | null {
   if (value.kind === 'entity') {
     const kind = value.entityKind;
     if (kind !== 'collection' && kind !== 'folder') return null;
-    return { kind: 'entity', entityKind: kind, id: value.id };
+    const innerTab =
+      value.innerTab === 'variables' || value.innerTab === 'scripts' ? value.innerTab : undefined;
+    return { kind: 'entity', entityKind: kind, id: value.id, innerTab };
   }
 
   return null;

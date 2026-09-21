@@ -133,6 +133,8 @@ fn import_collection(
                 &variable.name,
                 variable.is_secret,
                 &variable.value,
+                variable.enabled,
+                variable.description.as_deref(),
                 key_provider,
             )?;
         }
@@ -162,6 +164,8 @@ fn import_environment(
                 &variable.name,
                 variable.is_secret,
                 &variable.value,
+                variable.enabled,
+                variable.description.as_deref(),
                 key_provider,
             )?;
         }
@@ -189,6 +193,8 @@ fn import_globals(
                 &variable.name,
                 variable.is_secret,
                 &variable.value,
+                variable.enabled,
+                variable.description.as_deref(),
                 key_provider,
             )?;
         }
@@ -554,6 +560,8 @@ mod tests {
             name: "   ".to_string(),
             value: "x".to_string(),
             is_secret: false,
+            enabled: true,
+            description: None,
         });
         let broken = ParsedDocument {
             kind: parsed.kind,
@@ -610,7 +618,7 @@ mod tests {
     // ---- 3.4 禁用变量 ----
 
     #[test]
-    fn disabled_source_variables_are_skipped_and_reported() {
+    fn disabled_source_variables_are_imported_as_disabled() {
         let db = Db::open_in_memory().expect("打开数据库");
         let ws = workspace_id(&db);
 
@@ -622,7 +630,8 @@ mod tests {
                 "_postman_variable_scope": "environment",
                 "values": [
                     { "key": "keep", "value": "1", "enabled": true },
-                    { "key": "off", "value": "2", "enabled": false }
+                    { "key": "off", "value": "2", "enabled": false },
+                    { "key": "described", "value": "3", "description": "一段描述" }
                 ]
             })
             .to_string(),
@@ -631,11 +640,21 @@ mod tests {
         let environment_id = outcome.environment_id.unwrap();
         let variables =
             var_store::list_variables(&db, Scope::Environment, &environment_id, &key()).unwrap();
-        assert_eq!(variables.len(), 1, "禁用变量不应被导入为启用状态");
-        assert_eq!(variables[0].name, "keep");
+        assert_eq!(variables.len(), 3, "禁用变量照常导入");
+        assert_eq!(
+            variables.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
+            ["keep", "off", "described"],
+            "顺序与源文档一致"
+        );
+        assert!(variables[0].enabled);
+        assert!(!variables[1].enabled, "禁用状态应落库");
+        assert_eq!(variables[2].description.as_deref(), Some("一段描述"), "描述应落库");
 
-        assert_eq!(outcome.report.skipped_items.len(), 1);
-        assert_eq!(outcome.report.skipped_items[0].name, "off");
+        assert!(
+            outcome.report.skipped_items.is_empty(),
+            "禁用不再计入被跳过的条目：{:?}",
+            outcome.report.skipped_items
+        );
     }
 
     // ---- 3.5 导入来源 ----
