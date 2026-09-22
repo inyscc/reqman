@@ -119,6 +119,7 @@ function response(overrides: Partial<ResponsePayload> = {}): ResponsePayload {
     body_base64: null,
     pretty_available: true,
     pretty_print_threshold: 5 * 1024 * 1024,
+    size_limit_bytes: 50 * 1024 * 1024,
     insecure_warning: false,
     final_url: 'https://api.test/users',
     via_proxy: false,
@@ -718,6 +719,36 @@ describe('前端数据流骨架', () => {
     expect(await screen.findByText('我的请求')).toBeTruthy();
   });
 
+  it('环境级代理落在环境自身的编辑面，缺省「未配置」顺位到全局（spec: 设置模态的代理配置）', async () => {
+    const active = environment({ is_active: true });
+    const base = harness({ environments: [active] });
+    const setProxy = vi.fn(async () => active);
+    const client: Commands = { ...base.client, environmentSetProxy: setProxy };
+
+    render(<App client={client} />);
+    fireEvent.click(await screen.findByRole('tab', { name: 'Environments' }));
+
+    const section = await screen.findByTestId('environment-proxy');
+    // 环境层有「未配置」这一档（顺位到全局）；全局层没有——两个层级不在同一屏上
+    fireEvent.click(within(section).getByTestId('environment-proxy-mode'));
+    expect(screen.getByRole('option', { name: '未配置' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('option', { name: '手工填写' }));
+
+    fireEvent.change(screen.getByLabelText('环境代理地址'), {
+      target: { value: 'http://127.0.0.1:8080' },
+    });
+
+    // 改动停止后落到该环境上（写入经具名命令，凭据由后端加密）
+    await waitFor(
+      () =>
+        expect(setProxy).toHaveBeenCalledWith(
+          'e1',
+          expect.objectContaining({ mode: 'manual', url: 'http://127.0.0.1:8080' }),
+        ),
+      { timeout: 3_000 },
+    );
+  }, 30_000);
+
   it('未解析变量在发出请求之前被拦下，且请求不发出（spec: 未解析变量提示）', async () => {
     const { client, sendRequest } = harness({
       previewResult: preview({
@@ -749,6 +780,67 @@ describe('前端数据流骨架', () => {
     fireEvent.click(screen.getByText('发送'));
 
     await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1));
+  });
+
+  it('发送中该位置变为取消：取消不弹错误、不动响应区，且能接着再发（spec: 地址栏）', async () => {
+    const base = harness();
+    let calls = 0;
+    let failPending: ((reason: unknown) => void) | null = null;
+
+    const client: Commands = {
+      ...base.client,
+      // 真实后端收到取消后，会让在飞的那次发送以 `cancelled` 结束；这里照同一条因果，
+      // 否则本次发送永远不会收尾（界面也就一直停在「发送中」）
+      cancelSend: vi.fn(async () => {
+        failPending?.({ code: 'cancelled', message: '请求已被取消' });
+        return 1;
+      }),
+      // 第二、三次挂住不返回，测试才有机会点「取消」；其余照常返回
+      sendRequest: () => {
+        calls += 1;
+        if (calls === 2 || calls === 3) {
+          return new Promise<ResponsePayload>((_resolve, reject) => {
+            failPending = reject;
+          });
+        }
+        return Promise.resolve(response({ id: `resp-${calls}` }));
+      },
+    };
+    const cancelSend = client.cancelSend as ReturnType<typeof vi.fn>;
+
+    render(<App client={client} />);
+    await openRequest();
+
+    // 先拿到一次响应，它就是「上一次响应」
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(screen.getByTestId('status')).toBeTruthy());
+
+    // 第二次：该位置变成取消
+    fireEvent.click(screen.getByText('发送'));
+    const cancel = await screen.findByTestId('cancel-send');
+    expect(screen.queryByText('发送'), '发送中不该还能触发发送').toBeNull();
+
+    fireEvent.click(cancel);
+
+    await waitFor(() => expect(cancelSend).toHaveBeenCalledTimes(1));
+    expect(cancelSend.mock.calls[0]?.[0]).toMatch(/^attempt-/);
+
+    // 取消不是失败：不弹错误条；响应区里上一次那份原样留着
+    await waitFor(() => expect(screen.getByText('发送')).toBeTruthy());
+    expect(screen.queryByTestId('app-error')).toBeNull();
+    expect(screen.getByTestId('status')).toBeTruthy();
+
+    // 收尾：取消出口已清理，能接着再发一次（卡住的话这里点不动）
+    fireEvent.click(screen.getByText('发送'));
+    const cancelAgain = await screen.findByTestId('cancel-send');
+    fireEvent.click(cancelAgain);
+    await waitFor(() => expect(cancelSend).toHaveBeenCalledTimes(2));
+
+    // 第二次取消之后同样能接着再发：取消出口不随次数累积
+    await waitFor(() => expect(screen.getByText('发送')).toBeTruthy());
+    expect(screen.queryByTestId('app-error')).toBeNull();
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(calls).toBe(4));
   });
 
   it('拦截早于脚本门禁：未解析变量时门禁不会先出现（spec: 未解析变量提示）', async () => {
@@ -1227,6 +1319,72 @@ describe('前端数据流骨架', () => {
     await waitFor(() =>
       expect(settingsSet).toHaveBeenCalledWith('script_send_request', 'policy', ''),
     );
+  });
+
+  /** spec: ui-layout「设置模态的请求配置」。 */
+  it('设置面板能配置请求类偏好，并立即落库', async () => {
+    const { client, settingsSet } = harness();
+    render(<App client={client} />);
+
+    fireEvent.click(await screen.findByText('设置'));
+    await screen.findByTestId('settings-panel');
+
+    // 超时是一个非负数，0 表示不限制：只有这一项有该提示，且不多写解释
+    expect(screen.getAllByText('0 代表不限制')).toHaveLength(1);
+
+    fireEvent.change(screen.getByTestId('global-timeout'), { target: { value: '0' } });
+    await waitFor(() =>
+      expect(settingsSet).toHaveBeenCalledWith('global', 'request_timeout_ms', '0'),
+    );
+
+    fireEvent.change(screen.getByTestId('global-timeout'), { target: { value: '60000' } });
+    await waitFor(() =>
+      expect(settingsSet).toHaveBeenCalledWith('global', 'request_timeout_ms', '60000'),
+    );
+
+    // 负数不被接受：取值保持上一步的 60000
+    fireEvent.change(screen.getByTestId('global-timeout'), { target: { value: '-5' } });
+    expect((screen.getByTestId('global-timeout') as HTMLInputElement).value).toBe('60000');
+
+    // 格式化阈值：超过当前上限的档位不可选（缺省上限 50 MB）
+    fireEvent.click(screen.getByTestId('pretty-threshold'));
+    expect(screen.getByRole('option', { name: '100 MB' }).getAttribute('aria-disabled')).toBe(
+      'true',
+    );
+
+    fireEvent.click(screen.getByRole('option', { name: '2 MB' }));
+    await waitFor(() =>
+      expect(settingsSet).toHaveBeenCalledWith(
+        'global',
+        'pretty_print_threshold_bytes',
+        String(2 * 1024 * 1024),
+      ),
+    );
+
+    // 体积上限没有「不限制」：0 与负数都不进状态
+    fireEvent.change(screen.getByTestId('size-limit'), { target: { value: '0' } });
+    fireEvent.change(screen.getByTestId('size-limit'), { target: { value: '-5' } });
+    expect(settingsSet).not.toHaveBeenCalledWith('global', 'response_size_limit_bytes', '0');
+    expect((screen.getByTestId('size-limit') as HTMLInputElement).value).toBe('50');
+  });
+
+  /** spec: ui-layout「设置模态的代理配置」——全局是最低层级，没有可顺位的目标。 */
+  it('设置面板的代理节只提供三种模式，且凭据不回显明文', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+
+    fireEvent.click(await screen.findByText('设置'));
+    await screen.findByTestId('settings-panel');
+
+    fireEvent.click(screen.getByTestId('global-proxy-mode'));
+    expect(screen.getByRole('option', { name: '不使用代理' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: '跟随系统' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: '手工填写' })).toBeTruthy();
+    expect(screen.queryByRole('option', { name: '未配置' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('option', { name: '手工填写' }));
+    expect(screen.getByLabelText('代理地址')).toBeTruthy();
+    expect(screen.getByLabelText('代理认证密码')).toBeTruthy();
   });
 
   it('脚本未获准时发送被挡下，请求与脚本都不执行（9.3）', async () => {

@@ -188,6 +188,13 @@ export function createCommands(call: Invoker) {
       call<RequestPreview>('variables_preview', { input }),
     sendRequest: (input: SendRequestInput) =>
       call<ResponsePayload>('send_request', { input }),
+    /**
+     * 取消一次发送：撤销该会话下的全部在飞请求（spec: http-engine「请求取消」）。
+     *
+     * 返回撤销的数量只作诊断——**本次发送的结果由被撤销的请求自己表达**（它以 `cancelled`
+     * 结束），据此判定「已取消」是抢答，会输给「响应其实已经到了」那一面。
+     */
+    cancelSend: (attemptId: string) => call<number>('cancel_send', { attemptId }),
     responseBodySpan: (responseId: string, offset: number, length: number) =>
       call<ResponseSpan>('response_body_span', { responseId, offset, length }),
 

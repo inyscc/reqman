@@ -128,6 +128,7 @@ pub fn run() {
             commands::folder_set_script,
             commands::variables_preview,
             commands::send_request,
+            commands::cancel_send,
             commands::response_body_span,
             commands::pick_upload_file,
             commands::backup_export,

@@ -1,7 +1,7 @@
 //! 已保存请求的持久化（spec: 请求保存与恢复）。
 
 use super::model::{AuthConfig, Id, RequestBody, RequestSettings, SavedRequest};
-use super::{from_json, new_id, now, require_name, to_json, Db};
+use super::{from_json, new_id, now, proxy_credentials, require_name, to_json, Db};
 use crate::error::{AppError, AppResult};
 use rusqlite::{params, Connection, Row};
 
@@ -185,7 +185,8 @@ pub(crate) fn insert_request(conn: &Connection, request: &SavedRequest) -> AppRe
             to_json(&request.headers)?,
             to_json(&request.body)?,
             to_json(&request.auth)?,
-            to_json(&request.settings)?,
+            // 落库形态与对外形态不同：代理凭据必须以密文落库
+            proxy_credentials::storage_settings_json(&request.settings)?,
             request.pre_request_script,
             request.test_script,
             request.sort_order,
@@ -221,7 +222,8 @@ pub fn save_request(db: &Db, request: &SavedRequest) -> AppResult<SavedRequest> 
                 to_json(&to_save.headers)?,
                 to_json(&to_save.body)?,
                 to_json(&to_save.auth)?,
-                to_json(&to_save.settings)?,
+                // 落库形态与对外形态不同：代理凭据必须以密文落库
+                proxy_credentials::storage_settings_json(&to_save.settings)?,
                 to_save.pre_request_script,
                 to_save.test_script,
                 to_save.folder_id,
@@ -359,6 +361,7 @@ mod tests {
     use super::*;
     use crate::storage::model::{
         ApiKeyLocation, BodyKind, KeyValue, RawLanguage, RequestBody, ResponseFormatOverride,
+        TimeoutSetting,
     };
     use crate::error::ErrorCode;
     use crate::storage::{variables, workspace, Db};
@@ -403,7 +406,7 @@ mod tests {
             request.body = RequestBody::raw("{\"hello\":\"world\"}", RawLanguage::Json);
             request.auth = AuthConfig::api_key("X-Api-Key", "{{apiKey}}", ApiKeyLocation::Header);
             request.settings = RequestSettings {
-                timeout_ms: Some(1500),
+                timeout: TimeoutSetting::Custom { ms: 1500 },
                 verify_tls: false,
                 // 响应格式的请求级覆盖也随请求往返（spec: ui-layout「请求级响应格式覆盖」）
                 response_format: ResponseFormatOverride::Json,
@@ -439,7 +442,7 @@ mod tests {
             restored.auth.api_key.as_ref().unwrap().location,
             ApiKeyLocation::Header
         );
-        assert_eq!(restored.settings.timeout_ms, Some(1500));
+        assert_eq!(restored.settings.timeout, TimeoutSetting::Custom { ms: 1500 });
         assert!(!restored.settings.verify_tls);
         assert_eq!(
             restored.settings.response_format,

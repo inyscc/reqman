@@ -106,6 +106,15 @@ pub enum Reply {
     Sized {
         bytes: usize,
     },
+    /// 声明一个比实际发送更大的正文，并在发完后**保持连接**一段时间：
+    /// 客户端会停在「等剩下的字节」上。用于验证读正文途中被取消时的收尾
+    /// （落盘的副本不该残留）。`hold_millis` 到期后连接关闭，客户端会转而收到
+    /// 一个 IO 错误——所以示例里的取消要早于它。
+    Truncated {
+        declared: usize,
+        sent: Vec<u8>,
+        hold_millis: u64,
+    },
     /// 带自定义响应头的应答（Set-Cookie、Location 等），供 Cookie 会话与重定向验证。
     WithHeaders {
         status: u16,
@@ -300,27 +309,45 @@ async fn handle_connection(
         });
     }
 
-    let (status, content_type, body, extra_headers) = match reply {
+    let (status, content_type, body, extra_headers, truncated) = match reply {
         Reply::Fixed {
             status,
             content_type,
             body,
-        } => (status, Some(content_type), body, Vec::new()),
+        } => (status, Some(content_type), body, Vec::new(), None),
         Reply::Delay { millis, body } => {
             tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
-            (200, Some("application/json".to_string()), body, Vec::new())
+            (
+                200,
+                Some("application/json".to_string()),
+                body,
+                Vec::new(),
+                None,
+            )
         }
         Reply::Sized { bytes } => (
             200,
             Some("application/octet-stream".to_string()),
             vec![b'x'; bytes],
             Vec::new(),
+            None,
+        ),
+        Reply::Truncated {
+            declared,
+            sent,
+            hold_millis,
+        } => (
+            200,
+            Some("application/octet-stream".to_string()),
+            sent,
+            Vec::new(),
+            Some((declared, hold_millis)),
         ),
         Reply::WithHeaders {
             status,
             headers,
             body,
-        } => (status, None, body, headers),
+        } => (status, None, body, headers, None),
     };
 
     let reason = match status {
@@ -337,7 +364,7 @@ async fn handle_connection(
         "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         status,
         reason,
-        body.len()
+        truncated.map(|(declared, _)| declared).unwrap_or(body.len())
     );
     if let Some(content_type) = content_type {
         response.push_str(&format!("Content-Type: {}\r\n", content_type));
@@ -350,6 +377,11 @@ async fn handle_connection(
     write_half.write_all(response.as_bytes()).await?;
     write_half.write_all(&body).await?;
     write_half.flush().await?;
+
+    // 声明了更长的正文时保持连接：让客户端停在「等剩下的字节」上
+    if let Some((_, hold_millis)) = truncated {
+        tokio::time::sleep(std::time::Duration::from_millis(hold_millis)).await;
+    }
     Ok(())
 }
 

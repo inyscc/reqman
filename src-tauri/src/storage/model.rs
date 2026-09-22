@@ -5,7 +5,10 @@
 //! 见 design.md Context 中的说明。
 
 use crate::secrets::StoredValue;
+use serde::de::MapAccess;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 pub type Id = String;
 
@@ -402,7 +405,9 @@ impl AuthConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
-    /// 不使用代理。
+    /// 未配置：顺位到更低层级（请求 → 环境 → 全局）。
+    Inherit,
+    /// 不使用代理：在该层停下，直接发出请求。
     None,
     /// 跟随操作系统代理设置。
     System,
@@ -410,24 +415,57 @@ pub enum ProxyMode {
     Manual,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ProxyConfig {
     pub mode: ProxyMode,
     /// 形如 `http://host:port` 或 `socks5://host:port`。
     pub url: Option<String>,
     pub username: Option<String>,
+    /// 提交的明文凭据。只在「写入这一跳」存在：`Some("")` 表示清除，缺字段表示不改写既有凭据。
+    /// 它不落库、也不回传界面（见下面的 `Serialize` 实现）。
+    #[serde(default)]
     pub password: Option<String>,
+    /// 已保存凭据的 AEAD 密文（`base64(nonce || ciphertext)`）。明文只在内存里出现，
+    /// 解密只发生在发送路径。
+    #[serde(default)]
+    pub password_enc: Option<String>,
+    /// 该密文当前是否可解密。与变量的可读标记同一取向：让界面能说出「有值但读不出来」，
+    /// 而不是把它显示成「没设置」。
+    #[serde(default)]
+    pub password_readable: bool,
     /// 不走代理的主机白名单。
     pub no_proxy: Vec<String>,
+}
+
+/// 对外（界面）的形状里**没有凭据本身**，只有两个事实：是否已设置、是否可读。
+///
+/// 手写而不是派生：这样新增字段时必须显式决定它要不要出现在界面上，凭据也就没有
+/// 「不小心被序列化出去」这条路径（spec: storage-foundation「敏感值不以明文落盘」）。
+impl Serialize for ProxyConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("ProxyConfig", 6)?;
+        state.serialize_field("mode", &self.mode)?;
+        state.serialize_field("url", &self.url)?;
+        state.serialize_field("username", &self.username)?;
+        state.serialize_field("has_password", &self.password_enc.is_some())?;
+        state.serialize_field("password_readable", &self.password_readable)?;
+        state.serialize_field("no_proxy", &self.no_proxy)?;
+        state.end()
+    }
 }
 
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
-            mode: ProxyMode::None,
+            mode: ProxyMode::Inherit,
             url: None,
             username: None,
             password: None,
+            password_enc: None,
+            password_readable: false,
             no_proxy: Vec::new(),
         }
     }
@@ -449,12 +487,29 @@ impl ProxyConfig {
         }
     }
 
-    /// 该配置是否实际要求挂代理。
+    /// 显式的「不使用代理」。
+    pub fn direct() -> Self {
+        Self {
+            mode: ProxyMode::None,
+            ..Self::default()
+        }
+    }
+
+    /// 该配置是否在本层「生效」——生效即意味着停止向更低层级顺位。
+    ///
+    /// `Inherit` 不生效，`None`（不使用代理）生效：后者要求的是**直连**这个结果，
+    /// 不是一个等待继承的空位。把这两者混为一谈，用户就无法让某个请求绕过全局代理。
+    /// 手工填写但地址为空视为未配置——半填的状态没有可执行的意图。
     pub fn is_effective(&self) -> bool {
         match self.mode {
-            ProxyMode::None => false,
+            ProxyMode::Inherit => false,
+            ProxyMode::None => true,
             ProxyMode::System => true,
-            ProxyMode::Manual => self.url.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false),
+            ProxyMode::Manual => self
+                .url
+                .as_deref()
+                .map(|url| !url.trim().is_empty())
+                .unwrap_or(false),
         }
     }
 
@@ -505,10 +560,101 @@ impl Default for ResponseFormatOverride {
     }
 }
 
+/// 超时取值（spec: http-engine「请求级网络设置」）。
+///
+/// 三态取代了原先的 `Option<u64>`：一个 `None` 同时承担着「跟随全局」与「没填」，
+/// 而「不限制」落在它之外——数字 0 不能用来表示它（本仓库既有约定把非正数当作
+/// 无效值并回落缺省），所以「不限制」必须是一个显式取值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum TimeoutSetting {
+    /// 跟随应用级超时（缺省）。
+    Inherit,
+    /// 不设超时。
+    Unlimited,
+    /// 本次使用该毫秒数。
+    Custom { ms: u64 },
+}
+
+impl Default for TimeoutSetting {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
+/// 与 [`TimeoutSetting`] 同形的可派生形态，只为反序列化复用，不对外暴露。
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum TaggedTimeout {
+    Inherit,
+    Unlimited,
+    Custom { ms: u64 },
+}
+
+impl From<TaggedTimeout> for TimeoutSetting {
+    fn from(value: TaggedTimeout) -> Self {
+        match value {
+            TaggedTimeout::Inherit => Self::Inherit,
+            TaggedTimeout::Unlimited => Self::Unlimited,
+            TaggedTimeout::Custom { ms } => Self::Custom { ms },
+        }
+    }
+}
+
+/// 读入时兼容老形态：`timeout_ms` 曾经是裸毫秒数或 `null`（见 `RequestSettings::timeout`
+/// 上的别名）。写出一律是新形态，因此老行在第一次保存后即完成升级。
+///
+/// 手写 `Deserialize` 而不是保留一个只读的老字段：升级发生在反序列化这个边界上，
+/// 不需要每个读取点都记得调用一次规范化（漏掉任何一处的代价是用户无感地换了超时值）。
+impl<'de> Deserialize<'de> for TimeoutSetting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TimeoutVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TimeoutVisitor {
+            type Value = TimeoutSetting;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(
+                    "超时取值：{\"mode\":\"inherit\"|\"unlimited\"|\"custom\",\"ms\":毫秒}，或老的裸毫秒数",
+                )
+            }
+
+            /// 老的 `null`（以及显式空值）等于「跟随全局」。
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(TimeoutSetting::Inherit)
+            }
+
+            /// 老的裸毫秒数。
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(TimeoutSetting::Custom { ms: value })
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                u64::try_from(value)
+                    .map(|ms| TimeoutSetting::Custom { ms })
+                    .map_err(|_| E::custom("超时的毫秒数不能为负"))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                TaggedTimeout::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(TimeoutSetting::from)
+            }
+        }
+
+        deserializer.deserialize_any(TimeoutVisitor)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RequestSettings {
-    pub timeout_ms: Option<u64>,
+    /// 超时取值（spec: http-engine「请求级网络设置」）。别名让老行里的 `timeout_ms`
+    /// 仍被读入，并由 [`TimeoutSetting`] 的反序列化升级为三态。
+    #[serde(alias = "timeout_ms")]
+    pub timeout: TimeoutSetting,
     pub follow_redirects: bool,
     pub verify_tls: bool,
     pub http_version: HttpVersion,
@@ -522,7 +668,7 @@ pub struct RequestSettings {
 impl Default for RequestSettings {
     fn default() -> Self {
         Self {
-            timeout_ms: None,
+            timeout: TimeoutSetting::Inherit,
             follow_redirects: true,
             verify_tls: true,
             http_version: HttpVersion::Auto,
@@ -589,6 +735,8 @@ impl Variable {
 pub mod setting_keys {
     /// 全局代理配置（`ProxyConfig` 的 JSON）。
     pub const GLOBAL_PROXY: &str = "global_proxy";
+    /// 应用级超时（毫秒；`unlimited` 表示不设超时）。
+    pub const REQUEST_TIMEOUT: &str = "request_timeout_ms";
     /// 响应体积硬上限（字节）。
     pub const RESPONSE_SIZE_LIMIT: &str = "response_size_limit_bytes";
     /// 超过该体积不再提供结构化解析视图（字节）。
@@ -629,6 +777,34 @@ mod tests {
         assert_eq!(Scope::parse("nope"), None);
     }
 
+    /// 老行里的 `timeout_ms`（裸毫秒数或 `null`）在读取时升级为三态；写出一律是新形态，
+    /// 因此老行在第一次保存后即完成升级（spec: http-engine「请求级网络设置」）。
+    #[test]
+    fn legacy_timeout_shapes_upgrade_to_the_three_state_setting() {
+        let bare: RequestSettings =
+            serde_json::from_str(r#"{"timeout_ms":1500}"#).expect("老的裸毫秒数应被读入");
+        assert_eq!(bare.timeout, TimeoutSetting::Custom { ms: 1500 });
+
+        let null: RequestSettings =
+            serde_json::from_str(r#"{"timeout_ms":null}"#).expect("老的 null 应被读入");
+        assert_eq!(null.timeout, TimeoutSetting::Inherit, "null 即「跟随全局」");
+
+        let missing: RequestSettings = serde_json::from_str("{}").expect("缺字段应取缺省");
+        assert_eq!(missing.timeout, TimeoutSetting::Inherit);
+
+        let encoded = serde_json::to_value(&bare).expect("可序列化");
+        assert_eq!(encoded["timeout"]["mode"], "custom");
+        assert_eq!(encoded["timeout"]["ms"], 1500);
+        assert!(
+            encoded.get("timeout_ms").is_none(),
+            "老字段不再写出：{encoded}"
+        );
+
+        let unlimited: RequestSettings =
+            serde_json::from_str(r#"{"timeout":{"mode":"unlimited"}}"#).expect("新形态可读入");
+        assert_eq!(unlimited.timeout, TimeoutSetting::Unlimited);
+    }
+
     #[test]
     fn tls_verification_is_on_by_default() {
         let settings = RequestSettings::default();
@@ -659,9 +835,17 @@ mod tests {
         assert!(wildcard.bypasses("anything.test"));
     }
 
+    /// 「未配置」不生效（顺位到更低层级），「不使用代理」生效（它是直连这一决定本身）。
     #[test]
     fn proxy_effectiveness_follows_mode() {
-        assert!(!ProxyConfig::default().is_effective());
+        assert!(
+            !ProxyConfig::default().is_effective(),
+            "默认构造的是「未配置」"
+        );
+        assert!(
+            ProxyConfig::direct().is_effective(),
+            "「不使用代理」必须生效，否则它会被顺位跳过"
+        );
         assert!(ProxyConfig::system().is_effective());
         assert!(ProxyConfig::manual("http://127.0.0.1:8080").is_effective());
         assert!(!ProxyConfig::manual("   ").is_effective());

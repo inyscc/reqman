@@ -15,7 +15,9 @@ use crate::storage::model::{
     Workspace,
 };
 use crate::storage::workspace::{CollectionTree, NodeKind};
-use crate::storage::{backup, cookies as storage_cookies, requests, variables, workspace};
+use crate::storage::{
+    backup, cookies as storage_cookies, proxy_credentials, requests, variables, workspace,
+};
 use crate::variables::RequestPreview;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -230,7 +232,19 @@ pub fn create_request(state: &AppState, args: CreateRequestArgs) -> AppResult<Sa
 }
 
 pub fn save_request(state: &AppState, request: SavedRequest) -> AppResult<SavedRequest> {
-    requests::save_request(&state.db, &request)
+    // 请求级代理的凭据同样在进入存储之前加密；未保存的编辑态带着明文，落库的只能是密文。
+    let existing = requests::get_request(&state.db, &request.id)
+        .ok()
+        .and_then(|old| old.settings.proxy);
+
+    let mut sealed = request;
+    sealed.settings.proxy = proxy_credentials::seal(
+        sealed.settings.proxy.clone(),
+        existing.as_ref(),
+        state.key_provider.as_ref(),
+    )?;
+
+    requests::save_request(&state.db, &sealed)
 }
 
 pub fn duplicate_request(
@@ -303,7 +317,12 @@ pub fn set_environment_proxy(
     environment_id: &str,
     proxy: Option<ProxyConfig>,
 ) -> AppResult<Environment> {
-    variables::set_environment_proxy(&state.db, environment_id, proxy)
+    // 凭据在进入存储之前加密（见 `proxy_credentials`）：命令层正是外部输入跨入
+    // 可信存储的那一跳，「不改写凭据」时从该环境既有的值取回密文。
+    let existing = variables::get_environment(&state.db, environment_id)?.proxy;
+    let sealed = proxy_credentials::seal(proxy, existing.as_ref(), state.key_provider.as_ref())?;
+
+    variables::set_environment_proxy(&state.db, environment_id, sealed)
 }
 
 /// 把 secret 变量的取值换成掩码后再交给前端。
@@ -431,7 +450,12 @@ pub fn get_global_proxy(state: &AppState) -> AppResult<Option<ProxyConfig>> {
 }
 
 pub fn set_global_proxy(state: &AppState, proxy: Option<ProxyConfig>) -> AppResult<()> {
-    variables::set_global_proxy(&state.db, proxy)
+    // 凭据在进入存储之前加密（见 `proxy_credentials`）；「不改写凭据」时从既有值
+    // 取回密文——把这个分支实现成「清除」，用户每改一次模式就会静默丢掉密码。
+    let existing = variables::global_proxy(&state.db)?;
+    let sealed = proxy_credentials::seal(proxy, existing.as_ref(), state.key_provider.as_ref())?;
+
+    variables::set_global_proxy(&state.db, sealed)
 }
 
 pub fn preview_request(
@@ -456,9 +480,18 @@ pub async fn perform_send_request(
         &state.uploads,
         &state.responses,
         &state.cookies,
+        &state.sends,
         &input,
     )
     .await
+}
+
+/// 取消一次发送：撤销该会话下的全部在飞请求（spec: http-engine「请求取消」）。
+///
+/// 返回的数量只作诊断——**本次发送的结果由被撤销的请求自己表达**（它以取消错误结束），
+/// 前端据此判定「已取消」是抢答，会输给「响应其实已经到了」那一面。
+pub fn cancel_in_flight(state: &AppState, attempt_id: &str) -> usize {
+    state.sends.cancel(attempt_id)
 }
 
 pub fn read_response_span(
@@ -1124,6 +1157,11 @@ pub async fn send_request(
 }
 
 #[tauri::command]
+pub fn cancel_send(state: State<'_, AppState>, attempt_id: String) -> usize {
+    cancel_in_flight(&state, &attempt_id)
+}
+
+#[tauri::command]
 pub fn response_body_span(
     state: State<'_, AppState>,
     response_id: String,
@@ -1272,6 +1310,7 @@ mod tests {
             uploads: Arc::new(UploadRegistry::new()),
             responses: Arc::new(ResponseStore::new(4, dir.join("responses"))),
             cookies: Arc::new(crate::net::cookies::CookieJar::new()),
+            sends: Arc::new(crate::net::cancel::SendRegistry::new()),
         };
         (dir, app)
     }
@@ -1345,6 +1384,7 @@ mod tests {
                 environment_id: None,
                 local: Default::default(),
                 data: Default::default(),
+                attempt_id: None,
             },
         )
         .expect("生成 curl");
@@ -1416,6 +1456,7 @@ mod tests {
             uploads: Arc::new(UploadRegistry::new()),
             responses: Arc::new(ResponseStore::new(2, dir.join("responses"))),
             cookies: Arc::new(crate::net::cookies::CookieJar::new()),
+            sends: Arc::new(crate::net::cancel::SendRegistry::new()),
         };
         let workspace = list_workspaces(&app).unwrap().remove(0);
 
@@ -1485,6 +1526,118 @@ mod tests {
         // 内联载荷也能预览
         let preview = preview_request(&app, SendRequestInput::inline(request.clone())).expect("预览");
         assert_eq!(preview.url, "http://api.test/x");
+    }
+
+    /// 代理凭据的对外形状只有「已设置 / 可读」两个事实，没有凭据本身。
+    /// 三个层级走同一条形态（spec: storage-foundation「敏感值不以明文落盘」）。
+    #[test]
+    fn proxy_credentials_are_never_handed_back_in_plaintext() {
+        let (_dir, app) = state("cmd-proxy-view");
+        let plaintext = "proxy-pass-8f3a1c";
+
+        let mut proxy = ProxyConfig::manual("http://127.0.0.1:8080");
+        proxy.username = Some("u".into());
+        proxy.password = Some(plaintext.into());
+
+        // 全局层
+        set_global_proxy(&app, Some(proxy.clone())).unwrap();
+        let view = get_global_proxy(&app).unwrap().unwrap();
+        assert!(view.password_enc.is_some(), "落库形态里应有密文");
+        assert!(view.password_readable, "刚写入的凭据应可读");
+        assert_eq!(view.password, None, "落库形态里不保留明文");
+
+        let encoded = serde_json::to_value(&view).unwrap();
+        assert_eq!(encoded["has_password"], true);
+        assert!(encoded.get("password").is_none(), "对外形状不含明文：{encoded}");
+        assert!(
+            encoded.get("password_enc").is_none(),
+            "对外形状也不给密文：{encoded}"
+        );
+
+        let workspace_id = workspace::list(&app.db).unwrap().remove(0).id;
+
+        // 环境层
+        let env = variables::create_environment(&app.db, &workspace_id, "开发").unwrap();
+        set_environment_proxy(&app, &env.id, Some(proxy.clone())).unwrap();
+        let env_proxy = variables::get_environment(&app.db, &env.id)
+            .unwrap()
+            .proxy
+            .expect("环境代理应已保存");
+        assert!(env_proxy.password_enc.is_some());
+        assert!(env_proxy.password_readable);
+        assert!(
+            !serde_json::to_value(&env_proxy).unwrap().to_string().contains(plaintext),
+            "环境读取不得回传明文"
+        );
+
+        // 请求层
+        let collection = workspace::create_collection(&app.db, &workspace_id, "集合").unwrap();
+        let mut request = requests::create_request(
+            &app.db,
+            &collection.id,
+            None,
+            "R",
+            "GET",
+            "http://api.test",
+        )
+        .unwrap();
+        request.settings.proxy = Some(proxy);
+        let saved = save_request(&app, request).unwrap();
+
+        let stored = requests::get_request(&app.db, &saved.id)
+            .unwrap()
+            .settings
+            .proxy
+            .expect("代理应随请求保存");
+        assert!(stored.password_enc.is_some());
+        assert!(stored.password_readable);
+        assert!(
+            !serde_json::to_value(&stored).unwrap().to_string().contains(plaintext),
+            "请求保存与读取都不得携带明文"
+        );
+    }
+
+    /// 写入侧的三态：不提交凭据字段时保留既有的密文，提交空串才是清除。
+    /// 把前者实现成后者，用户每改一次代理地址就会静默丢掉密码。
+    #[test]
+    fn saving_a_proxy_without_a_password_field_keeps_the_saved_credential() {
+        let (_dir, app) = state("cmd-proxy-credential-roundtrip");
+
+        let mut proxy = ProxyConfig::manual("http://127.0.0.1:8080");
+        proxy.password = Some("proxy-pass-8f3a1c".into());
+        set_global_proxy(&app, Some(proxy.clone())).unwrap();
+        let saved = get_global_proxy(&app)
+            .unwrap()
+            .unwrap()
+            .password_enc
+            .expect("应有密文");
+
+        // 只改地址，不带 password 字段
+        let mut edited = ProxyConfig::manual("http://127.0.0.1:9090");
+        edited.username = proxy.username.clone();
+        set_global_proxy(&app, Some(edited.clone())).unwrap();
+
+        let after = get_global_proxy(&app).unwrap().unwrap();
+        assert_eq!(
+            after.url.as_deref(),
+            Some("http://127.0.0.1:9090"),
+            "地址应已更新"
+        );
+        assert_eq!(
+            after.password_enc.as_deref(),
+            Some(saved.as_str()),
+            "既有密文应被保留"
+        );
+        assert!(after.password_readable, "保留的凭据仍应可读");
+
+        // 显式清除
+        let mut cleared = edited;
+        cleared.password = Some(String::new());
+        set_global_proxy(&app, Some(cleared)).unwrap();
+
+        let after = get_global_proxy(&app).unwrap().unwrap();
+        assert_eq!(after.password_enc, None, "清除后不应再有密文");
+        assert!(!after.password_readable);
     }
 
     #[test]

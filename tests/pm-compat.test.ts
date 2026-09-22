@@ -62,6 +62,7 @@ function sentResponse(): ResponsePayload {
     body_base64: null,
     pretty_available: true,
     pretty_print_threshold: 1024 * 1024,
+    size_limit_bytes: 50 * 1024 * 1024,
     insecure_warning: false,
     final_url: 'https://api.test/ping',
     via_proxy: false,

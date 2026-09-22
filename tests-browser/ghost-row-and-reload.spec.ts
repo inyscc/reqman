@@ -41,7 +41,7 @@ window.__TAURI_INTERNALS__ = {
       body: { kind: 'none', raw: null, raw_language: null, form: [], urlencoded: [], binary: null },
       auth: { kind: 'inherit', basic: null, bearer: null, api_key: null },
       settings: {
-        timeout_ms: null, follow_redirects: true, verify_tls: true,
+        timeout: { mode: 'inherit' }, follow_redirects: true, verify_tls: true,
         http_version: 'auto', encoding: null, proxy: null
       },
       pre_request_script: null, test_script: null, sort_order: 0

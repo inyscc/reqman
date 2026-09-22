@@ -21,7 +21,8 @@ export type BodyKind = 'none' | 'raw' | 'form_data' | 'url_encoded' | 'binary';
 export type RawLanguage = 'json' | 'xml' | 'html' | 'text' | 'javascript';
 export type AuthKind = 'none' | 'inherit' | 'basic' | 'bearer' | 'api_key';
 export type ApiKeyLocation = 'header' | 'query';
-export type ProxyMode = 'none' | 'system' | 'manual';
+/** 代理模式：`inherit` = 未配置（顺位到更低层级），`none` = 不使用代理（直连）。 */
+export type ProxyMode = 'inherit' | 'none' | 'system' | 'manual';
 export type HttpVersion = 'auto' | 'http1' | 'http2';
 export type Scope = 'local' | 'data' | 'environment' | 'collection' | 'global';
 
@@ -55,12 +56,34 @@ export interface ProxyConfig {
   mode: ProxyMode;
   url?: string | null;
   username?: string | null;
+  /**
+   * 已保存凭据这一事实。后端只回传它，不回传凭据本身
+   * （spec: storage-foundation「敏感值不以明文落盘」）。
+   */
+  has_password?: boolean;
+  /** 凭据当前是否可解密；不可读取时界面要能说出来，而不是显示成「未设置」。 */
+  password_readable?: boolean;
+  /**
+   * **提交用**：缺字段 = 不改写既有凭据；空串 = 清除；非空 = 写入新值。
+   * 后端据此决定是保留旧密文还是换新（spec: 三级代理的写入侧三态）。
+   */
   password?: string | null;
   no_proxy: string[];
 }
 
+/**
+ * 超时取值（spec: http-engine「请求级网络设置」）。
+ *
+ * 三态取代了原先的单值：数字 0 不承担「不限制」——本仓库既有约定把非正数当作无效值，
+ * 让同一个数字在相邻设置项里含义相反会更难懂。
+ */
+export type TimeoutSetting =
+  | { mode: 'inherit' }
+  | { mode: 'unlimited' }
+  | { mode: 'custom'; ms: number };
+
 export interface RequestSettings {
-  timeout_ms?: number | null;
+  timeout: TimeoutSetting;
   follow_redirects: boolean;
   verify_tls: boolean;
   http_version: HttpVersion;
@@ -218,6 +241,8 @@ export interface ResponsePayload {
   body_base64?: string | null;
   pretty_available: boolean;
   pretty_print_threshold: number;
+  /** 本次实际生效的正文上限（字节）；上限可配，界面不能拿缺省值当常数。 */
+  size_limit_bytes: number;
   insecure_warning: boolean;
   final_url: string;
   via_proxy: boolean;
@@ -304,6 +329,11 @@ export interface SendRequestInput {
   environment_id?: string | null;
   local?: Record<string, string>;
   data?: Record<string, string>;
+  /**
+   * 本次发送的会话标识（spec: http-engine「请求取消」）。
+   * 主请求与脚本内 `pm.sendRequest` 发出的请求共用它，取消按它撤销全部在飞请求。
+   */
+  attempt_id?: string | null;
 }
 
 export function emptyBody(): RequestBody {
@@ -316,7 +346,7 @@ export function emptyAuth(): AuthConfig {
 
 export function defaultSettings(): RequestSettings {
   return {
-    timeout_ms: null,
+    timeout: { mode: 'inherit' },
     follow_redirects: true,
     verify_tls: true,
     http_version: 'auto',

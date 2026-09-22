@@ -41,6 +41,8 @@ function harness(
   initialTab: Tab = 'params',
   curlResult?: CurlCommand | 'reject',
   onPickFile?: () => Promise<{ handle: string; name: string; size_bytes: number } | null>,
+  /** 请求带的发送态与回调：地址栏两态相关的断言从这里注入。 */
+  band: { busy?: boolean; sending?: boolean; onSend?: () => void; onCancel?: () => void } = {},
 ) {
   const seen: SavedRequest[] = [];
   let curlCalls = 0;
@@ -72,9 +74,11 @@ function harness(
       <>
         <RequestBand
           draft={value}
-          busy={false}
+          busy={band.busy ?? false}
+          sending={band.sending ?? false}
           onChange={change}
-          onSend={() => {}}
+          onSend={band.onSend ?? (() => {})}
+          onCancel={band.onCancel ?? (() => {})}
           collectionName="我的集合"
           dirty={false}
         />
@@ -593,6 +597,178 @@ describe('描述列（spec: 键值表的列与描述列）', () => {
     fireEvent.change(screen.getByLabelText('新增行的描述'), { target: { value: '只写说明' } });
 
     expect(latest().url).toBe('https://api.test/users');
+  });
+});
+
+describe('Settings 标签的三态超时（spec: ui-layout「请求级超时覆盖」）', () => {
+  it('缺省是「跟随全局」，且没有数值输入项', () => {
+    harness(draft(), 'settings');
+
+    expect(screen.getByTestId('request-timeout-mode').getAttribute('data-value')).toBe('inherit');
+    expect(screen.queryByLabelText('超时毫秒')).toBeNull();
+  });
+
+  it('只有自定义才出现数值行，其余两档都没有', () => {
+    const { latest } = harness(draft(), 'settings');
+
+    fireEvent.click(screen.getByTestId('request-timeout-mode'));
+    fireEvent.click(screen.getByRole('option', { name: '自定义' }));
+
+    expect(screen.getByLabelText('超时毫秒')).toBeTruthy();
+    expect(latest().settings.timeout).toEqual({ mode: 'custom', ms: 30_000 });
+
+    fireEvent.click(screen.getByTestId('request-timeout-mode'));
+    fireEvent.click(screen.getByRole('option', { name: '不限制' }));
+    expect(screen.queryByLabelText('超时毫秒')).toBeNull();
+    expect(latest().settings.timeout).toEqual({ mode: 'unlimited' });
+
+    fireEvent.click(screen.getByTestId('request-timeout-mode'));
+    fireEvent.click(screen.getByRole('option', { name: '跟随全局' }));
+    expect(screen.queryByLabelText('超时毫秒')).toBeNull();
+    expect(latest().settings.timeout).toEqual({ mode: 'inherit' });
+  });
+
+  it('数值项只接受非负数：0 与选「不限制」是同一件事', () => {
+    const { latest } = harness(draft(), 'settings');
+
+    fireEvent.click(screen.getByTestId('request-timeout-mode'));
+    fireEvent.click(screen.getByRole('option', { name: '自定义' }));
+
+    fireEvent.change(screen.getByLabelText('超时毫秒'), { target: { value: '1500' } });
+    expect(latest().settings.timeout).toEqual({ mode: 'custom', ms: 1500 });
+
+    // 填 0：该设置随之成为「不限制」，数值行也就此消失
+    fireEvent.change(screen.getByLabelText('超时毫秒'), { target: { value: '0' } });
+    expect(latest().settings.timeout).toEqual({ mode: 'unlimited' });
+    expect(screen.queryByLabelText('超时毫秒')).toBeNull();
+
+    // 负数不是一个取值：不进状态，取值保持不变
+    fireEvent.click(screen.getByTestId('request-timeout-mode'));
+    fireEvent.click(screen.getByRole('option', { name: '自定义' }));
+    fireEvent.change(screen.getByLabelText('超时毫秒'), { target: { value: '-5' } });
+    expect(latest().settings.timeout).toEqual({ mode: 'custom', ms: 30_000 });
+  });
+});
+
+describe('请求级代理的四态（spec: http-engine「三级代理」）', () => {
+  it('可选值覆盖四种状态，缺省是「未配置」', () => {
+    harness(draft(), 'settings');
+
+    expect(screen.getByTestId('request-proxy-mode').getAttribute('data-value')).toBe('inherit');
+
+    fireEvent.click(screen.getByTestId('request-proxy-mode'));
+    for (const label of ['未配置', '不使用代理', '跟随系统', '手工填写']) {
+      expect(screen.getByRole('option', { name: label })).toBeTruthy();
+    }
+  });
+
+  it('「不使用代理」与「未配置」是两个不同状态', () => {
+    const { latest } = harness(draft(), 'settings');
+
+    fireEvent.click(screen.getByTestId('request-proxy-mode'));
+    fireEvent.click(screen.getByRole('option', { name: '不使用代理' }));
+    expect(latest().settings.proxy?.mode).toBe('none');
+
+    fireEvent.click(screen.getByTestId('request-proxy-mode'));
+    fireEvent.click(screen.getByRole('option', { name: '未配置' }));
+    expect(latest().settings.proxy).toBeNull();
+  });
+
+  it('手工填写才出现地址、凭据与白名单', () => {
+    harness(draft(), 'settings');
+    expect(screen.queryByLabelText('请求级代理地址')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('request-proxy-mode'));
+    fireEvent.click(screen.getByRole('option', { name: '手工填写' }));
+
+    expect(screen.getByLabelText('请求级代理地址')).toBeTruthy();
+    expect(screen.getByLabelText('请求级代理认证用户名')).toBeTruthy();
+    expect(screen.getByLabelText('请求级代理认证密码')).toBeTruthy();
+    expect(screen.getByLabelText('请求级代理不走代理的主机')).toBeTruthy();
+  });
+
+  it('密码三态：留空不改写、填写是新值、清除是独立动作', () => {
+    const saved = draft({
+      settings: {
+        ...defaultSettings(),
+        proxy: {
+          mode: 'manual',
+          url: 'http://127.0.0.1:8080',
+          username: 'u',
+          has_password: true,
+          password_readable: true,
+          no_proxy: [],
+        },
+      },
+    });
+    const { latest } = harness(saved, 'settings');
+
+    // 「已设置」这一事实有落点，而明文一个字都不出现
+    expect(screen.getByTestId('request-password-state').textContent).toBe('已设置');
+
+    // 只改地址：password 字段不出现 = 不改写既有凭据
+    fireEvent.change(screen.getByLabelText('请求级代理地址'), {
+      target: { value: 'http://other:9' },
+    });
+    expect(latest().settings.proxy?.password).toBeUndefined();
+    expect(latest().settings.proxy?.has_password).toBe(true);
+
+    fireEvent.change(screen.getByLabelText('请求级代理认证密码'), {
+      target: { value: 's3cret' },
+    });
+    expect(latest().settings.proxy?.password).toBe('s3cret');
+
+    fireEvent.click(screen.getByTestId('request-password-clear'));
+    expect(latest().settings.proxy?.password).toBe('');
+  });
+
+  it('凭据不可读取时界面说出来，而不是显示成「未设置」', () => {
+    const saved = draft({
+      settings: {
+        ...defaultSettings(),
+        proxy: {
+          mode: 'manual',
+          url: 'http://127.0.0.1:8080',
+          has_password: true,
+          password_readable: false,
+          no_proxy: [],
+        },
+      },
+    });
+    harness(saved, 'settings');
+
+    expect(screen.getByTestId('request-password-state').textContent).toBe('已设置（不可读取）');
+  });
+});
+
+describe('地址栏的发送态（spec: 地址栏）', () => {
+  it('空闲时呈现发送并触发一次发送', () => {
+    const onSend = vi.fn();
+    harness(draft(), 'params', undefined, undefined, { onSend });
+
+    expect(screen.queryByTestId('cancel-send')).toBeNull();
+    fireEvent.click(screen.getByText('发送'));
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('发送中该位置变为取消，且不能重复发送', () => {
+    const onSend = vi.fn();
+    const onCancel = vi.fn();
+    harness(draft(), 'params', undefined, undefined, { sending: true, onSend, onCancel });
+
+    expect(screen.queryByText('发送')).toBeNull();
+    fireEvent.click(screen.getByTestId('cancel-send'));
+
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onSend, '发送中不该还能触发发送').not.toHaveBeenCalled();
+  });
+
+  it('保存等其它进行中状态不呈现取消', () => {
+    harness(draft(), 'params', undefined, undefined, { busy: true });
+
+    expect(screen.queryByTestId('cancel-send')).toBeNull();
+    expect((screen.getByText('发送') as HTMLButtonElement).disabled).toBe(true);
   });
 });
 

@@ -9,12 +9,63 @@ import {
   type ResponsePresentation,
 } from '../lib/responsePresentation';
 import { INDENT_WIDTHS, type IndentWidth } from '../lib/sandbox';
+import {
+  DEFAULT_APP_TIMEOUT,
+  DEFAULT_REQUEST_LIMITS,
+  THRESHOLD_CHOICES_MB,
+  appTimeoutFromMs,
+  readRequestPreferences,
+  timeoutMsOf,
+  writeRequestPreferences,
+  type AppTimeout,
+  type RequestLimits,
+} from '../lib/requestPreferences';
+import type { ProxyConfig } from '../lib/types';
 import { Dropdown } from './Dropdown';
+import { ProxyConfigRows } from './ProxyConfigRows';
 import {
   readSendRequestPolicyRaw,
   writeSendRequestPolicy,
   type SendRequestPolicy,
 } from '../lib/scriptRuntime';
+
+/**
+ * 数值 + 单位同框（spec: ui-layout「设置模态的请求配置」）。
+ *
+ * 单位贴在数字右边，而不是写进名称里：`[ 30000 | ms ]` 比「超时（毫秒）」再加一整行
+ * 输入少占一行，用户也不必把单位心算进值里。只接受非负整数——0 的含义由上层赋予
+ * （请求这一节里 0 表示不限制）。
+ */
+function NumberUnit(props: {
+  label: string;
+  unit: string;
+  value: number;
+  testId: string;
+  /** 允许的最小值：超时传 0（0 表示不限制），没有这一档的项传 1。 */
+  min?: number;
+  onChange: (value: number) => void;
+}) {
+  const min = props.min ?? 0;
+
+  return (
+    <div className="unit-field">
+      <input
+        type="number"
+        min={min}
+        step={1}
+        aria-label={props.label}
+        data-testid={props.testId}
+        value={props.value}
+        onChange={(event) => {
+          const parsed = Number.parseInt(event.target.value, 10);
+          // 只收区间内的整数：区间外的输入不进状态，受控输入会把那一下抹掉
+          if (Number.isFinite(parsed) && parsed >= min) props.onChange(parsed);
+        }}
+      />
+      <span className="unit">{props.unit}</span>
+    </div>
+  );
+}
 import { useEditingSurface } from '../lib/useEditing';
 
 export interface SettingsPanelProps {
@@ -54,19 +105,29 @@ export function SettingsPanel({
     presentation.formatDetection,
   );
   const [indentWidth, setIndentWidth] = useState<IndentWidth>(presentation.indentWidth);
+  /** 请求类偏好（spec: ui-layout「设置模态的请求配置」）。 */
+  const [appTimeout, setAppTimeout] = useState<AppTimeout>(DEFAULT_APP_TIMEOUT);
+  const [limits, setLimits] = useState<RequestLimits>(DEFAULT_REQUEST_LIMITS);
+  /** 全局代理（三级代理的最低层）；`null` = 未配置。 */
+  const [proxy, setProxy] = useState<ProxyConfig | null>(null);
   /** 读回来的基线：未保存守卫据此判断草稿有没有偏离已配置的值。 */
   const [baseline, setBaseline] = useState({
     mode: 'allow' as 'allow' | 'deny',
     hosts: '',
     formatDetection: presentation.formatDetection as FormatDetection,
     indentWidth: presentation.indentWidth as IndentWidth,
+    appTimeout: DEFAULT_APP_TIMEOUT as AppTimeout,
+    limits: DEFAULT_REQUEST_LIMITS as RequestLimits,
+    proxy: null as ProxyConfig | null,
   });
 
   const load = useCallback(async () => {
     try {
-      const [value, storedPresentation] = await Promise.all([
+      const [value, storedPresentation, preferences, storedProxy] = await Promise.all([
         readSendRequestPolicyRaw(client),
         readPresentation(client),
+        readRequestPreferences(client),
+        client.globalProxyGet(),
       ]);
 
       setRaw(value);
@@ -91,11 +152,17 @@ export function SettingsPanel({
       setHosts(nextHosts);
       setFormatDetection(storedPresentation.formatDetection);
       setIndentWidth(storedPresentation.indentWidth);
+      setAppTimeout(preferences.timeout);
+      setLimits(preferences.limits);
+      setProxy(storedProxy);
       setBaseline({
         mode: nextMode,
         hosts: nextHosts,
         formatDetection: storedPresentation.formatDetection,
         indentWidth: storedPresentation.indentWidth,
+        appTimeout: preferences.timeout,
+        limits: preferences.limits,
+        proxy: storedProxy,
       });
       // 读回来的值即应用当前生效的值，同步给 App
       onPresentationChange?.(storedPresentation);
@@ -122,6 +189,9 @@ export function SettingsPanel({
       await writeSendRequestPolicy(client, { mode, hosts: list });
       const nextPresentation = { formatDetection, indentWidth };
       await writePresentation(client, nextPresentation);
+      // 请求类偏好与全局代理也立即落库并作用于之后的请求；代理凭据的加密在命令层完成
+      await writeRequestPreferences(client, { timeout: appTimeout, limits });
+      await client.globalProxySet(proxy);
       // 改动立即作用于之后的响应呈现，不需要重启（spec: ui-layout 配置生效）
       onPresentationChange?.(nextPresentation);
       await load();
@@ -132,11 +202,15 @@ export function SettingsPanel({
     }
   };
 
+  // 结构化的三项按整份比较：它们没有更细的判据可用（这也让「改了又改回去」不算脏）
   const dirty = () =>
     mode !== baseline.mode ||
     hosts !== baseline.hosts ||
     formatDetection !== baseline.formatDetection ||
-    indentWidth !== baseline.indentWidth;
+    indentWidth !== baseline.indentWidth ||
+    JSON.stringify(appTimeout) !== JSON.stringify(baseline.appTimeout) ||
+    JSON.stringify(limits) !== JSON.stringify(baseline.limits) ||
+    JSON.stringify(proxy) !== JSON.stringify(baseline.proxy);
 
   // 编辑即自动保存（spec: 脚本的编辑与保存）：改动停止后落库。
   // 失败时基线不前移，因此这里会随下一次键入再次排期；退出/关模态时守卫也会拦。
@@ -148,7 +222,7 @@ export function SettingsPanel({
     return () => window.clearTimeout(timer);
     // save 每次渲染都是新函数，进依赖会让定时器永远重排；脏判据已由上面的 state 表达
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, hosts, formatDetection, indentWidth, baseline]);
+  }, [mode, hosts, formatDetection, indentWidth, appTimeout, limits, proxy, baseline]);
 
   useEditingSurface(editing, {
     id: 'settings-policy',
@@ -251,6 +325,73 @@ export function SettingsPanel({
             }}
           />
         </div>
+      </section>
+
+      {/* 请求类偏好（spec: ui-layout「设置模态的请求配置」）：改动后立即作用于之后的请求。
+          行形态抄 Postman——数值与单位同框，因此不必再写一行「超时（毫秒）」；0 表示
+          不限制，提示只说这一句（不写「想怎样就怎样」的长句）。 */}
+      <section className="settings-section">
+        <h4>请求</h4>
+
+        <div className="settings-row stacked">
+          <div className="settings-row-main">
+            <span className="settings-name">超时</span>
+            <NumberUnit
+              label="全局超时"
+              unit="ms"
+              testId="global-timeout"
+              value={timeoutMsOf(appTimeout)}
+              onChange={(ms) => setAppTimeout(appTimeoutFromMs(ms))}
+            />
+          </div>
+          <p className="settings-hint muted">0 代表不限制</p>
+        </div>
+
+        {/* 体积上限没有「不限制」：0 会让整份正文进内存（`大响应保护` 要求上限存在），
+            因此这一行不写那句提示，控件也不接受 0。 */}
+        <div className="settings-row">
+          <span className="settings-name">响应体积上限</span>
+          <NumberUnit
+            label="响应体积上限"
+            unit="MB"
+            testId="size-limit"
+            min={1}
+            value={limits.sizeLimitMb}
+            onChange={(mb) => setLimits({ ...limits, sizeLimitMb: mb })}
+          />
+        </div>
+
+        {/* 超过上限的阈值档位不可能生效，因此不可选——由控件自身的可选状态表达，
+            不写解释（spec: ui-layout「语义落在操作上」）。上限为「不限制」时没有越界的档位。 */}
+        <div className="settings-row">
+          <span className="settings-name">格式化阈值</span>
+          <Dropdown
+            label="格式化阈值"
+            testId="pretty-threshold"
+            value={String(limits.prettyThresholdMb)}
+            options={THRESHOLD_CHOICES_MB.map((mb) => ({
+              value: String(mb),
+              label: `${mb} MB`,
+              disabled: limits.sizeLimitMb > 0 && mb > limits.sizeLimitMb,
+            }))}
+            onChange={(value) =>
+              setLimits({ ...limits, prettyThresholdMb: Number(value) })
+            }
+          />
+        </div>
+      </section>
+
+      {/* 全局代理（三级代理的最低层）：环境级代理落在环境自身的编辑面、请求级沿用请求
+          编辑器的 Settings 标签，三层不挤在同一屏（spec: 设置模态的代理配置）。 */}
+      <section className="settings-section">
+        <h4>代理</h4>
+        <ProxyConfigRows
+          proxy={proxy}
+          onChange={setProxy}
+          allowInherit={false}
+          idPrefix="global"
+          name="代理"
+        />
       </section>
 
       {error && (

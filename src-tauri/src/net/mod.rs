@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod body;
+pub mod cancel;
 pub mod cookies;
 pub mod headers;
 pub mod limits;
@@ -50,6 +51,12 @@ pub struct SendRequestInput {
     /// 迭代数据。
     #[serde(default)]
     pub data: BTreeMap<String, String>,
+    /// 本次发送的会话标识（spec: http-engine「请求取消」）。
+    ///
+    /// 同一次发送里的主请求与脚本内 `pm.sendRequest` 发出的请求共用一个标识，取消按它
+    /// 撤销该会话下的全部在飞请求。缺省时后端自取一个：只发一个请求的场景不必关心它。
+    #[serde(default)]
+    pub attempt_id: Option<String>,
 }
 
 impl SendRequestInput {
@@ -60,6 +67,7 @@ impl SendRequestInput {
             environment_id: None,
             local: BTreeMap::new(),
             data: BTreeMap::new(),
+            attempt_id: None,
         }
     }
 
@@ -70,6 +78,7 @@ impl SendRequestInput {
             environment_id: None,
             local: BTreeMap::new(),
             data: BTreeMap::new(),
+            attempt_id: None,
         }
     }
 }
@@ -97,6 +106,9 @@ pub struct ResponsePayload {
     /// 是否仍提供结构化格式化视图。
     pub pretty_available: bool,
     pub pretty_print_threshold: u64,
+    /// 本次实际生效的正文上限（字节）。界面据此说明「手里有多少」——上限现在是可配的，
+    /// 界面不能再用缺省值当常数。
+    pub size_limit_bytes: u64,
     /// 证书校验被关闭时的显著警示。
     pub insecure_warning: bool,
     pub final_url: String,
@@ -286,9 +298,20 @@ pub async fn send_request(
     uploads: &UploadRegistry,
     store: &ResponseStore,
     jar: &cookies::CookieJar,
+    sends: &Arc<cancel::SendRegistry>,
     input: &SendRequestInput,
 ) -> AppResult<ResponsePayload> {
     let request = resolve_request_source(db, input)?;
+
+    // 本次发送的会话：取消按它撤销包括脚本内请求在内的全部在飞请求。
+    // 句柄在函数返回时自动摘除，正常结束与取消走同一条收尾路径。
+    let attempt_id = input
+        .attempt_id
+        .clone()
+        .unwrap_or_else(crate::storage::new_id);
+    let send = sends.open(&attempt_id);
+    // 令牌副本要先落成变量：`send.token()` 是临时值，直接在 select! 里取会被提前释放
+    let cancel_token = send.token();
 
     // Cookie：装载持久 Cookie（幂等）→ 发送（reqwest 自动附带并处理每一跳的
     // set-cookie）→ 同步回库。顺序是硬性的：同步必须发生在响应处理完之后。
@@ -311,10 +334,14 @@ pub async fn send_request(
         db,
         &resolved.settings,
         context.environment.as_ref().map(|env| env.id.as_str()),
+        key_provider,
     )?;
     let decision = proxy::decide(proxy_config.as_ref(), &resolved.url, &system_proxy);
 
-    let client = build_client(&resolved, &decision, Some(jar.provider()))?;
+    // 超时：请求 > 应用级（spec: http-engine「请求级网络设置」）
+    let timeout = limits::effective_timeout(db, &resolved.settings)?;
+
+    let client = build_client(&resolved, &decision, timeout, Some(jar.provider()))?;
 
     // 认证可能落在查询串上
     let auth_application = auth::apply(&resolved.auth)?;
@@ -374,7 +401,15 @@ pub async fn send_request(
     );
 
     let via_proxy = matches!(decision, ProxyDecision::Use { .. });
-    let mut response = builder.send().await.map_err(|err| map_net_error(err, via_proxy))?;
+
+    if send.is_cancelled() {
+        return Err(send.cancelled_error());
+    }
+
+    let mut response = tokio::select! {
+        result = builder.send() => result.map_err(|err| map_net_error(err, via_proxy))?,
+        _ = cancel_token.cancelled() => return Err(send.cancelled_error()),
+    };
     let status = response.status();
     let negotiated_version = version_label(response.version());
     let final_url = response.url().to_string();
@@ -397,7 +432,13 @@ pub async fn send_request(
 
     let id = crate::storage::new_id();
     let limit = limits::response_size_limit(db)?;
-    let captured = response::read_body(&mut response, limit, &store.spill_path(&id)).await?;
+    let spill_path = store.spill_path(&id);
+    // 落盘副本在登记进仓库之前由守卫负责清理：取消或中途失败都不留残余
+    let mut spill = response::SpillGuard::new(spill_path.clone());
+    let captured = tokio::select! {
+        result = response::read_body(&mut response, limit, &spill_path) => result?,
+        _ = cancel_token.cancelled() => return Err(send.cancelled_error()),
+    };
 
     let elapsed = started.elapsed();
     let total = captured.total_bytes;
@@ -428,6 +469,7 @@ pub async fn send_request(
         body_base64,
         pretty_available: total <= pretty_threshold,
         pretty_print_threshold: pretty_threshold,
+        size_limit_bytes: limit,
         insecure_warning: resolved.settings.needs_insecure_warning(),
         final_url,
         via_proxy: matches!(decision, ProxyDecision::Use { .. }),
@@ -437,6 +479,8 @@ pub async fn send_request(
 
     logging::global().log_response_summary(status.as_u16(), elapsed.as_millis(), total);
     store.store(&id, captured)?;
+    // 落盘文件的所有权已交给仓库，守卫不再负责清理
+    spill.disarm();
 
     // 响应可能带来了 set-cookie（含过期删除指令）；此刻 jar 已是最新，落库
     jar.sync_to_db(db, key_provider)?;
@@ -455,26 +499,29 @@ fn upsert_query(url: &str, pairs: &[(String, String)]) -> AppResult<String> {
     url_util::compose_url(&base, &params)
 }
 
+/// 组装请求客户端。
+///
+/// 代理决定与超时都由调用方 resolve 好后传入（两者同形），因此这里不读任何应用设置；
+/// `timeout` 为 `None` 表示不设超时。
 fn build_client<C: reqwest::cookie::CookieStore + 'static>(
     resolved: &ResolvedRequest,
     decision: &ProxyDecision,
+    timeout: Option<Duration>,
     cookie_provider: Option<Arc<C>>,
 ) -> AppResult<reqwest::Client> {
-    let timeout = Duration::from_millis(
-        resolved
-            .settings
-            .timeout_ms
-            .unwrap_or(limits::DEFAULT_TIMEOUT_MS),
-    );
-
     let mut builder = reqwest::Client::builder()
         .danger_accept_invalid_certs(!resolved.settings.verify_tls)
-        .timeout(timeout)
         .redirect(if resolved.settings.follow_redirects {
             reqwest::redirect::Policy::limited(10)
         } else {
             reqwest::redirect::Policy::none()
         });
+
+    //「不限制」时不调用 `.timeout()`：reqwest 的默认正是不设超时，显式塞一个超大值
+    // 只会把意图藏起来。
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
 
     if let Some(provider) = cookie_provider {
         // 每一跳都按新目标重新计算 Cookie（reqwest 内建行为，spec: 重定向后按新目标重新匹配）

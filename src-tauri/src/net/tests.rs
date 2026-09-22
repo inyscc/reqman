@@ -4,7 +4,7 @@ use super::*;
 use crate::secrets::MemoryKeyProvider;
 use crate::storage::model::{
     setting_keys, ApiKeyLocation, FormField, FormFieldKind, ProxyConfig, RawLanguage, RequestBody,
-    Scope,
+    Scope, TimeoutSetting,
 };
 use crate::storage::{requests, variables, workspace, Db};
 use crate::testutil::{closed_port_addr, HttpsTestServer, Reply, TempDir, TestServer};
@@ -16,6 +16,7 @@ struct Harness {
     uploads: UploadRegistry,
     responses: ResponseStore,
     cookies: cookies::CookieJar,
+    sends: Arc<cancel::SendRegistry>,
     workspace_id: String,
     collection_id: String,
     dir: TempDir,
@@ -37,6 +38,7 @@ impl Harness {
             uploads: UploadRegistry::new(),
             responses,
             cookies: cookies::CookieJar::new(),
+            sends: Arc::new(cancel::SendRegistry::new()),
             workspace_id,
             collection_id,
             dir,
@@ -84,6 +86,7 @@ impl Harness {
             &self.uploads,
             &self.responses,
             &self.cookies,
+            &self.sends,
             input,
         )
         .await
@@ -365,6 +368,37 @@ async fn a_configured_proxy_is_actually_used() {
             .contains("http://nonexistent.invalid/thing"),
         "代理应收到绝对形态的请求行：{}",
         recorded.raw_first_line
+    );
+}
+
+/// 凭据读不出来时不阻止请求发出，只是这一次不带代理认证
+/// （spec: http-engine「三级代理」）。
+#[tokio::test]
+async fn an_unreadable_proxy_credential_does_not_block_the_request() {
+    let proxy = TestServer::start(Reply::ok("{\"from\":\"proxy\"}"));
+    let harness = Harness::new("net-proxy-credential-unreadable");
+
+    let mut request = harness.request("R", "GET", "http://nonexistent.invalid/thing");
+    let mut config = ProxyConfig::manual(proxy.base_url());
+    config.username = Some("u".into());
+    // 密文在、可读标记为真，但内容解不开
+    config.password_enc = Some("bm90LWEtY2lwaGVydGV4dA==".into());
+    config.password_readable = true;
+    request.settings.proxy = Some(config);
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("凭据不可读不应让请求失败");
+
+    assert_eq!(payload.status, 200);
+    assert!(payload.via_proxy, "仍应经代理发出");
+
+    let recorded = proxy.last_request();
+    assert!(
+        recorded.header("proxy-authorization").is_none(),
+        "读不出来的凭据不应退化成一次空密码认证"
     );
 }
 
@@ -681,6 +715,125 @@ async fn oversized_response_is_truncated_but_full_text_survives() {
 }
 
 // ---------------------------------------------------------------------------
+// 超时的两层解析（spec: http-engine「请求级网络设置」）
+// ---------------------------------------------------------------------------
+
+/// 应用级超时确实到达了客户端，且能表达「不限制」。
+#[tokio::test]
+async fn the_app_level_timeout_applies_and_can_be_disabled() {
+    let harness = Harness::new("net-app-timeout");
+    let slow = TestServer::start(Reply::Delay {
+        millis: 600,
+        body: b"{}".to_vec(),
+    });
+    let saved = harness.save(&harness.request("R", "GET", &slow.url("/slow")));
+    let input = SendRequestInput::saved(&saved.id);
+
+    // 应用级 200 毫秒：「跟随全局」的请求被中止
+    variables::set_setting(&harness.db, "global", setting_keys::REQUEST_TIMEOUT, "200").unwrap();
+    let err = harness.send(&input).await.expect_err("应超时");
+    assert_eq!(err.code, ErrorCode::Timeout, "错误信息：{}", err.message);
+
+    // 应用级改为「不限制」：同一个请求不再因时长被中止
+    variables::set_setting(
+        &harness.db,
+        "global",
+        setting_keys::REQUEST_TIMEOUT,
+        limits::UNLIMITED_TIMEOUT,
+    )
+    .unwrap();
+    let payload = harness.send(&input).await.expect("不限制时应拿到响应");
+    assert_eq!(payload.status, 200);
+}
+
+// ---------------------------------------------------------------------------
+// 请求取消（spec: http-engine「请求取消」）
+// ---------------------------------------------------------------------------
+
+/// 取消以可区分的结果结束（不是超时、也不是笼统的网络失败），会话登记随之清除。
+#[tokio::test]
+async fn a_cancelled_send_is_distinguishable_from_a_timeout() {
+    let harness = Harness::new("net-cancel");
+    let slow = TestServer::start(Reply::Delay {
+        millis: 1_500,
+        body: b"{}".to_vec(),
+    });
+    let saved = harness.save(&harness.request("R", "GET", &slow.url("/slow")));
+
+    let mut input = SendRequestInput::saved(&saved.id);
+    input.attempt_id = Some("attempt-cancel".into());
+
+    let sends = harness.sends.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        sends.cancel("attempt-cancel");
+    });
+
+    let err = harness.send(&input).await.expect_err("应被取消");
+    assert_eq!(err.code, ErrorCode::Cancelled, "错误信息：{}", err.message);
+    assert_ne!(
+        err.code,
+        ErrorCode::Timeout,
+        "取消必须与超时可区分"
+    );
+    assert_eq!(
+        harness.sends.in_flight("attempt-cancel"),
+        0,
+        "会话登记应随请求结束而清除"
+    );
+}
+
+/// 读正文途中取消：已落盘的正文副本必须被收尾，不留残余。
+#[tokio::test]
+async fn cancelling_mid_body_read_leaves_no_spilled_copy() {
+    let harness = Harness::new("net-cancel-spill");
+    // 上限调小，使正文必然落到磁盘
+    variables::set_setting(
+        &harness.db,
+        "global",
+        setting_keys::RESPONSE_SIZE_LIMIT,
+        "1024",
+    )
+    .unwrap();
+
+    // 声明 512 KiB 但只发 4 KiB：客户端会停在「等剩下的字节」上
+    let server = TestServer::start(Reply::Truncated {
+        declared: 512 * 1024,
+        sent: vec![b'x'; 4096],
+        hold_millis: 1_500,
+    });
+    let saved = harness.save(&harness.request("R", "GET", &server.url("/big")));
+
+    let mut input = SendRequestInput::saved(&saved.id);
+    input.attempt_id = Some("attempt-spill".into());
+
+    let sends = harness.sends.clone();
+    tokio::spawn(async move {
+        // 等已发的字节落盘之后再取消
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        sends.cancel("attempt-spill");
+    });
+
+    let err = harness.send(&input).await.expect_err("应被取消");
+    assert_eq!(err.code, ErrorCode::Cancelled, "错误信息：{}", err.message);
+
+    let leftovers: Vec<String> = std::fs::read_dir(harness.responses.temp_root())
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    assert!(
+        leftovers.is_empty(),
+        "取消后不应残留未被采用的正文副本：{:?}",
+        leftovers
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 5.9 失败分类
 // ---------------------------------------------------------------------------
 
@@ -694,7 +847,7 @@ async fn failure_classes_are_distinguishable() {
         body: b"{}".to_vec(),
     });
     let mut request = harness.request("R", "GET", &slow.url("/slow"));
-    request.settings.timeout_ms = Some(300);
+    request.settings.timeout = TimeoutSetting::Custom { ms: 300 };
     let saved = harness.save(&request);
     let err = harness
         .send(&SendRequestInput::saved(&saved.id))
@@ -850,6 +1003,7 @@ async fn request_without_any_entry_point_is_rejected() {
         environment_id: None,
         local: Default::default(),
         data: Default::default(),
+        attempt_id: None,
     };
     let err = harness.send(&input).await.expect_err("应拒绝");
     assert_eq!(err.code, ErrorCode::InvalidInput);
@@ -983,6 +1137,7 @@ async fn persisted_cookies_survive_restart_and_still_match() {
         &harness.uploads,
         &harness.responses,
         &reborn,
+        &harness.sends,
         &SendRequestInput::saved(&saved.id),
     )
     .await
@@ -1045,6 +1200,7 @@ async fn unavailable_key_store_does_not_break_sending() {
         &harness.uploads,
         &harness.responses,
         &harness.cookies,
+        &harness.sends,
         &SendRequestInput::saved(&saved.id),
     )
     .await
@@ -1065,6 +1221,7 @@ async fn unavailable_key_store_does_not_break_sending() {
         &harness.uploads,
         &harness.responses,
         &harness.cookies,
+        &harness.sends,
         &SendRequestInput::saved(&saved.id),
     )
     .await

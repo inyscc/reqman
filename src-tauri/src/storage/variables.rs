@@ -4,7 +4,7 @@
 //! 敏感值不以明文落盘。
 
 use super::model::{setting_keys, Environment, Id, ProxyConfig, Scope, Variable};
-use super::{apply_order, from_json, new_id, now, require_name, to_json, Db};
+use super::{apply_order, from_json, new_id, now, proxy_credentials, require_name, Db};
 use crate::error::{AppError, AppResult};
 use crate::secrets::{self, KeyProvider, StoredValue};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -204,7 +204,8 @@ pub fn set_environment_proxy(
     proxy: Option<ProxyConfig>,
 ) -> AppResult<Environment> {
     let encoded = match proxy {
-        Some(proxy) => Some(to_json(&proxy)?),
+        // 落库形态与对外形态不同：凭据必须以密文落库
+        Some(proxy) => Some(proxy_credentials::storage_json(&proxy)?),
         None => None,
     };
     db.write(|conn| {
@@ -910,11 +911,12 @@ pub fn global_proxy(db: &Db) -> AppResult<Option<ProxyConfig>> {
 
 pub fn set_global_proxy(db: &Db, proxy: Option<ProxyConfig>) -> AppResult<()> {
     match proxy {
+        // 落库形态与对外形态不同：凭据必须以密文落库
         Some(proxy) => set_setting(
             db,
             "global",
             setting_keys::GLOBAL_PROXY,
-            &to_json(&proxy)?,
+            &proxy_credentials::storage_json(&proxy)?,
         ),
         None => {
             db.write(|conn| {

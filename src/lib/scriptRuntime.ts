@@ -35,6 +35,23 @@ import type { CookieView, ResponsePayload, SavedRequest, StoredValue, Variable }
 export type ScriptListen = 'prerequest' | 'test';
 
 /**
+ * 一次发送的取消出口（spec: http-engine「请求取消」）。
+ *
+ * 一次发送可能被取消在三处：脚本段、网络段、脚本内 `pm.sendRequest` 发出的请求。网络段
+ * 由后端的发送会话注册表撤销；脚本段靠这里的 `signal` **立刻**兑现——不能改成「先销毁
+ * 沙箱再等回调」，`disposeContext` 的注释记着同一个事实：uvm 终止 Worker 之后回调可能
+ * 永不触发，那样 `executeOne` 的 promise 永不兑现、发送态就卡在「发送中」了。
+ */
+export interface PhaseCancellation {
+  /** 本次发送的会话标识：脚本内发出的请求带上它，取消按会话撤销。 */
+  attemptId: string;
+  /** 取消信号；未取消时永不兑现。 */
+  signal: Promise<void>;
+  /** 该会话是否已被取消。 */
+  isCancelled: () => boolean;
+}
+
+/**
  * 宿主桥的事件协议（任务 3.6）。
  *
  * 宿主监听的事件名必须是这个**有限具名集合**的成员，任何新出口都必须在这里登记，
@@ -469,8 +486,13 @@ function toInlineRequest(raw: unknown): SavedRequest {
     body: rawBody ? { ...emptyBody(), kind: 'raw', raw: rawBody } : emptyBody(),
     auth: { kind: 'none' },
     // 脚本内发起的请求不继承父请求的配置：与 http-engine 的默认一致——跟随重定向、
-    // 校验证书、协议版本自动。这三条都不该由脚本悄悄改写。
-    settings: { follow_redirects: true, verify_tls: true, http_version: 'auto' },
+    // 校验证书、协议版本自动，超时跟随全局。这几条都不该由脚本悄悄改写。
+    settings: {
+      timeout: { mode: 'inherit' },
+      follow_redirects: true,
+      verify_tls: true,
+      http_version: 'auto',
+    },
     pre_request_script: null,
     test_script: null,
     sort_order: 0,
@@ -695,6 +717,8 @@ function executeOne(
   requestCookies: CookieView[],
   /** 单段脚本的执行上限（毫秒）。 */
   timeoutMs: number,
+  /** 本次发送的取消出口；`null` 表示这次执行不参与取消。 */
+  cancellation: PhaseCancellation | null,
 ): Promise<{
   error: string | null;
   next: Record<ContextScope, ScopeValues>;
@@ -776,6 +800,9 @@ function executeOne(
             const payload = await commands.sendRequest({
               inline,
               environment_id: target.environmentId,
+              // 会话标识与主请求共用：取消时它会被后端一并撤销，脚本这边则以
+              // `cancelled` 错误走既有的回执出口——不新增桥事件
+              attempt_id: cancellation?.attemptId ?? null,
             });
 
             respond(null, toSandboxResponse(payload));
@@ -1014,6 +1041,22 @@ export async function allowScriptExecution(
 }
 
 /**
+ * 让一段脚本的执行与取消赛跑。
+ *
+ * 取消时返回 `null` 而不是抛错——取消不是失败，调用方据此收手即可。若直接 await
+ * `executeOne`，取消之后要等沙箱回调兑现，而那条路可能永不兑现。
+ */
+async function raceWithCancellation<T>(
+  work: Promise<T>,
+  cancellation: PhaseCancellation | null,
+): Promise<T | null> {
+  if (!cancellation) return work;
+  if (cancellation.isCancelled()) return null;
+
+  return Promise.race([work, cancellation.signal.then(() => null)]);
+}
+
+/**
  * 执行一个脚本阶段的全部脚本。
  *
  * `scripts` 必须已按「集合 → 文件夹 → 请求」排好序：本函数按数组顺序执行，且让前一段
@@ -1032,6 +1075,8 @@ export async function runScriptPhase(
   requestUrl: string | null = null,
   /** 单段脚本的执行上限（毫秒）；测试用小值以快速验证超时路径。 */
   timeoutMs: number = SCRIPT_TIMEOUT_MS,
+  /** 本次发送的取消出口；`null` 表示这个阶段不参与取消。 */
+  cancellation: PhaseCancellation | null = null,
 ): Promise<ScriptPhaseResult> {
   const entries: ConsoleEntry[] = [];
   const assertions: TestAssertion[] = [];
@@ -1129,19 +1174,26 @@ export async function runScriptPhase(
 
     for (const { code, index } of codes) {
       const executionId = `exec-${index}-${Math.random().toString(36).slice(2, 10)}`;
-      const outcome = await executeOne(
-        context,
-        commands,
-        target,
-        executionId,
-        policy,
-        response,
-        listen,
-        code,
-        scopes,
-        requestCookies,
-        timeoutMs,
+      const outcome = await raceWithCancellation(
+        executeOne(
+          context,
+          commands,
+          target,
+          executionId,
+          policy,
+          response,
+          listen,
+          code,
+          scopes,
+          requestCookies,
+          timeoutMs,
+          cancellation,
+        ),
+        cancellation,
       );
+
+      // 取消：这一段的结果已不可信（沙箱即将被销毁），立刻收手，把已经产生的输出交回去
+      if (!outcome) break;
 
       // 无论成败，本段看到的取值都要并入下一段的输入
       scopes.globals = outcome.next.globals;

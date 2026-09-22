@@ -14,6 +14,8 @@ import { applyEnvironmentOrder } from './lib/environmentMoves';
 import { CollectionIcon, FolderIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
+import { ProxyConfigRows } from './components/ProxyConfigRows';
+import type { ProxyConfig } from './lib/types';
 import { RequestBand, RequestEditor, type Tab } from './components/RequestEditor';
 import { ResizeStrips, isInteractiveSessionBarTarget } from './components/ResizeStrips';
 import { ResponsePanel } from './components/ResponsePanel';
@@ -33,12 +35,26 @@ import {
 } from './lib/responsePresentation';
 import { readTabs, writeTabs } from './lib/sessionTabs';
 import {
+  SCRIPT_TIMEOUT_MS,
   allowScriptExecution,
   isScriptExecutionAllowed,
   renderVisualizer,
   runScriptPhase,
 } from './lib/scriptRuntime';
-import type { ConsoleEntry, TestAssertion, VisualizerResult } from './lib/scriptRuntime';
+import type {
+  ConsoleEntry,
+  PhaseCancellation,
+  TestAssertion,
+  VisualizerResult,
+} from './lib/scriptRuntime';
+
+/**
+ * 取消的稳定错误码（与 Rust 侧 `ErrorCode::Cancelled` 一致）。
+ *
+ * 取消**不是失败**：它要单独处理，不能与超时、离线等失败走同一条呈现——那条路会清空
+ * 响应区并弹出红色错误条（spec: http-engine「请求取消」）。
+ */
+const CANCELLED_CODE = 'cancelled';
 import { withoutEmptyRows, cleanForSend } from './lib/rows';
 import { alignUrlAndParams } from './lib/url';
 import { createEntityStore } from './lib/store';
@@ -315,6 +331,14 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [tabsHydrated, setTabsHydrated] = useState(false);
   const [preview, setPreview] = useState<RequestPreview | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * 正在发送的会话（spec: 地址栏）。它与 `busy` 分开：`busy` 还被保存请求、保存实体脚本
+   * 与改名共用，那些状态下该出现的是禁用的「发送」，不是「取消」。
+   */
+  const [sending, setSending] = useState<{ key: string; attemptId: string } | null>(null);
+  /** 当前发送会话的取消出口；它负责把前端这条（脚本段）**立刻**兑现。 */
+  const cancelAttemptRef = useRef<(() => void) | null>(null);
+  const attemptCancelledRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   /** 待确认的脚本门禁；非空时暂停发送，等用户在界面上做出选择（任务 9.3）。 */
   const [scriptGate, setScriptGate] = useState<{ collectionId: string; name: string } | null>(
@@ -326,6 +350,14 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [environmentId, setEnvironmentId] = useState<string | null>(null);
   /** 环境编辑器标题里正在编辑的名字；`null` 表示跟随后端的值。 */
   const [environmentNameDraft, setEnvironmentNameDraft] = useState<string | null>(null);
+  /**
+   * 环境级代理的草稿（spec: ui-layout「设置模态的代理配置」）。
+   *
+   * 三层不挤在同一屏：这一层落在环境自身的编辑面，缺省「未配置」即顺位到全局。
+   */
+  const [environmentProxy, setEnvironmentProxy] = useState<ProxyConfig | null>(null);
+  /** 上一次同步或落库后的形态：草稿是否真的变了由它判断（对象身份每次都可能不同）。 */
+  const savedEnvironmentProxyRef = useRef<string>('null');
   const [variables, setVariables] = useState<Variable[]>([]);
   /** 请求区与响应区的分栏比例（design D7）；以工作区为单位持久化。 */
   const [splitRatio, setSplitRatio] = useState(SPLIT_DEFAULT);
@@ -880,6 +912,38 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
   const showEnvironmentEditor = sidebarTab === 'environments';
 
+  /**
+   * 环境级代理：切环境与落库后读回时对齐草稿。
+   *
+   * 读回的只有掩码视图（凭据只给「已设置」这一事实），因此对齐之后密码输入框自然回到空
+   * ——`ProxyConfigRows` 就是按这个约定清草稿的。
+   */
+  useEffect(() => {
+    const stored = activeEnvironment?.proxy ?? null;
+    setEnvironmentProxy(stored);
+    savedEnvironmentProxyRef.current = JSON.stringify(stored);
+  }, [environmentId, activeEnvironment?.proxy]);
+
+  /** 改动停止后落库；写入失败不抛出——它只是环境的一条属性，下一次改动会再写一遍。 */
+  useEffect(() => {
+    if (!environmentId) return;
+    if (JSON.stringify(environmentProxy) === savedEnvironmentProxyRef.current) return;
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          await client.environmentSetProxy(environmentId, environmentProxy);
+          const id = workspaceIdRef.current;
+          if (id) await loadEnvironments(id);
+        } catch (caught) {
+          setError(describeError(caught).message);
+        }
+      })();
+    }, 500);
+
+    return () => window.clearTimeout(timer);
+  }, [environmentProxy, environmentId, client, loadEnvironments]);
+
   const reloadAfterImport = useCallback(async () => {
     if (!workspaceId) return;
     await loadTree(workspaceId);
@@ -1214,6 +1278,61 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   );
 
   /**
+   * 开一次发送会话（spec: http-engine「请求取消」）。
+   *
+   * 取消信号用 Promise 表达，脚本段拿它做 `Promise.race` 立刻兑现——**不能**改成「先销毁
+   * 沙箱再等回调」：`disposeContext` 的注释记着同一个事实，uvm 终止 Worker 之后回调可能
+   * 永不触发，那样发送态就卡在「发送中」了。
+   *
+   * 标识带随机后缀，避免同一毫秒内的两次发送撞号；脚本内的请求按它归组。
+   */
+  const openAttempt = (): PhaseCancellation => {
+    let fire: () => void = () => {};
+    const signal = new Promise<void>((resolve) => {
+      fire = resolve;
+    });
+
+    attemptCancelledRef.current = false;
+    cancelAttemptRef.current = () => {
+      attemptCancelledRef.current = true;
+      fire();
+    };
+
+    return {
+      attemptId: `attempt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      signal,
+      isCancelled: () => attemptCancelledRef.current,
+    };
+  };
+
+  /** 一次发送的收尾：发送态与取消出口一起复位。正常结束与取消走同一条路。 */
+  const finishSend = () => {
+    cancelAttemptRef.current = null;
+    setSending(null);
+    setBusy(false);
+  };
+
+  /**
+   * 取消当前发送：后端撤销该会话下的全部在飞请求（含脚本内发出的那些），前端让脚本段
+   * 立刻兑现。
+   *
+   * 不抢答结果归属——本次发送由被撤销的请求自己以 `cancelled` 结束。撤销本身失败也不弹错：
+   * 发送仍会以自己的结果收场，只是晚一点。
+   */
+  const cancelSend = async () => {
+    const attempt = sending;
+    if (!attempt) return;
+
+    cancelAttemptRef.current?.();
+
+    try {
+      await client.cancelSend(attempt.attemptId);
+    } catch {
+      // 有意静默：见上
+    }
+  };
+
+  /**
    * `skipScripts` 为真时跳过全部脚本只发请求——门禁被拒绝后的「不执行脚本，仍发送」。
    */
   const performSend = async (skipScripts: boolean) => {
@@ -1245,7 +1364,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       return;
     }
 
+    const attempt = openAttempt();
     setBusy(true);
+    setSending({ key, attemptId: attempt.attemptId });
     patchRequestTab(key, (item) => ({ ...item, scriptReport: null }));
 
     // 三级脚本：集合 → 文件夹 → 请求（任务 2.4）。集合与文件夹的脚本挂在实体上，
@@ -1260,6 +1381,21 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     const scriptConsole: ConsoleEntry[] = [];
     const scriptAssertions: TestAssertion[] = [];
 
+    /**
+     * 把本次发送已经产生的脚本输出写回标签（三条出口共用：正常、失败、取消）。
+     */
+    const writeScriptReport = () => {
+      patchRequestTab(key, (item) => ({
+        ...item,
+        scriptReport: {
+          console: scriptConsole,
+          assertions: scriptAssertions,
+          error: scriptError,
+          visualizer: scriptVisualizer,
+        },
+      }));
+    };
+
     try {
       if (target && !skipScripts) {
         const collection = await client.collectionGet(draft.collection_id);
@@ -1267,7 +1403,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         // 门禁：脚本可能来自导入的集合，执行前必须确认（任务 9.3 / design D6）
         if (!(await isScriptExecutionAllowed(client, draft.collection_id))) {
           setScriptGate({ collectionId: draft.collection_id, name: collection.name });
-          setBusy(false);
+          finishSend();
           return;
         }
 
@@ -1291,22 +1427,49 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         // 形态出现，属已知限制。
         requestUrl = resolved.url || null;
 
-        const pre = await runScriptPhase(client, target, 'prerequest', phases.pre, null, requestUrl);
+        const pre = await runScriptPhase(
+          client,
+          target,
+          'prerequest',
+          phases.pre,
+          null,
+          requestUrl,
+          SCRIPT_TIMEOUT_MS,
+          attempt,
+        );
 
         scriptError = pre.error;
         scriptConsole.push(...pre.console);
         scriptAssertions.push(...pre.assertions);
+
+        // 取消发生在脚本段：不再往后走，已经产生的输出照常写回
+        if (attempt.isCancelled()) {
+          writeScriptReport();
+          finishSend();
+          return;
+        }
       }
 
       const payload = await client.sendRequest({
         saved_id: dirty ? null : draft.id,
         inline: cleanForSend(draft),
         environment_id: environmentId,
+        // 会话标识：主请求与脚本内的请求归同一组，取消时一并撤销
+        attempt_id: attempt.attemptId,
       });
       patchRequestTab(key, (item) => ({ ...item, response: payload }));
 
       if (target && !skipScripts && phases) {
-        const post = await runScriptPhase(client, target, 'test', phases.test, payload, requestUrl);
+        const post = await runScriptPhase(
+          client,
+          target,
+          'test',
+          phases.test,
+          payload,
+          requestUrl,
+          SCRIPT_TIMEOUT_MS,
+          attempt,
+        );
 
         scriptError = scriptError ?? post.error;
         scriptConsole.push(...post.console);
@@ -1314,33 +1477,25 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         scriptVisualizer = post.visualizer;
       }
     } catch (caught) {
-      patchRequestTab(key, (item) => ({ ...item, response: null }));
-      setError(describeError(caught).message);
+      const described = describeError(caught);
+
+      // 取消不是失败（spec: http-engine「请求取消」）：不弹红条、**不动响应区**。响应区里
+      // 谁在里面就留着——可能是上一次的，也可能是本次已经到达的那一份（取消发生在后置
+      // 脚本阶段时，响应早就写回了）。
+      if (described.code !== CANCELLED_CODE) {
+        patchRequestTab(key, (item) => ({ ...item, response: null }));
+        setError(described.message);
+      }
+
       // 请求本身失败（离线、DNS、证书…）不该连带丢掉前置脚本已经产生的输出与断言：
       // console 的呈现要求没有「仅当请求成功」这一限定条件
-      patchRequestTab(key, (item) => ({
-        ...item,
-        scriptReport: {
-          console: scriptConsole,
-          assertions: scriptAssertions,
-          error: scriptError,
-          visualizer: scriptVisualizer,
-        },
-      }));
-      setBusy(false);
+      writeScriptReport();
+      finishSend();
       return;
     }
 
-    setBusy(false);
-    patchRequestTab(key, (item) => ({
-      ...item,
-      scriptReport: {
-        console: scriptConsole,
-        assertions: scriptAssertions,
-        error: scriptError,
-        visualizer: scriptVisualizer,
-      },
-    }));
+    writeScriptReport();
+    finishSend();
     // 脚本出错不阻断：请求已发出、响应已可查看，脚本的错误另行呈现
     // （spec: 脚本超时与错误处置）。
     if (scriptError) setError(scriptError);
@@ -2005,8 +2160,10 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             <RequestBand
               draft={draft}
               busy={busy}
+              sending={sending !== null && sending.key === activeTabKey}
               onChange={editDraft}
               onSend={() => void send()}
+              onCancel={() => void cancelSend()}
               collectionName={crumbCollectionName}
               dirty={dirty}
               nameRef={requestNameRef}
@@ -2067,6 +2224,22 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               </div>
 
               <div className="pane-body var-editor">
+                {/* 环境级代理（spec: 设置模态的代理配置）：三层不挤在同一屏，这一层落在
+                    环境自身的编辑面。Globals 不是环境，没有这一层——它对应的是设置模态里
+                    的全局代理。 */}
+                {environmentId && (
+                  <section className="settings-section" data-testid="environment-proxy">
+                    <h4>代理</h4>
+                    <ProxyConfigRows
+                      proxy={environmentProxy}
+                      onChange={setEnvironmentProxy}
+                      allowInherit
+                      idPrefix="environment"
+                      name="环境代理"
+                    />
+                  </section>
+                )}
+
                 <VariablesPanel
                   client={client}
                   scope={environmentId ? 'environment' : 'global'}

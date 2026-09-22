@@ -40,7 +40,7 @@ window.__TAURI_INTERNALS__ = {
       body: { kind: 'none', raw: null, raw_language: null, form: [], urlencoded: [], binary: null },
       auth: auth,
       settings: {
-        timeout_ms: null, follow_redirects: true, verify_tls: true,
+        timeout: { mode: 'inherit' }, follow_redirects: true, verify_tls: true,
         http_version: 'auto', encoding: null, proxy: null
       },
       pre_request_script: null, test_script: null, sort_order: 0
@@ -116,6 +116,7 @@ function payload(overrides: { content_type: string; body_text: string }) {
     body_base64: null,
     pretty_available: true,
     pretty_print_threshold: 5 * 1024 * 1024,
+    size_limit_bytes: 50 * 1024 * 1024,
     insecure_warning: false,
     final_url: 'https://api.test/1',
     via_proxy: false,
@@ -275,7 +276,10 @@ describe('响应呈现格式（真实引擎）', () => {
         const sections = Array.from(panel.querySelectorAll('.settings-section')).map((section) =>
           Array.from(section.querySelectorAll('.settings-row')).map((node) => {
             const row = node as HTMLElement;
-            const control = row.querySelector('input, textarea, .dropdown, .settings-control');
+            // 「数值 + 单位」是一个控件：框内另有一个 input，行里量的是外框（文档序上外框在前）
+            const control = row.querySelector(
+              '.unit-field, input, textarea, .dropdown, .settings-control',
+            );
             const name = row.querySelector('.settings-name');
             const rect = row.getBoundingClientRect();
             const controlRect = control?.getBoundingClientRect();
@@ -369,7 +373,8 @@ describe('响应呈现格式（真实引擎）', () => {
 
       const section = page.locator('.request-editor .settings-section');
       expect(await section.locator('input.switch').count()).toBe(2);
-      expect(await section.locator('.dropdown').count()).toBe(3);
+      // 超时改为三态下拉后，这一节的下拉从 3 个变成 4 个（spec: 请求级超时覆盖）
+      expect(await section.locator('.dropdown').count()).toBe(4);
       expect(await section.locator('select').count()).toBe(0);
     } finally {
       await page.close();

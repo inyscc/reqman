@@ -4,8 +4,9 @@
 //! 白名单在挂载代理之前判定；系统代理在请求时刻读取，而不是启动时固化。
 
 use crate::error::AppResult;
+use crate::secrets::KeyProvider;
 use crate::storage::model::{ProxyConfig, ProxyMode, RequestSettings};
-use crate::storage::{variables, Db};
+use crate::storage::{proxy_credentials, variables, Db};
 use crate::url_util;
 
 /// 从操作系统环境读到的代理设置。
@@ -103,6 +104,9 @@ pub enum ProxyDecision {
 }
 
 /// 求解唯一生效的代理配置：请求 > 环境 > 全局，取第一个「实际生效」的层。
+///
+/// 「未配置」的层不生效因而被跳过；「不使用代理」的层生效因而**停下**——它表达的是
+/// 直连，不应被更低层级的代理接管（spec: http-engine「三级代理」）。
 pub fn resolve_proxy(
     request_proxy: Option<&ProxyConfig>,
     environment_proxy: Option<&ProxyConfig>,
@@ -116,21 +120,28 @@ pub fn resolve_proxy(
 }
 
 /// 从存储读取三层配置并求解。
+///
+/// 求解出的那一层在这里解出明文凭据：只有发送路径需要它，读取路径一律不回传凭据。
 pub fn resolve_proxy_for_request(
     db: &Db,
     settings: &RequestSettings,
     environment_id: Option<&str>,
+    key_provider: &dyn KeyProvider,
 ) -> AppResult<Option<ProxyConfig>> {
     let global = variables::global_proxy(db)?;
     let environment = match environment_id {
         Some(id) => variables::get_environment(db, id)?.proxy,
         None => None,
     };
-    Ok(resolve_proxy(
-        settings.proxy.as_ref(),
-        environment.as_ref(),
-        global.as_ref(),
-    ))
+
+    Ok(
+        resolve_proxy(
+            settings.proxy.as_ref(),
+            environment.as_ref(),
+            global.as_ref(),
+        )
+        .map(|proxy| proxy_credentials::unseal(proxy, key_provider)),
+    )
 }
 
 /// 结合目标 URL 与系统代理设置，得出最终决定。
@@ -154,7 +165,8 @@ pub fn decide(
     }
 
     match proxy.mode {
-        ProxyMode::None => ProxyDecision::Direct,
+        // 求解过程只产出「生效」的层，因此这两档都以直连收场。
+        ProxyMode::Inherit | ProxyMode::None => ProxyDecision::Direct,
         ProxyMode::Manual => match proxy.url.as_deref().map(str::trim) {
             Some(url) if !url.is_empty() => ProxyDecision::Use {
                 url: url.to_string(),
@@ -203,13 +215,32 @@ mod tests {
     }
 
     #[test]
-    fn ineffective_layers_are_skipped() {
-        let request = ProxyConfig::default(); // mode None -> 不生效
+    fn unconfigured_layers_are_skipped() {
+        let request = ProxyConfig::default(); // 「未配置」不生效
         let environment = ProxyConfig::manual("http://environment:2");
         let resolved = resolve_proxy(Some(&request), Some(&environment), None).unwrap();
         assert_eq!(resolved.url.as_deref(), Some("http://environment:2"));
 
         assert!(resolve_proxy(Some(&ProxyConfig::default()), None, None).is_none());
+    }
+
+    /// 「不使用代理」是该层的最终决定，SHALL NOT 被更低层级的代理接管。
+    #[test]
+    fn an_explicit_direct_layer_is_not_taken_over_by_a_lower_one() {
+        let direct = ProxyConfig::direct();
+        let environment = ProxyConfig::manual("http://environment:2");
+        let global = ProxyConfig::manual("http://global:3");
+
+        let resolved = resolve_proxy(Some(&direct), Some(&environment), Some(&global)).unwrap();
+        assert_eq!(resolved.mode, ProxyMode::None, "请求级直连应停在请求层");
+        assert_eq!(
+            decide(Some(&resolved), "http://public.test/", &SystemProxyEnv::default()),
+            ProxyDecision::Direct,
+            "请求级直连应真的直连，而不是落到全局代理"
+        );
+
+        let resolved = resolve_proxy(None, Some(&direct), Some(&global)).unwrap();
+        assert_eq!(resolved.mode, ProxyMode::None, "环境级直连同样拦得住全局");
     }
 
     #[test]
@@ -240,7 +271,7 @@ mod tests {
             url: Some("http://proxy:8080".into()),
             username: Some("u".into()),
             password: Some("p".into()),
-            no_proxy: Vec::new(),
+            ..ProxyConfig::default()
         };
         match decide(Some(&proxy), "http://public.test/", &SystemProxyEnv::default()) {
             ProxyDecision::Use {
@@ -317,10 +348,12 @@ mod tests {
 
     #[test]
     fn resolve_for_request_reads_environment_then_global_from_storage() {
+        use crate::secrets::MemoryKeyProvider;
         use crate::storage::model::Scope;
         use crate::storage::{variables, workspace, Db};
 
         let db = Db::open_in_memory().expect("打开数据库");
+        let key = MemoryKeyProvider::default();
         let workspace_id = workspace::list(&db).unwrap().remove(0).id;
         let env = variables::create_environment(&db, &workspace_id, "开发").unwrap();
 
@@ -329,7 +362,7 @@ mod tests {
             .unwrap();
 
         let settings = RequestSettings::default();
-        let resolved = resolve_proxy_for_request(&db, &settings, Some(&env.id)).unwrap();
+        let resolved = resolve_proxy_for_request(&db, &settings, Some(&env.id), &key).unwrap();
         assert_eq!(resolved.unwrap().url.as_deref(), Some("http://env:2"));
 
         // 请求级最高
@@ -337,12 +370,12 @@ mod tests {
             proxy: Some(ProxyConfig::manual("http://request:3")),
             ..RequestSettings::default()
         };
-        let resolved = resolve_proxy_for_request(&db, &settings, Some(&env.id)).unwrap();
+        let resolved = resolve_proxy_for_request(&db, &settings, Some(&env.id), &key).unwrap();
         assert_eq!(resolved.unwrap().url.as_deref(), Some("http://request:3"));
 
         // 没有活动环境时用全局
         let resolved =
-            resolve_proxy_for_request(&db, &RequestSettings::default(), None).unwrap();
+            resolve_proxy_for_request(&db, &RequestSettings::default(), None, &key).unwrap();
         assert_eq!(resolved.unwrap().url.as_deref(), Some("http://global:1"));
 
         let _ = Scope::Global;

@@ -41,6 +41,11 @@ pub enum ErrorCode {
     ConnectionFailed,
     RequestBuild,
     Io,
+
+    // 请求取消
+    /// 用户主动中止了这次发送。**不是失败**：界面不该把它呈现为错误，
+    /// 但它必须与超时等失败可区分（spec: http-engine「请求取消」）。
+    Cancelled,
 }
 
 impl ErrorCode {
@@ -65,6 +70,7 @@ impl ErrorCode {
             ErrorCode::ConnectionFailed => "connection_failed",
             ErrorCode::RequestBuild => "request_build",
             ErrorCode::Io => "io",
+            ErrorCode::Cancelled => "cancelled",
         }
     }
 }
@@ -330,6 +336,7 @@ mod tests {
             ErrorCode::ConnectionFailed,
             ErrorCode::RequestBuild,
             ErrorCode::Io,
+            ErrorCode::Cancelled,
         ];
         let mut seen = std::collections::HashSet::new();
         for code in codes {

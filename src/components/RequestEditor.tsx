@@ -17,11 +17,14 @@ import type {
   HttpVersion,
   KeyValue,
   PickedFile,
-  ProxyConfig,
-  ProxyMode,
   RawLanguage,
   SavedRequest,
 } from '../lib/types';
+import { DEFAULT_TIMEOUT_MS } from '../lib/requestPreferences';
+import { ProxyConfigRows } from './ProxyConfigRows';
+
+/** 超时的三档选择；判别标签与 `TimeoutSetting` 一致，数值另由输入项承载。 */
+type RequestTimeoutMode = 'inherit' | 'unlimited' | 'custom';
 
 /** 请求编辑器的内层标签。`App` 直接复用它（容器侧不再另立一份同义声明）。 */
 export type Tab = 'params' | 'headers' | 'body' | 'auth' | 'scripts' | 'settings' | 'curl';
@@ -29,8 +32,14 @@ export type Tab = 'params' | 'headers' | 'body' | 'auth' | 'scripts' | 'settings
 export interface RequestBandProps {
   draft: SavedRequest;
   busy: boolean;
+  /**
+   * 该请求是否正在发送（spec: 地址栏）。它与 `busy` 必须分开：`busy` 还被保存请求、
+   * 保存实体脚本与改名共用，把取消挂到它上面会让「保存中」也出现取消入口。
+   */
+  sending: boolean;
   onChange: (next: SavedRequest) => void;
   onSend: () => void;
+  onCancel: () => void;
   /** 请求面板头（spec: 请求面板头的身份）——请求身份落在这里，请求级操作不在这里。 */
   collectionName: string | null;
   dirty: boolean;
@@ -357,7 +366,8 @@ function KeyValueTable({
  * cURL 落在请求编辑器的标签里（spec: cURL 快照标签），保存由 `Ctrl+S` 承担。
  */
 export function RequestBand(props: RequestBandProps) {
-  const { draft, busy, onChange, onSend, collectionName, dirty, nameRef } = props;
+  const { draft, busy, sending, onChange, onSend, onCancel, collectionName, dirty, nameRef } =
+    props;
   const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
 
   return (
@@ -431,9 +441,18 @@ export function RequestBand(props: RequestBandProps) {
           />
         </div>
 
-        <button className="primary" onClick={onSend} disabled={busy}>
-          发送
-        </button>
+        {/* 该位置的按钮随发送态切换（spec: 地址栏）：两种形态占同一位置，行的布局不变；
+            发送中不再能触发发送。取消是次要按钮而非主色——它是否决性动作，不是这一步的
+            主行动；也不加动效，它是高频状态切换。 */}
+        {sending ? (
+          <button onClick={onCancel} data-testid="cancel-send">
+            取消
+          </button>
+        ) : (
+          <button className="primary" onClick={onSend} disabled={busy}>
+            发送
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1169,38 +1188,69 @@ function SettingsEditor({
 }) {
   const settings = draft.settings;
 
-  const patchProxy = (next: Partial<ProxyConfig>) => {
-    const proxy: ProxyConfig = {
-      mode: 'manual',
-      url: null,
-      username: null,
-      password: null,
-      no_proxy: [],
-      ...settings.proxy,
-      ...next,
-    };
-    onChange({ ...settings, proxy });
-  };
-
   // 行式配置列表（spec: ui-layout「设置模态的配置列表」）：名称在左、控件在右，
   // 与设置模态同一套观感——两处都是「一堆配置项」的列表。
   return (
     <div className="settings-section">
+      {/* 超时三态（spec: ui-layout「请求级超时覆盖」）：数值项只在「自定义」时存在，
+          「跟随全局」与「不限制」都不靠输入框留空表达。 */}
       <div className="settings-row">
-        <span className="settings-name">超时（毫秒）</span>
-        <input
-          aria-label="超时毫秒"
-          type="number"
-          placeholder="0"
-          value={settings.timeout_ms ?? ''}
-          onChange={(event) =>
+        <span className="settings-name">超时</span>
+        <Dropdown<RequestTimeoutMode>
+          label="超时"
+          testId="request-timeout-mode"
+          value={settings.timeout.mode}
+          options={[
+            { value: 'inherit', label: '跟随全局' },
+            { value: 'unlimited', label: '不限制' },
+            { value: 'custom', label: '自定义' },
+          ]}
+          onChange={(mode) => {
+            if (mode === 'inherit') {
+              onChange({ ...settings, timeout: { mode: 'inherit' } });
+              return;
+            }
+            if (mode === 'unlimited') {
+              onChange({ ...settings, timeout: { mode: 'unlimited' } });
+              return;
+            }
             onChange({
               ...settings,
-              timeout_ms: event.target.value === '' ? null : Number(event.target.value),
-            })
-          }
+              timeout: {
+                mode: 'custom',
+                ms:
+                  settings.timeout.mode === 'custom'
+                    ? settings.timeout.ms
+                    : DEFAULT_TIMEOUT_MS,
+              },
+            });
+          }}
         />
       </div>
+
+      {settings.timeout.mode === 'custom' && (
+        <div className="settings-row stacked">
+          <label className="settings-name" htmlFor="request-timeout-ms">
+            超时（毫秒）
+          </label>
+          <input
+            id="request-timeout-ms"
+            aria-label="超时毫秒"
+            type="number"
+            min={0}
+            value={settings.timeout.ms}
+            onChange={(event) => {
+              const parsed = Number.parseInt(event.target.value, 10);
+              if (!Number.isFinite(parsed) || parsed < 0) return;
+              // 0 等同于「不限制」——与设置模态里的全局超时同一个写法，不在这里另造含义
+              onChange({
+                ...settings,
+                timeout: parsed === 0 ? { mode: 'unlimited' } : { mode: 'custom', ms: parsed },
+              });
+            }}
+          />
+        </div>
+      )}
 
       <label className="settings-row">
         <span className="settings-name">跟随重定向</span>
@@ -1263,62 +1313,15 @@ function SettingsEditor({
         />
       </div>
 
-      <div className="settings-row">
-        <span className="settings-name">请求级代理</span>
-        <Dropdown<ProxyMode>
-          label="请求级代理模式"
-          testId="request-proxy-mode"
-          value={settings.proxy?.mode ?? 'none'}
-          options={[
-            { value: 'none', label: '不使用' },
-            { value: 'system', label: '跟随系统' },
-            { value: 'manual', label: '手工填写' },
-          ]}
-          onChange={(mode) => {
-            if (mode === 'none') {
-              onChange({ ...settings, proxy: null });
-              return;
-            }
-            patchProxy({ mode });
-          }}
-        />
-      </div>
-
-      {settings.proxy?.mode === 'manual' && (
-        <>
-          <div className="settings-row stacked">
-            <label className="settings-name" htmlFor="proxy-url">
-              代理地址
-            </label>
-            <input
-              id="proxy-url"
-              aria-label="代理地址"
-              placeholder="http://127.0.0.1:8080"
-              value={settings.proxy.url ?? ''}
-              onChange={(event) => patchProxy({ url: event.target.value })}
-            />
-          </div>
-          <div className="settings-row stacked">
-            <label className="settings-name" htmlFor="proxy-no-proxy">
-              不走代理的主机
-            </label>
-            <input
-              id="proxy-no-proxy"
-              aria-label="不走代理的主机"
-              placeholder="localhost, *.internal"
-              value={settings.proxy.no_proxy.join(',')}
-              onChange={(event) =>
-                patchProxy({
-                  no_proxy: event.target.value
-                    .split(',')
-                    .map((entry) => entry.trim())
-                    .filter((entry) => entry.length > 0),
-                })
-              }
-            />
-          </div>
-        </>
-      )}
+      {/* 三级代理的最高层（spec: http-engine「三级代理」）：四态，其中「未配置」顺位到
+          环境与全局，「不使用代理」停在本层直连。三个层级共用同一份行式列表。 */}
+      <ProxyConfigRows
+        proxy={settings.proxy ?? null}
+        onChange={(next) => onChange({ ...settings, proxy: next })}
+        allowInherit
+        idPrefix="request"
+        name="请求级代理"
+      />
     </div>
   );
 }

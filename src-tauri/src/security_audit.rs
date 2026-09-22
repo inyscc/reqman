@@ -425,6 +425,7 @@ fn the_command_surface_is_the_audited_one() {
         "folder_set_script",
         "variables_preview",
         "send_request",
+        "cancel_send",
         "response_body_span",
         "pick_upload_file",
         "backup_export",
@@ -545,6 +546,78 @@ fn the_bridge_exit_set_is_the_audited_one() {
 
 /// 脚本运行时不得给前端新增任何通用网络能力；脚本的一切出站都只能经
 /// 具名命令进入 Rust（design D1 / D3）。
+/// 代理凭据在进入存储之前必须加密（spec: storage-foundation「敏感值不以明文落盘」）。
+///
+/// 守的是「把加密调用摘掉」这类改动：摘掉之后没有任何症状——密码只是静默地以明文落库。
+/// 因此断言三处写入路径（全局、环境、请求）都经过凭据加密。
+///
+/// 按字面匹配命令层源码，所以本文件与之相关的注释里**刻意不写**那个调用形态：
+/// 注释里出现同样的字面量，会让断言在调用被摘掉后依然通过（与 `lib.rs` 的拖放守卫
+/// 同一条教训）。
+#[test]
+fn proxy_credentials_are_sealed_before_storage() {
+    let source = read("src/commands.rs");
+    let sealed = source.matches("proxy_credentials::seal(").count();
+
+    assert!(
+        sealed >= 3,
+        "全局、环境、请求三处写入路径都必须加密代理凭据，实际只找到 {} 处",
+        sealed
+    );
+}
+
+/// 代理凭据以密文落库，且数据库文件与备份副本里都检索不到它。
+///
+/// 与上面的字面断言互补：那条守「调用还在」，这条守「结果正确」，它同时覆盖两种走坏
+/// 的方式——加密被绕开时凭据**根本不会落库**（对外形状不含明文，于是被静默丢弃），
+/// 落库形态写错时密码会以明文漏进文件。两条断言都要在。
+#[test]
+fn a_saved_proxy_credential_is_not_in_the_database_or_its_backup() {
+    use crate::commands;
+    use crate::secrets::MemoryKeyProvider;
+    use crate::state::AppState;
+    use crate::storage::model::ProxyConfig;
+    use crate::storage::{backup, variables, Db};
+    use crate::testutil::{contains_bytes, TempDir};
+    use std::sync::Arc;
+
+    let plaintext = "proxy-pass-audit-7d4e";
+    let dir = TempDir::new("audit-proxy-credential");
+    let db = Db::open(dir.join("reqman.db")).expect("打开数据库");
+    let app = AppState::with_db(
+        db,
+        Arc::new(MemoryKeyProvider::default()),
+        dir.join("scratch"),
+    );
+
+    let mut proxy = ProxyConfig::manual("http://127.0.0.1:8080");
+    proxy.username = Some("u".into());
+    proxy.password = Some(plaintext.into());
+    commands::set_global_proxy(&app, Some(proxy)).expect("写入全局代理");
+
+    // 先钉住正面事实：凭据确实以密文落了库。加密被绕开时这里是第一个红的断言——
+    // 那种走坏方式不会漏明文，而是把密码静默丢掉。
+    let stored = variables::global_proxy(&app.db)
+        .expect("读取全局代理")
+        .expect("应已保存");
+    assert!(stored.password_enc.is_some(), "凭据应已加密落库");
+    assert!(stored.password_readable, "刚写入的凭据应可读");
+
+    let database = std::fs::read(dir.join("reqman.db")).expect("读数据库文件");
+    assert!(
+        !contains_bytes(&database, plaintext.as_bytes()),
+        "数据库文件里不应出现代理密码明文"
+    );
+
+    let backup_path = dir.join("backup.reqman");
+    backup::export(&app.db, &backup_path).expect("导出备份");
+    let backup = std::fs::read(&backup_path).expect("读备份文件");
+    assert!(
+        !contains_bytes(&backup, plaintext.as_bytes()),
+        "备份副本里不应出现代理密码明文"
+    );
+}
+
 #[test]
 fn the_script_runtime_adds_no_general_network_ability() {
     let source = read("../src/lib/scriptRuntime.ts");

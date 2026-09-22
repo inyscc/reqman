@@ -312,7 +312,7 @@ export function ResponsePanel({
           <>
             {response.truncated && (
               <div className="notice warn" role="status">
-                正文超过体积上限，界面只持有前 {humanBytes(response.pretty_print_threshold > 0 ? Math.min(response.size_bytes, 50 * 1024 * 1024) : response.size_bytes)}；
+                正文超过体积上限，界面只持有前 {humanBytes(Math.min(response.size_bytes, response.size_limit_bytes))}；
                 完整正文可用「保存全文」取回。
               </div>
             )}

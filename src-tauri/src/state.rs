@@ -1,6 +1,7 @@
 //! 应用运行态：数据库、密钥来源、上传句柄与响应仓库。
 
 use crate::error::AppResult;
+use crate::net::cancel::SendRegistry;
 use crate::net::cookies::CookieJar;
 use crate::net::limits::MAX_STORED_RESPONSES;
 use crate::net::response::ResponseStore;
@@ -18,6 +19,8 @@ pub struct AppState {
     pub responses: Arc<ResponseStore>,
     /// 应用级 Cookie Jar（按域共享，不随工作区分区；design D12）。
     pub cookies: Arc<CookieJar>,
+    /// 在飞请求的会话注册表（spec: http-engine「请求取消」）。
+    pub sends: Arc<SendRegistry>,
 }
 
 impl AppState {
@@ -37,6 +40,7 @@ impl AppState {
                 data_dir.join("responses"),
             )),
             cookies: Arc::new(CookieJar::new()),
+            sends: Arc::new(SendRegistry::new()),
         })
     }
 
@@ -51,6 +55,7 @@ impl AppState {
                 temp_root.join("responses"),
             )),
             cookies: Arc::new(CookieJar::new()),
+            sends: Arc::new(SendRegistry::new()),
         }
     }
 }

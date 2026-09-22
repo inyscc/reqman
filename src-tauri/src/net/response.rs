@@ -81,6 +81,36 @@ pub async fn read_body(
     })
 }
 
+/// 响应正文的落盘副本：在登记进仓库之前，清理由这个守卫负责。
+///
+/// 落盘文件是**惰性**创建的（只有正文超出内存前缀才写），而清理原本只挂在已登记的条目上
+/// ——登记发生在正文读完**之后**。于是取消（或任何中途失败）会让文件无人认领，在会话内
+/// 累积（超大响应尤其明显，而那恰好是最可能被取消的一类请求）。
+pub struct SpillGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl SpillGuard {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// 文件的所有权已交给仓库（或本来就不存在），守卫不再负责清理。
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SpillGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // 文件可能从未创建过（正文没超限），删除失败是正常情况
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// 一段正文。
 #[derive(Debug, Clone, Serialize)]
 pub struct ResponseSpan {

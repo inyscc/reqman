@@ -42,6 +42,7 @@ function sentResponse(): ResponsePayload {
     body_base64: null,
     pretty_available: true,
     pretty_print_threshold: 1024 * 1024,
+    size_limit_bytes: 50 * 1024 * 1024,
     insecure_warning: false,
     final_url: 'https://api.test/ping',
     via_proxy: false,
@@ -362,6 +363,51 @@ describe('脚本执行编排', () => {
     const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
     expect(printed).toContain('code= 201');
     expect(printed).toContain('{"ok":true}');
+  }, 30_000);
+
+  it('取消时该阶段立刻结束，并保留已经产生的输出（spec: 请求取消）', async () => {
+    const { commands: base } = fakeCommands();
+    let cancelled = false;
+    let fire: () => void = () => {};
+    const signal = new Promise<void>((resolve) => {
+      fire = resolve;
+    });
+    const cancellation = { attemptId: 'attempt-1', signal, isCancelled: () => cancelled };
+
+    // 挂住脚本发出的请求：脚本于是停在等回执上，模拟「取消发生在脚本段」
+    const sentRequests = vi.fn(() => new Promise<ResponsePayload>(() => {}));
+    const commands = { ...base, sendRequest: sentRequests } as unknown as Commands;
+
+    const phase = runScriptPhase(
+      commands,
+      target,
+      'prerequest',
+      [
+        'console.log("第一段");',
+        'pm.sendRequest("https://api.test/slow", function () {});',
+        'console.log("不该出现");',
+      ],
+      null,
+      null,
+      undefined,
+      cancellation,
+    );
+
+    // 等脚本真的把请求派发出来（沙箱派发是异步的），再取消
+    for (let i = 0; i < 200 && sentRequests.mock.calls.length === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(sentRequests, '取消前脚本应已发出请求').toHaveBeenCalledTimes(1);
+    expect(sentRequests.mock.calls[0][0]).toMatchObject({ attempt_id: 'attempt-1' });
+
+    cancelled = true;
+    fire();
+
+    const result = await phase;
+
+    // 立刻收手：不等沙箱回调（那条路可能永不兑现），也不把后面的语句跑掉
+    expect(result.error, '取消不是失败').toBeNull();
+    expect(result.console.map((entry) => entry.args.join(' '))).toEqual(['第一段']);
   }, 30_000);
 
   it('未配置策略时 pm.sendRequest 不限制目标（与 Postman 一致）', async () => {

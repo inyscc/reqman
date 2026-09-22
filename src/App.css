@@ -1627,6 +1627,52 @@ tbody tr:focus-within .var-row-actions {
   justify-content: flex-end;
 }
 
+/* 数值行的上半：名称在左、控件在右（整宽行里仍然是一条行式布局） */
+.settings-row-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+/* 紧随其下的短提示：一句话，不解释怎么改变它 */
+.settings-hint {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+/* 数值与单位同框（spec: 设置模态的请求配置）：单位贴着数字，行里因此只有一个控件。
+   全局 input 自带边框与 100% 宽度，进到这个框里要把这两样让给外框。 */
+.unit-field {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  width: 200px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.unit-field input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.unit-field .unit {
+  display: flex;
+  align-items: center;
+  flex: none;
+  padding: 0 var(--space-3);
+  border-left: 1px solid var(--border);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
 /* 布尔项用开关（Postman 同款）：仍是 checkbox 的键盘行为与 label 关联，只把外观
    换成轨道 + 滑块；role="switch" 让辅助技术读作开关而不是复选框。 */
 input.switch {

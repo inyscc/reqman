@@ -8,6 +8,7 @@ pub mod cookies;
 pub mod db;
 pub mod migrations;
 pub mod model;
+pub mod proxy_credentials;
 pub mod requests;
 pub mod variables;
 pub mod workspace;

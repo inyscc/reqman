@@ -331,11 +331,15 @@ pub fn resolve_request(
     let effective_auth = apply_auth_layer(&request.auth, inherited_auth);
     let auth = resolve_auth(&effective_auth, &mut resolve_into);
 
+    // 凭据不参与变量解析：提交时它是明文、落库后是密文，两者都不是可解析的引用。
+    // 解析只覆盖代理地址与用户名，密文原样带过（spec: 三级代理）。
     let proxy = request.settings.proxy.as_ref().map(|proxy| ProxyConfig {
         mode: proxy.mode,
         url: proxy.url.as_deref().map(&mut resolve_into),
         username: proxy.username.as_deref().map(&mut resolve_into),
-        password: proxy.password.as_deref().map(|text| resolve_into(text)),
+        password: None,
+        password_enc: proxy.password_enc.clone(),
+        password_readable: proxy.password_readable,
         no_proxy: proxy.no_proxy.clone(),
     });
 
