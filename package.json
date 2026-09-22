@@ -34,7 +34,7 @@
     "@vitejs/plugin-react": "^6.0.2",
     "backbone": "^1.6.0",
     "cheerio": "^0.22.0",
-    "crypto-js": "^3.3.0",
+    "crypto-js": "^4.2.0",
     "happy-dom": "^20.14.5",
     "jsdom": "^30.0.1",
     "liquid-json": "^0.3.1",
