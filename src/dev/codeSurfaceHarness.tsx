@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { CodeSurface } from '../components/CodeSurface';
+import {
+  applyEditorAppearance,
+  currentEditorAppearance,
+  type EditorAppearance,
+} from '../lib/editorAppearance';
 import '../App.css';
 
 /**
@@ -27,7 +32,44 @@ interface SurfaceApi {
   setValue(uri: string, next: string): void;
   saveCount(): number;
   foldingCount(uri: string): Promise<number>;
+  /** 以下为编辑器外观用例的钩子（change: add-editor-appearance-settings）。 */
+  setAppearance(patch: Partial<EditorAppearance>): void;
+  /** 读编辑器与模型上**实际生效**的字体与缩进选项。 */
+  optionsOf(uri: string): Promise<{
+    fontFamily: string;
+    fontSize: number;
+    tabSize: number | null;
+    insertSpaces: boolean | null;
+  } | null>;
+  /** 给当前编辑器实例贴一个编号；`markOf` 拿不回来即说明实例被重建过。 */
+  markEditor(uri: string): Promise<number>;
+  markOf(uri: string): Promise<number | null>;
+  setScrollTop(uri: string, top: number): Promise<void>;
+  scrollTopOf(uri: string): Promise<number | null>;
+  foldAll(uri: string): Promise<void>;
+  /** 该编辑器 DOM 里可见的行数（折叠生效时会小于总行数）。 */
+  viewLineCount(uri: string): Promise<number>;
 }
+
+type MonacoModule = typeof import('monaco-editor');
+
+/** 按 uri 找到当前编辑器实例（与 `foldingCount` 同一套查找）。 */
+async function editorOf(uri: string): Promise<{
+  monaco: MonacoModule;
+  /** `getEditors()` 给的是更宽的 `ICodeEditor`（够用：只读选项、模型与滚动）。 */
+  editor: import('monaco-editor').editor.ICodeEditor | null;
+}> {
+  const { loadMonaco } = await import('../lib/monacoEnv');
+  const monaco = await loadMonaco();
+  const editor =
+    monaco.editor.getEditors().find((candidate) => candidate.getModel()?.uri.toString() === uri) ??
+    null;
+  return { monaco, editor };
+}
+
+/** 标记表：编号 → 被标记的实例。实例被重建后 `markOf` 会因身份不符返回 null。 */
+const editorMarks = new Map<string, { editor: unknown; id: number }>();
+let nextMarkId = 0;
 
 function Harness() {
   const [js, setJs] = useState('pm.environment.');
@@ -77,6 +119,51 @@ function Harness() {
         controller.triggerFoldingModelChanged?.();
         const model = await controller.getFoldingModel?.();
         return model?.regions?.length ?? 0;
+      },
+      setAppearance: (patch) => {
+        // 与设置面板同一条路径：归一 + 注入等宽变量 + 通知已挂出的编辑面
+        applyEditorAppearance({ ...currentEditorAppearance(), ...patch });
+      },
+      optionsOf: async (uri) => {
+        const { monaco, editor } = await editorOf(uri);
+        if (!editor) return null;
+        const model = editor.getModel();
+        return {
+          fontFamily: editor.getOption(monaco.editor.EditorOption.fontFamily),
+          fontSize: editor.getOption(monaco.editor.EditorOption.fontSize),
+          tabSize: model?.getOptions().tabSize ?? null,
+          insertSpaces: model?.getOptions().insertSpaces ?? null,
+        };
+      },
+      markEditor: async (uri) => {
+        const { editor } = await editorOf(uri);
+        if (!editor) throw new Error(`没有找到编辑器：${uri}`);
+        nextMarkId += 1;
+        editorMarks.set(uri, { editor, id: nextMarkId });
+        return nextMarkId;
+      },
+      markOf: async (uri) => {
+        const { editor } = await editorOf(uri);
+        const marked = editorMarks.get(uri);
+        // 身份不符 = 实例被重建过（外观改动不该走到这里）
+        if (!editor || !marked || marked.editor !== editor) return null;
+        return marked.id;
+      },
+      setScrollTop: async (uri, top) => {
+        const { editor } = await editorOf(uri);
+        editor?.setScrollTop(top);
+      },
+      scrollTopOf: async (uri) => {
+        const { editor } = await editorOf(uri);
+        return editor ? editor.getScrollTop() : null;
+      },
+      foldAll: async (uri) => {
+        const { editor } = await editorOf(uri);
+        await editor?.getAction('editor.foldAll')?.run();
+      },
+      viewLineCount: async (uri) => {
+        const { editor } = await editorOf(uri);
+        return editor?.getDomNode()?.querySelectorAll('.view-line').length ?? -1;
       },
     };
     (window as unknown as { __surface__: SurfaceApi }).__surface__ = api;

@@ -29,6 +29,11 @@ import { createEditingRegistry, SURFACE_PRIORITY } from './lib/editing';
 import { applyTreeMove, type TreeMove } from './lib/treeMoves';
 import { readSplitRatio, SPLIT_DEFAULT, writeSplitRatio } from './lib/layout';
 import {
+  DEFAULT_EDITOR_APPEARANCE,
+  applyEditorAppearance,
+  readEditorAppearance,
+} from './lib/editorAppearance';
+import {
   DEFAULT_PRESENTATION,
   readPresentation,
   type ResponsePresentation,
@@ -809,6 +814,15 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     return () => {
       cancelled = true;
     };
+  }, [client]);
+
+  // 编辑器外观同样是应用级的（不随工作区走），启动时读一次即生效：
+  // `applyEditorAppearance` 一头把等宽变量写到文档根（非 Monaco 的等宽面立刻跟随），
+  // 一头通知已挂出的编辑面各自 updateOptions。读不到就回落缺省。
+  useEffect(() => {
+    void readEditorAppearance(client)
+      .then((value) => applyEditorAppearance(value))
+      .catch(() => applyEditorAppearance(DEFAULT_EDITOR_APPEARANCE));
   }, [client]);
 
   useEffect(() => {

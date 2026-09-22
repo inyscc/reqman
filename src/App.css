@@ -86,7 +86,11 @@
   /* 字体：纯系统栈。应用离线优先，不引入字体文件、不挂 CDN */
   --font-ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, 'PingFang SC',
     'Microsoft YaHei', sans-serif;
+  /* 等宽的字体与字号由设置驱动（spec: 编辑器外观可配置）：这两行是**缺省值**，
+     也是「读回设置之前」的初值；运行时的值由 editorAppearance 写到文档根上覆盖它们
+     （内联样式优先于这里的规则）。初值必须与 DEFAULT_EDITOR_APPEARANCE 一致。 */
   --font-mono: 'Cascadia Mono', Consolas, ui-monospace, SFMono-Regular, Menlo, monospace;
+  --text-mono: 12px;
 
   color-scheme: light;
 }
@@ -183,8 +187,11 @@ textarea:focus-visible {
   outline-offset: 1px;
 }
 
+/* 文本域一律是等宽（cURL 快照、设置里的主机名单等），字号跟着编辑器外观走：
+   它们承载的是命令与名单这类「代码样」内容，与编辑面同族同号。 */
 textarea {
   font-family: var(--font-mono);
+  font-size: var(--text-mono);
   resize: vertical;
 }
 
@@ -1562,6 +1569,11 @@ tbody tr:focus-within .var-row-actions {
 .settings-section {
   display: flex;
   flex-direction: column;
+  /**
+   * 数值控件那一格的长度，**以「缩进数」为准**：有单位的（px / ms / MB）与没有单位的
+   * 一样长，行与行之间才对得齐。改长度只改这一个值，两种框一起动。
+   */
+  --field-narrow: 96px;
 }
 
 /* 区标题上方留一口气：与上一节的末行拉开距离，扫读时一眼能分出「换了一组」 */
@@ -1608,6 +1620,26 @@ tbody tr:focus-within .var-row-actions {
 .settings-row > .settings-control {
   width: auto;
   text-align: right;
+}
+
+/* 下拉按内容收窄、贴着右缘（菜单同样从右缘展开，见 Dropdown 的 align='right'）：
+   给它 200px 时触发器是透明框、可见文字停在框的左端，看上去比同行的输入框偏左一大截。 */
+.settings-row > .dropdown {
+  width: auto;
+}
+
+/* 控件按内容定宽：字体栈要写得下一整条，数值只要几格。 */
+.settings-row > input.field-wide {
+  width: 320px;
+}
+
+/* 数值控件一律以「缩进数」那格为准（--field-narrow）：没有单位的（缩进数）与「数值 + 单位」
+   同框的（字号 / 超时 / 体积上限）一样长——单位是挤在格子里，而不是把整格撑宽。
+   单位框按设置区内的祖先匹配，不写成行的直接子元素：超时那行的单位框嵌在
+   `.settings-row-main` 里（它下面还有一行短提示）。 */
+.settings-row > input.field-narrow,
+.settings-section .unit-field {
+  width: var(--field-narrow);
 }
 
 /* 整宽行：名称在上、控件在下（文本域挤不进右侧那一列） */
@@ -2490,8 +2522,10 @@ pre.body {
   max-height: 100%;
   white-space: pre-wrap;
   word-break: break-word;
+  /* 纯文本正文块（大正文降级 / Hex / 二进制回退）：与编辑面同族同号，
+     同一份内容在两条渲染路径之间切换时不该换字号（spec: 编辑器外观可配置）。 */
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-mono);
 }
 
 /* Hex 视图：三列靠空格对齐，因此不能像其它 pre 那样断行（pre-wrap 会把

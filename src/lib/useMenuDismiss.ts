@@ -4,7 +4,8 @@ import { useEffect, type RefObject } from 'react';
  * 浮层的关闭规则（spec: 通用下拉的观感与菜单行为；design D2）。
  *
  * 三条：**点击菜单与豁免选择器之外的地方**、**Esc**、**菜单之外的容器滚动**（capture
- * 阶段，祖先滚动也算）。三条都不调用 bridge、不改数据——只退出浮层。
+ * 阶段，祖先滚动也算；只认挂载之后发生的滚动，见实现处的注释）。三条都不调用 bridge、
+ * 不改数据——只退出浮层。
  *
  * 第三条的边界值得记下来：菜单**自身**的滚动不算。菜单的选项区就是滚动容器（选项多过
  * 可视高度时靠它滚动），若把它也算作"容器滚动"，第一条滚动就关掉菜单，超出一屏的选项
@@ -22,6 +23,19 @@ export function useMenuDismiss(
   exemptSelector?: string,
 ): void {
   useEffect(() => {
+    /**
+     * 本次监听挂载的时刻，用来给滚动事件判「新旧」。
+     *
+     * 滚动事件是**异步**派发的：浏览器要到下一次渲染机会才投递。于是在浮层打开**之前**
+     * 就已经排队的滚动（最常见的是「把触发器滚进视口」那一次——点一下触发器，滚动在先、
+     * 挂载在后），会在浮层刚挂上之后抵达并把它关掉，症状是**第一次点下拉没反应、点第二次
+     * 才开**。判据是事件自带的创建时刻：早于本次挂载的滚动不是「浮层开着的时候用户滚的」，
+     * 一律跳过；之后的滚动照旧关。
+     *
+     * 效果重挂时这个时刻跟着前移，因此只跳过那一次陈旧的滚动，不会把之后的滚动也放过。
+     */
+    const attachedAt = performance.now();
+
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       // 菜单自身的触发器（行内菜单的「⋯」）由各自的处理器开关，这里只处理「点到别处」
@@ -35,6 +49,8 @@ export function useMenuDismiss(
     // 只关"别人滚了"这一种：菜单自己滚不算（见文件头）。判定与"点到菜单里不算点到外面"
     // 同源——豁免选择器 + 触发器的根节点，两处都豁免同一批节点。
     const onScroll = (event: Event) => {
+      // 见 attachedAt：打开浮层之前就已经排队的滚动不算「别人滚了」
+      if (event.timeStamp > 0 && event.timeStamp < attachedAt) return;
       const target = event.target;
       if (exemptSelector && target instanceof Element && target.closest(exemptSelector)) return;
       if (ref.current && target instanceof Node && ref.current.contains(target)) return;

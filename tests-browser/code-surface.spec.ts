@@ -22,6 +22,37 @@ interface SurfaceApi {
   getValue(uri: string): string;
   foldingCount(uri: string): Promise<number>;
   saveCount(): number;
+  setAppearance(patch: Record<string, unknown>): void;
+  optionsOf(uri: string): Promise<{
+    fontFamily: string;
+    fontSize: number;
+    tabSize: number | null;
+    insertSpaces: boolean | null;
+  } | null>;
+  markEditor(uri: string): Promise<number>;
+  markOf(uri: string): Promise<number | null>;
+  foldAll(uri: string): Promise<void>;
+  viewLineCount(uri: string): Promise<number>;
+}
+
+/** 缺省的等宽字体栈（与 `editorAppearance` 的 DEFAULT_EDITOR_APPEARANCE 一致）。 */
+const DEFAULT_FONT_FAMILY =
+  "'Cascadia Mono', Consolas, ui-monospace, SFMono-Regular, Menlo, monospace";
+
+/** JSON 面的总行数（harness 的初值）：折叠后可见行数应小于它。 */
+const JSON_TOTAL_LINES = 6;
+
+/** 调 harness 暴露的驱动钩子：`invoke(page, 'optionsOf', uri)`。 */
+function invoke<T>(page: Page, method: string, ...args: unknown[]): Promise<T> {
+  return page.evaluate(
+    ({ method, args }) => {
+      const api = (
+        window as unknown as { __surface__: Record<string, (...rest: unknown[]) => unknown> }
+      ).__surface__;
+      return api[method](...args);
+    },
+    { method, args },
+  ) as Promise<T>;
 }
 
 describe('CodeSurface 真身（Monaco in Blink）', () => {
@@ -151,5 +182,111 @@ describe('CodeSurface 真身（Monaco in Blink）', () => {
     );
     expect(value).toContain('中文注释');
     await page.close();
+  });
+
+  // 外观（change: add-editor-appearance-settings）：字体与字号走编辑器选项，缩进走模型
+  // 选项；改动只 updateOptions，**不重建编辑器**——重建会丢滚动位置与折叠状态。
+  describe('编辑器外观', () => {
+    it('字体族与字号作用于已打开的编辑面', async () => {
+      const { page } = await openHarness();
+
+      const before = await invoke<{ fontFamily: string; fontSize: number } | null>(
+        page,
+        'optionsOf',
+        JSON_URI,
+      );
+      expect(before?.fontSize, '缺省字号应为 12').toBe(12);
+      expect(before?.fontFamily, '缺省应拿到系统等宽栈').toBe(DEFAULT_FONT_FAMILY);
+
+      await invoke(page, 'setAppearance', { fontSize: 14, fontFamily: 'Menlo, monospace' });
+
+      const after = await invoke<{ fontFamily: string; fontSize: number } | null>(
+        page,
+        'optionsOf',
+        JSON_URI,
+      );
+      expect(after?.fontSize).toBe(14);
+      expect(after?.fontFamily).toBe('Menlo, monospace');
+
+      // 选项改了但渲染没跟上是最容易漏的一种：落到 DOM 上再确认一次
+      const rendered = await page.evaluate(() => {
+        const line = document.querySelector('.monaco-editor .view-line') as HTMLElement | null;
+        return line ? getComputedStyle(line).fontSize : null;
+      });
+      expect(rendered).toBe('14px');
+      await page.close();
+    });
+
+    it('缩进以设置为准：正文里的 2 空格缩进不覆盖「缩进数 4」', async () => {
+      const { page } = await openHarness();
+
+      // harness 的 JSON 初值是 2 空格缩进；开着 detectIndentation 时 tabSize 会变成 2
+      const options = await invoke<{ tabSize: number | null; insertSpaces: boolean | null } | null>(
+        page,
+        'optionsOf',
+        JSON_URI,
+      );
+      expect(options?.tabSize, '缩进数设置应盖过正文里的缩进').toBe(4);
+      expect(options?.insertSpaces).toBe(true);
+
+      await page.locator('.monaco-editor').nth(1).click();
+      await page.keyboard.press('Control+Home');
+      await page.keyboard.press('Tab');
+
+      const value = await invoke<string>(page, 'getValue', JSON_URI);
+      expect(
+        value.startsWith('    {'),
+        `Tab 应插入 4 个空格，实际开头：${JSON.stringify(value.slice(0, 8))}`,
+      ).toBe(true);
+      await page.close();
+    });
+
+    it('缩进类型为 Tab 时按 Tab 插入制表符', async () => {
+      const { page } = await openHarness();
+      await invoke(page, 'setAppearance', { indentType: 'tab' });
+
+      const options = await invoke<{ insertSpaces: boolean | null } | null>(
+        page,
+        'optionsOf',
+        JSON_URI,
+      );
+      expect(options?.insertSpaces).toBe(false);
+
+      await page.locator('.monaco-editor').nth(1).click();
+      await page.keyboard.press('Control+Home');
+      await page.keyboard.press('Tab');
+
+      const value = await invoke<string>(page, 'getValue', JSON_URI);
+      expect(value.startsWith('\t'), '应插入一个制表符而不是 4 个空格').toBe(true);
+      await page.close();
+    });
+
+    it('改外观不重建编辑器：实例与折叠状态都保持', async () => {
+      const { page } = await openHarness();
+
+      const mark = await invoke<number>(page, 'markEditor', JSON_URI);
+
+      // 折叠范围是**异步**算出来的：先触发一次折叠模型（foldingCount 会 await 它），
+      // 否则 foldAll 会无事发生；折完再等 DOM 真的少了几行。
+      await invoke<number>(page, 'foldingCount', JSON_URI);
+      await invoke(page, 'foldAll', JSON_URI);
+      await page.waitForFunction(
+        (total) => {
+          const host = document.querySelectorAll('.monaco-editor')[1];
+          return host ? host.querySelectorAll('.view-line').length < total : false;
+        },
+        JSON_TOTAL_LINES,
+        { timeout: 5_000 },
+      );
+      const folded = await invoke<number>(page, 'viewLineCount', JSON_URI);
+      expect(folded, '折叠后可见行数应少于总行数').toBeLessThan(JSON_TOTAL_LINES);
+
+      await invoke(page, 'setAppearance', { fontSize: 15, indentCount: 8 });
+
+      const markAfter = await invoke<number | null>(page, 'markOf', JSON_URI);
+      expect(markAfter, '外观改动重建了编辑器（滚动与折叠会因此丢失）').toBe(mark);
+      expect(await invoke<number>(page, 'viewLineCount', JSON_URI)).toBe(folded);
+      await page.close();
+    });
   });
 });

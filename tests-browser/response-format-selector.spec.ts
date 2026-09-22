@@ -285,6 +285,9 @@ describe('响应呈现格式（真实引擎）', () => {
             const controlRect = control?.getBoundingClientRect();
             return {
               stacked: row.classList.contains('stacked'),
+              // 整宽行不止一类（主机名单是文本域、超时是「数值 + 单位」），
+              // 因此把控件标签一起带出来，断言才能挑中自己要的那一类
+              controlTag: control?.tagName ?? null,
               border: getComputedStyle(row).borderBottomWidth,
               rowWidth: round(rect.width),
               controlRight: controlRect ? round(controlRect.right) : null,
@@ -309,8 +312,9 @@ describe('响应呈现格式（真实引擎）', () => {
         expect(section[section.length - 1].border).toBe('0px');
       });
 
-      // 长文本项（主机名单）整宽，名称在上
-      const stacked = rows.find((row) => row.stacked)!;
+      // 长文本项（主机名单）整宽，名称在上。按控件类型挑它：分节顺序调整后，
+      // 文档序上第一个整宽行已经不是它了（现在是「请求」里的超时行）
+      const stacked = rows.find((row) => row.stacked && row.controlTag === 'TEXTAREA')!;
       expect(stacked.controlWidth).toBeGreaterThan(stacked.rowWidth - 2);
       expect(stacked.controlTop).toBeGreaterThan(stacked.nameTop!);
     } finally {

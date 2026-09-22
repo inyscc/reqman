@@ -1,5 +1,10 @@
 import { useEffect, useRef } from 'react';
 import type * as Monaco from 'monaco-editor';
+import {
+  currentEditorAppearance,
+  subscribeEditorAppearance,
+  type EditorAppearance,
+} from '../lib/editorAppearance';
 
 export interface CodeSurfaceProps {
   /** 模型 URI（`file://` 开头）：决定 TS/JSON worker 看到的文件名。同一编辑面保持稳定。 */
@@ -20,6 +25,36 @@ export interface CodeSurfaceProps {
   /** 脚本面：预热 JS/TS 语言服务，保证 `pm.*` 补全首次即就绪。 */
   enableCompletion?: boolean;
   onChange?: (value: string) => void;
+}
+
+/**
+ * 外观 → Monaco 选项。
+ *
+ * 分两处写是有原因的：字体与字号是**编辑器**选项（Monaco 把它们写进 DOM 的
+ * `.view-lines` 并用 canvas 量字宽，改 CSS 变量对它无效）；缩进是**模型**选项，
+ * 显式写给模型，不去赌「create 会不会把构造选项透给一个既有模型」。
+ */
+function fontOptions(appearance: EditorAppearance) {
+  return { fontFamily: appearance.fontFamily, fontSize: appearance.fontSize };
+}
+
+function indentOptions(appearance: EditorAppearance) {
+  return {
+    tabSize: appearance.indentCount,
+    insertSpaces: appearance.indentType === 'space',
+    // 按内容推断缩进必须关掉：开着它，正文里已有的缩进会覆盖设置，
+    // 「缩进数 4」在打开一份 2 空格缩进的 JSON 后就显得不生效（spec 明写以设置为准）。
+    detectIndentation: false,
+  };
+}
+
+/** 把外观写到编辑器与它的模型上——创建时与订阅回调共用这一个入口。 */
+function applyAppearance(
+  editor: Monaco.editor.IStandaloneCodeEditor,
+  appearance: EditorAppearance,
+): void {
+  editor.updateOptions(fontOptions(appearance));
+  editor.getModel()?.updateOptions(indentOptions(appearance));
 }
 
 /**
@@ -74,6 +109,9 @@ export function CodeSurface(props: CodeSurfaceProps) {
         monaco.editor.createModel(value, liveRef.current.language, modelUri);
       if (model.getValue() !== value) model.setValue(value);
 
+      // 读「此刻」的外观：编辑器是懒加载的，首次创建可能已经晚于用户改过设置
+      const appearance = currentEditorAppearance();
+
       editor = monaco.editor.create(hostRef.current, {
         model,
         theme: env.THEME_NAME,
@@ -84,18 +122,20 @@ export function CodeSurface(props: CodeSurfaceProps) {
         // 裁切问题改在 CSS 侧解决——`.code-surface` 不设 overflow:hidden，
         // 浮层本就该溢出编辑器显示（见 App.css 该段注释）。
         minimap: { enabled: false },
-        fontSize: 13,
+        ...fontOptions(appearance),
         lineNumbers: 'on',
         scrollBeyondLastLine: false,
         renderLineHighlight: liveRef.current.readOnly ? 'none' : 'line',
         overviewRulerLanes: 0,
         folding: true,
-        tabSize: 2,
+        ...indentOptions(appearance),
         ariaLabel: liveRef.current.ariaLabel,
         placeholder: liveRef.current.placeholder,
         padding: { top: 8, bottom: 8 },
       });
       editorRef.current = editor;
+      // 创建是异步的：这期间外观可能又变过一次，以此刻的值收口（同一入口，不重建编辑器）
+      applyAppearance(editor, currentEditorAppearance());
 
       sub = model.onDidChangeContent(() => {
         if (model) onChangeRef.current?.(model.getValue());
@@ -144,6 +184,18 @@ export function CodeSurface(props: CodeSurfaceProps) {
   useEffect(() => {
     editorRef.current?.updateOptions({ ariaLabel });
   }, [ariaLabel]);
+
+  // 外观改动即时作用于**当前已打开**的编辑面：只改选项，SHALL NOT 重建编辑器——
+  // 重建会丢滚动位置与折叠状态，而 spec 明确要求外观改动不重置查看状态。
+  // （创建路径自己会读当前外观，因此这里不必先 apply 一次。）
+  useEffect(
+    () =>
+      subscribeEditorAppearance((appearance) => {
+        const editor = editorRef.current;
+        if (editor) applyAppearance(editor, appearance);
+      }),
+    [],
+  );
 
   return (
     <div
