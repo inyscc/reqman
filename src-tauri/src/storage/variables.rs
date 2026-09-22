@@ -4,7 +4,7 @@
 //! 敏感值不以明文落盘。
 
 use super::model::{setting_keys, Environment, Id, ProxyConfig, Scope, Variable};
-use super::{from_json, new_id, now, require_name, to_json, Db};
+use super::{apply_order, from_json, new_id, now, require_name, to_json, Db};
 use crate::error::{AppError, AppResult};
 use crate::secrets::{self, KeyProvider, StoredValue};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -105,6 +105,25 @@ pub(crate) fn insert_environment(
         params![id, workspace_id, name, next, ts],
     )?;
     Ok(id)
+}
+
+/// 按给定顺序重写某个工作区下全部环境的顺序（下标即 `sort_order`）。
+///
+/// 排序本身复用工作区级的 `apply_order`（与 `reorder_collections` 同一套约定），但这里
+/// **必须裹在事务里**：`Db::write` 只是「经单写者串行化」，不是事务——底层的 `apply_order`
+/// 是逐条 `UPDATE`，中途发现某个 id 不属于该工作区时，前面几条已经提交，于是"整批拒绝"
+/// 变成"半批写入"（顺序看起来对、重新读取才发现差了一格）。与 `reorder_variables` 的
+/// 整批语义对齐，`write_tx` 让失败整批回滚。
+pub fn reorder_environments(db: &Db, workspace_id: &str, ordered_ids: &[Id]) -> AppResult<()> {
+    // 与 create_environment 同款：先确认工作区存在，否则空顺序也能"成功"，报错就指不到原因
+    super::workspace::get(db, workspace_id)?;
+
+    db.write_tx(|conn| {
+        let tx = conn.transaction()?;
+        apply_order(&tx, "environments", ordered_ids, "workspace_id", workspace_id)?;
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 pub fn rename_environment(db: &Db, id: &str, name: &str) -> AppResult<Environment> {
@@ -1209,6 +1228,62 @@ mod tests {
             .filter(|e| e.is_active)
             .count();
         assert_eq!(active_count, 1);
+    }
+
+    #[test]
+    fn environments_follow_the_reordered_sequence() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let (workspace_id, _) = setup(&db);
+
+        let a = create_environment(&db, &workspace_id, "A").unwrap();
+        let b = create_environment(&db, &workspace_id, "B").unwrap();
+        let c = create_environment(&db, &workspace_id, "C").unwrap();
+
+        // 故意反序重排：顺序必须跟着传入的下标走，而不是回落到名称序
+        reorder_environments(&db, &workspace_id, &[c.id.clone(), a.id.clone(), b.id.clone()])
+            .unwrap();
+
+        let rows = list_environments(&db, &workspace_id).unwrap();
+        assert_eq!(
+            rows.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            vec![c.id, a.id, b.id]
+        );
+        assert_eq!(
+            rows.iter().map(|e| e.sort_order).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "下标即 sort_order"
+        );
+    }
+
+    #[test]
+    fn a_reorder_with_a_foreign_environment_writes_nothing() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let (workspace_id, _) = setup(&db);
+        let other = workspace::create(&db, "另一个工作区").unwrap();
+
+        let a = create_environment(&db, &workspace_id, "A").unwrap();
+        let b = create_environment(&db, &workspace_id, "B").unwrap();
+        let foreign = create_environment(&db, &other.id, "别处的环境").unwrap();
+
+        // 整批拒绝：合法的前两条也不该被写进去（半批写入正是"有时对、有时差一格"的来源）
+        let err = reorder_environments(
+            &db,
+            &workspace_id,
+            &[b.id.clone(), a.id.clone(), foreign.id.clone()],
+        )
+        .expect_err("不属于该工作区的条目应被拒绝");
+        assert_eq!(err.code, ErrorCode::NotFound);
+
+        let rows = list_environments(&db, &workspace_id).unwrap();
+        assert_eq!(
+            rows.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            vec![a.id, b.id]
+        );
+        assert_eq!(
+            rows.iter().map(|e| e.sort_order).collect::<Vec<_>>(),
+            vec![0, 1],
+            "失败后不应留下半批写入"
+        );
     }
 
     #[test]

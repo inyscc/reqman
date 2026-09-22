@@ -289,6 +289,15 @@ pub fn set_active_environment(
     variables::set_active_environment(&state.db, workspace_id, environment_id.as_deref())
 }
 
+/// 按给定顺序重写该工作区下全部环境的顺序（spec: Environments tab 环境列表的拖拽排序）。
+pub fn reorder_environments(
+    state: &AppState,
+    workspace_id: &str,
+    ordered_ids: &[String],
+) -> AppResult<()> {
+    variables::reorder_environments(&state.db, workspace_id, ordered_ids)
+}
+
 pub fn set_environment_proxy(
     state: &AppState,
     environment_id: &str,
@@ -855,6 +864,15 @@ pub fn environment_set_proxy(
     proxy: Option<ProxyConfig>,
 ) -> AppResult<Environment> {
     set_environment_proxy(&state, &environment_id, proxy)
+}
+
+#[tauri::command]
+pub fn environment_reorder(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    ordered_ids: Vec<String>,
+) -> AppResult<()> {
+    reorder_environments(&state, &workspace_id, &ordered_ids)
 }
 
 #[tauri::command]

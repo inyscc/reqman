@@ -109,6 +109,16 @@ describe('通用下拉（spec: 通用下拉的观感与菜单行为）', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it('菜单自身滚动不关闭菜单（否则超出一屏的选项永远不可达）', () => {
+    renderDropdown();
+    fireEvent.click(trigger());
+
+    // 选项区本身就是滚动容器：它自己滚不能算作「容器滚动」
+    fireEvent.scroll(options());
+
+    expect(screen.getByRole('listbox')).toBeTruthy();
+  });
+
   it('键盘可以走完一次选择：方向键移动、Enter 提交', () => {
     const { onChange } = renderDropdown();
     fireEvent.click(trigger());

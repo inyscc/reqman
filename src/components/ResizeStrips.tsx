@@ -48,10 +48,19 @@ export function ResizeStrips({ windowApi }: { windowApi: WindowCloser }) {
  * `input` / `textarea` 用通配而不是枚举具体的名称框类名：合并面包屑行之后
  * （change: rework-visual-system-and-app-chrome，design D4），请求名与实体名两个
  * 输入框都落进了这一行，而且将来再加输入控件也不会漏。
+ *
+ * 点名制的判据只有一条：**这个浮层会不会离开会话标签行的 DOM 子树**。凡脱离的都要在这里
+ * 点名——排除判定走 DOM 祖先，而 React 的事件冒泡走 React 树，所以浮层里的按下照样会冒到
+ * `onSessionBarMouseDown`；`.dropdown-menu` 里非 button / input 的区域（选项之间的间隙、
+ * 菜单空白处、选项区自己的滚动条）若不点名，按下时就会把整个窗口拖走
+ * （change: rework-environments-list）。行内菜单（`NodeMenu`）与变量浮层都在本行的子树里，
+ * 由祖先判定自然覆盖。
  */
 export function isInteractiveSessionBarTarget(event: ReactMouseEvent<HTMLElement>): boolean {
   const target = event.target as HTMLElement | null;
   return Boolean(
-    target?.closest('button, select, input, textarea, .env-select, .window-controls'),
+    target?.closest(
+      'button, select, input, textarea, .env-select, .dropdown-menu, .window-controls',
+    ),
   );
 }

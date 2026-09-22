@@ -153,6 +153,9 @@ export function createCommands(call: Invoker) {
       call<void>('environment_set_active', { workspaceId, environmentId }),
     environmentSetProxy: (environmentId: string, proxy: ProxyConfig | null) =>
       call<Environment>('environment_set_proxy', { environmentId, proxy }),
+    /** 按给定顺序重写该工作区下全部环境的顺序：下标即 `sort_order`。 */
+    environmentReorder: (workspaceId: string, orderedIds: string[]) =>
+      call<void>('environment_reorder', { workspaceId, orderedIds }),
     variableList: (scope: Scope, ownerId: string) =>
       call<Variable[]>('variable_list', { scope, ownerId }),
     variableSet: (args: SetVariableArgs) => call<Variable>('variable_set', { args }),

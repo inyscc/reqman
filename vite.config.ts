@@ -43,7 +43,17 @@ export default defineConfig(() => ({
       //    目录的文件监视会持有句柄，`openspec archive` 移动变更目录时会直接
       //    报 EPERM（rename 被拒），只有在 dev server 没跑时才成功。忽略掉它，
       //    归档就不必先关掉应用。
-      ignored: ["**/src-tauri/**", "**/openspec/**"],
+      //    `.codebuddy/` 与 `.agents/` 是 IDE 的 agent 资源目录，跟前端构建无关。
+      //    必须忽略的原因：`.codebuddy/skills/*` 里存在指向 `.agents/skills/*` 的
+      //    junction，当目标目录缺失（悬空 junction）时，Windows 对它的 stat 会返回
+      //    errno -4094 / `UNKNOWN`，chokidar 把它当致命错误抛出未捕获的 'error'
+      //    事件，直接让 dev server 进程崩溃（beforeDevCommand 非零退出）。
+      ignored: [
+        "**/src-tauri/**",
+        "**/openspec/**",
+        "**/.codebuddy/**",
+        "**/.agents/**",
+      ],
     },
   },
 }));

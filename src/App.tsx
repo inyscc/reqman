@@ -10,6 +10,7 @@ import {
   type EntitySaveStatus,
 } from './components/EntityScriptPanel';
 import { EnvironmentsPanel } from './components/EnvironmentsPanel';
+import { applyEnvironmentOrder } from './lib/environmentMoves';
 import { CollectionIcon, FolderIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
@@ -608,6 +609,26 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const environmentRemoved = (id: string) => {
     if (workspaceId) void loadEnvironments(workspaceId);
     if (environmentId === id) void activateEnvironment(null);
+  };
+
+  /**
+   * 环境顺序重排（spec: Environments tab 环境列表的拖拽排序）。
+   *
+   * 顺序由这里持有而不是面板本地：侧栏列表与主区会话标签行的环境选择器读的是**同一份**
+   * `environments`，乐观重排因此同时体现在两处（面板本地顺序会让两处不一致一个往返的
+   * 时间）。失败回滚到拖动前的数组并报错，避免界面与存储不一致。
+   */
+  const reorderEnvironments = async (orderedIds: string[]) => {
+    if (!workspaceId) return;
+    const previous = environments;
+    setEnvironments(applyEnvironmentOrder(previous, orderedIds));
+    setError(null);
+    try {
+      await client.environmentReorder(workspaceId, orderedIds);
+    } catch (caught) {
+      setEnvironments(previous);
+      setError(describeError(caught).message);
+    }
   };
 
   useEffect(() => {
@@ -1808,6 +1829,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               onActivate={(id) => void activateEnvironment(id)}
               onEnvironmentsChanged={() => void loadEnvironments(workspaceId)}
               onDeleted={environmentRemoved}
+              onReorder={(orderedIds) => void reorderEnvironments(orderedIds)}
             />
           ) : (
             <div className="muted">正在加载工作区…</div>

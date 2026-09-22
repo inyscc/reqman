@@ -398,6 +398,8 @@ fn the_command_surface_is_the_audited_one() {
         "environment_delete",
         "environment_set_active",
         "environment_set_proxy",
+        // 环境列表的拖拽排序：具名领域能力，只重写 sort_order，不引入新的能力类别
+        "environment_reorder",
         "variable_list",
         "variable_set",
         // 变量模型的扩展（rework-collection-tree-and-variable-model）：

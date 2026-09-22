@@ -1099,6 +1099,9 @@ main.main {
   flex: 1;
   /* 横向基线由 .sidebar-body 统一给，这里只补纵向的 */
   padding: var(--space-4) 0;
+  /* 悬浮滚动条的定位上下文（change: rework-environments-list）：OverlayScrollbar 按滚动
+     容器的 offsetTop 定位，因此这一层必须是 .env-list 的 offsetParent。 */
+  position: relative;
 }
 
 /* 变量行的开关与操作**不占一列**：它们属于「这一条变量」，跟在 key 那一列的末尾
@@ -1315,6 +1318,15 @@ tbody tr:focus-within .var-row-actions {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* 与集合树 / 键值表同款（change: rework-environments-list）：原生占位型滚动条出现时
+     吃掉 10px 行宽、消失时又还回来，右端元素会跟着横跳。滚动指示改由 OverlayScrollbar
+     悬浮绘制，不占行宽。 */
+  scrollbar-width: none;
+}
+
+.env-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 /* 环境行（spec: Environments tab 的列表观感与搜索）：行高明显大于集合树中的请求行
@@ -1352,6 +1364,8 @@ tbody tr:focus-within .var-row-actions {
   flex-wrap: wrap;
   gap: var(--space-1);
   border-radius: var(--radius-sm);
+  /* 拖拽手势不该带出原生文本选中（与集合树行同款） */
+  user-select: none;
 }
 
 /* 悬停不画底色块：环境行比树行高一截，同样一块浅底在这里会读成「一个大按钮框」。
@@ -1372,6 +1386,34 @@ tbody tr:focus-within .var-row-actions {
    强调色竖条——两者都曾让这一栏显得比内容更像告警。 */
 .env-row.active {
   background: var(--accent-soft);
+}
+
+/* 拖拽落点（change: rework-environments-list）：与集合树同款——落在某行的上 / 下半区，
+   就在那一侧画一条插入线，线在哪里、松手后就落在哪里。环境是单层列表，没有"移入"这第二种
+   意图，因此只有这一种落点。`.env-row` 已经是定位上下文，线贴着行边画在行间距里。 */
+.env-row.drop-before::after,
+.env-row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.env-row.drop-before::after {
+  top: -1px;
+}
+
+.env-row.drop-after::after {
+  bottom: -1px;
+}
+
+/* 被拖动的那一行淡出：留下位置感，但不抢落点的视觉焦点（与树行同款） */
+.env-row.dragging {
+  opacity: 0.45;
 }
 
 .env-row > .env-item {

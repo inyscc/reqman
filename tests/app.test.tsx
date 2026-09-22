@@ -179,6 +179,8 @@ interface Harness {
   environmentCreate: ReturnType<typeof vi.fn>;
   environmentRename: ReturnType<typeof vi.fn>;
   environmentDelete: ReturnType<typeof vi.fn>;
+  /** 环境列表的拖拽排序（change: rework-environments-list）。 */
+  environmentReorder: ReturnType<typeof vi.fn>;
   /** 变量就地编辑（change: add-variable-inline-editing）。 */
   variableSet: ReturnType<typeof vi.fn>;
   variableDelete: ReturnType<typeof vi.fn>;
@@ -334,6 +336,18 @@ function harness(options: {
   });
   const environmentSetActive = vi.fn(async (_workspaceId: string, id: string | null) => {
     activeEnvironmentId = id;
+  });
+  /** 重排：与真后端同口径——下标即 sort_order，且整批校验（缺项即拒绝，前端据此回滚）。 */
+  const environmentReorder = vi.fn(async (_workspaceId: string, orderedIds: string[]) => {
+    const byId = new Map(environmentStore.map((entry) => [entry.id, entry]));
+    const next = orderedIds
+      .map((id) => byId.get(id))
+      .filter((entry): entry is Environment => entry !== undefined);
+    if (next.length !== environmentStore.length) throw new Error('顺序与环境列表不一致');
+    next.forEach((entry, index) => {
+      entry.sort_order = index;
+    });
+    environmentStore.splice(0, environmentStore.length, ...next);
   });
 
   // 变量：假实现要真的记账，否则「改完值列表显示新值」无从验证。
@@ -504,6 +518,7 @@ function harness(options: {
     environmentSetProxy: async () => {
       throw new Error('未使用');
     },
+    environmentReorder,
     variableList,
     variableSet,
     variableCreate,
@@ -575,6 +590,7 @@ function harness(options: {
     environmentCreate,
     environmentRename,
     environmentDelete,
+    environmentReorder,
     variableSet,
     variableDelete,
     variableCreate,
@@ -2459,6 +2475,150 @@ describe('环境管理与全局选择器（add-collection-search-and-env-managem
     await waitFor(() => expect(envList().queryByText('测试环境')).toBeNull());
     await waitFor(() => expect(environmentSetActive).toHaveBeenLastCalledWith('w1', null));
     expect(envValue()).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 环境列表的拖拽排序（change: rework-environments-list）
+// ---------------------------------------------------------------------------
+
+describe('环境列表的拖拽排序（rework-environments-list）', () => {
+  /** 三个环境：名字带共同前缀，便于造「过滤生效而三行都还看得见」那种状态。 */
+  const threeEnvironments = [
+    environment({ id: 'e1', name: '环境甲' }),
+    environment({ id: 'e2', name: '环境乙' }),
+    environment({ id: 'e3', name: '环境丙' }),
+  ];
+
+  /** 侧栏列表里的名字，按界面从上到下的顺序（Globals 是固定项，不算在内）。 */
+  const rowOrder = (): string[] =>
+    Array.from(document.querySelectorAll('.env-panel .env-row'))
+      .map((row) => row.querySelector('.env-name')?.textContent ?? '')
+      .filter((name) => name !== '' && name !== 'Globals');
+
+  /** 把一行拖到另一行的上半 / 下半区：插入线画在那一侧（与集合树同款）。 */
+  const dragRow = (from: string, to: string, position: 'before' | 'after' = 'before') => {
+    const source = envList().getByText(from).closest('.env-row') as HTMLElement;
+    const target = envList().getByText(to).closest('.env-row') as HTMLElement;
+    // 落点靠行的纵向比例判定，而 jsdom 的矩形全是 0——先造一个 20px 高的行矩形
+    stubRect(target);
+    const transfer = dataTransfer();
+    const ratio = position === 'before' ? 0.2 : 0.8;
+    fireDrag('dragstart', source, 0, transfer);
+    fireDrag('dragover', target, ratio, transfer);
+    fireDrag('drop', target, ratio, transfer);
+    return { source, target, transfer };
+  };
+
+  async function openEnvPanel(client: Commands) {
+    render(<App client={client} />);
+    await tree().findByText('我的请求');
+    await openEnvironments();
+  }
+
+  it('落在某行的上 / 下半区分别插到它之前 / 之后（spec: 拖拽改变环境顺序）', async () => {
+    const { client, environmentReorder } = harness({ environments: threeEnvironments });
+    await openEnvPanel(client);
+
+    expect(rowOrder()).toEqual(['环境甲', '环境乙', '环境丙']);
+
+    // 上半区：插到「环境甲」之前
+    dragRow('环境丙', '环境甲', 'before');
+    expect(rowOrder()).toEqual(['环境丙', '环境甲', '环境乙']);
+    await waitFor(() =>
+      expect(environmentReorder).toHaveBeenLastCalledWith('w1', ['e3', 'e1', 'e2']),
+    );
+
+    // 下半区：插到「环境乙」之后（也就是把它放回原位）
+    dragRow('环境丙', '环境乙', 'after');
+    expect(rowOrder()).toEqual(['环境甲', '环境乙', '环境丙']);
+    await waitFor(() =>
+      expect(environmentReorder).toHaveBeenLastCalledWith('w1', ['e1', 'e2', 'e3']),
+    );
+  });
+
+  it('顺序在侧栏与主区选择器之间同步（同一份状态）', async () => {
+    const { client } = harness({ environments: threeEnvironments });
+    await openEnvPanel(client);
+
+    dragRow('环境丙', '环境甲');
+    expect(rowOrder()).toEqual(['环境丙', '环境甲', '环境乙']);
+
+    // 选择器的菜单顺序就是 environments 的顺序；首项固定是「无环境」
+    fireEvent.click(screen.getByTestId('env-select-trigger'));
+    const labels = within(screen.getByRole('listbox', { name: '环境' }))
+      .getAllByRole('option')
+      .map((option) => (option.textContent ?? '').replace('✓', '').trim());
+    expect(labels).toEqual(['无环境', '环境丙', '环境甲', '环境乙']);
+  });
+
+  it('Globals 不可拖、也不作落点（spec: Globals 不参与排序）', async () => {
+    const { client, environmentReorder } = harness({ environments: threeEnvironments });
+    await openEnvPanel(client);
+
+    const globals = envList().getByText('Globals').closest('.env-row') as HTMLElement;
+    expect(globals.getAttribute('draggable')).toBe('false');
+
+    // 把一个环境拖到 Globals 上：既不呈现落点，也不产生任何写入
+    const source = envList().getByText('环境丙').closest('.env-row') as HTMLElement;
+    const transfer = dataTransfer();
+    fireDrag('dragstart', source, 0, transfer);
+    fireDrag('dragover', globals, 0.5, transfer);
+    expect(globals.className).not.toMatch(/drop-(before|after)/);
+
+    fireDrag('drop', globals, 0.5, transfer);
+    expect(rowOrder()).toEqual(['环境甲', '环境乙', '环境丙']);
+    expect(environmentReorder).not.toHaveBeenCalled();
+  });
+
+  it('搜索态下禁用拖拽（spec: 搜索态下不可拖拽）', async () => {
+    const { client, environmentReorder } = harness({ environments: threeEnvironments });
+    await openEnvPanel(client);
+
+    // 过滤生效、但三行都还看得见——因此"拖不动"只能来自禁用，而不是行被滤掉
+    fireEvent.change(screen.getByLabelText('搜索环境'), { target: { value: '环境' } });
+    expect(rowOrder()).toEqual(['环境甲', '环境乙', '环境丙']);
+    const row = envList().getByText('环境丙').closest('.env-row') as HTMLElement;
+    expect(row.getAttribute('draggable')).toBe('false');
+
+    dragRow('环境丙', '环境甲');
+
+    expect(rowOrder()).toEqual(['环境甲', '环境乙', '环境丙']);
+    expect(environmentReorder).not.toHaveBeenCalled();
+  });
+
+  it('写入失败回滚到拖动前的顺序并提示（spec: 写入失败回滚）', async () => {
+    const { client, environmentReorder } = harness({ environments: threeEnvironments });
+    environmentReorder.mockRejectedValueOnce({ code: 'io', message: '顺序写不进去' });
+    await openEnvPanel(client);
+
+    dragRow('环境丙', '环境甲');
+
+    expect((await screen.findByTestId('app-error')).textContent).toContain('顺序写不进去');
+    expect(rowOrder()).toEqual(['环境甲', '环境乙', '环境丙']);
+  });
+
+  it('重排不改变激活环境，也不影响主区已打开的内容（spec: 拖拽不影响激活态与已打开内容）', async () => {
+    const { client } = harness({ environments: threeEnvironments });
+    render(<App client={client} />);
+    await openRequest();
+
+    pickEnvironment('环境甲');
+    await waitFor(() => expect(envValue()).toBe('e1'));
+
+    await openEnvironments();
+    dragRow('环境丙', '环境甲');
+    expect(rowOrder()).toEqual(['环境丙', '环境甲', '环境乙']);
+
+    // 激活态不变，主区的环境编辑器仍是同一个环境
+    expect(envValue()).toBe('e1');
+    expect((screen.getByLabelText('当前环境名称') as HTMLInputElement).value).toBe('环境甲');
+
+    // 已打开的请求还在：切回 Collections 即恢复
+    fireEvent.click(screen.getByRole('tab', { name: 'Collections' }));
+    expect((screen.getByLabelText('请求地址') as HTMLInputElement).value).toBe(
+      'https://api.test/users',
+    );
   });
 });
 

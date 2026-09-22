@@ -106,6 +106,7 @@ pub fn run() {
             commands::environment_delete,
             commands::environment_set_active,
             commands::environment_set_proxy,
+            commands::environment_reorder,
             commands::variable_list,
             commands::variable_set,
             commands::variable_delete,
