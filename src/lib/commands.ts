@@ -184,8 +184,15 @@ export function createCommands(call: Invoker) {
       call<void>('global_proxy_set', { proxy }),
 
     // 解析与发送
-    variablesPreview: (input: SendRequestInput) =>
-      call<RequestPreview>('variables_preview', { input }),
+    /**
+     * 解析一次请求（只解析、不发送）。
+     *
+     * `reveal` 决定 secret 取值以哪种形态回来：缺省为掩码（界面浮层用，不暴露可用凭据），
+     * 传 `true` 给出真实取值（脚本据此构造 `pm.request`）。两者是**同一次解析的两种呈现**，
+     * 因此共用一条命令——分成两条就是两份真相。
+     */
+    variablesPreview: (input: SendRequestInput, reveal = false) =>
+      call<RequestPreview>('variables_preview', { input, reveal }),
     sendRequest: (input: SendRequestInput) =>
       call<ResponsePayload>('send_request', { input }),
     /**

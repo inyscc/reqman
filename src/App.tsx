@@ -45,6 +45,7 @@ import {
   isScriptExecutionAllowed,
   renderVisualizer,
   runScriptPhase,
+  toSandboxRequest,
 } from './lib/scriptRuntime';
 import type {
   ConsoleEntry,
@@ -60,6 +61,15 @@ import type {
  * 响应区并弹出红色错误条（spec: http-engine「请求取消」）。
  */
 const CANCELLED_CODE = 'cancelled';
+
+/**
+ * 变量未能解析，请求没有发出去（spec: variable-engine「未解析变量提示」）。
+ *
+ * 与取消同属「请求没出去」：响应区不该被清空。但它**要**报错误——用户得知道是哪个
+ * 变量没解析出来。判定在后端的建连之前完成，因此这个错误来自 sendRequest 而不是
+ * 这里的预检查。
+ */
+const UNRESOLVED_CODE = 'unresolved_variables';
 import { withoutEmptyRows, cleanForSend } from './lib/rows';
 import { alignUrlAndParams } from './lib/url';
 import { createEntityStore } from './lib/store';
@@ -1356,11 +1366,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     setError(null);
     setScriptGate(null);
 
-    // 未解析变量在发出请求之前拦截（spec: 未解析变量提示）：占位符解析不出来时请求
-    // 不放出去，错误里点名是哪些变量。判据取**发送时刻**的解析结果，而不是界面上那份
-    // 防抖的预览状态——后者可能比用户最后一次键入滞后，会漏拦。
+    // 解析一次请求，供脚本构造 `pm.request` 与前置阶段的 Cookie 目标使用。
     //
-    // 拦在最前面（早于脚本门禁、早于任何网络调用），因此门禁放行后的重发同样被拦。
+    // 用**揭示模式**：脚本要读到真实取值来组装请求（掩码那一份是给界面浮层看的）。
+    //
+    // 未解析变量的拦截**不在这里**——它在后端的建连之前完成（spec: 未解析变量提示）。
+    // 拦在这一步会让「前置脚本写入变量 + 请求体引用它」这条 Postman 里的常规用法永远
+    // 发不出去：脚本是唯一会创建该变量的东西，却因为该变量不存在而跑不到。
     const sendInput = {
       saved_id: dirty ? null : draft.id,
       inline: cleanForSend(draft),
@@ -1368,13 +1380,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     };
     let resolved: RequestPreview;
     try {
-      resolved = await client.variablesPreview(sendInput);
+      resolved = await client.variablesPreview(sendInput, true);
     } catch (caught) {
       setError(describeError(caught).message);
-      return;
-    }
-    if (resolved.unresolved.length > 0) {
-      setError(`以下变量未能解析，请求没有发出：${resolved.unresolved.join('、')}`);
       return;
     }
 
@@ -1390,6 +1398,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       : null;
     let phases: { pre: (string | null)[]; test: (string | null)[] } | null = null;
     let requestUrl: string | null = null;
+    // 喂给沙箱的请求形态：一个阶段里的三段脚本共用同一份快照（design D6）。
+    // 它带上的是解析后的取值，脚本因此读得出本次请求的目标与内容。
+    const sandboxRequest = toSandboxRequest(resolved);
     let scriptError: string | null = null;
     let scriptVisualizer: VisualizerResult | null = null;
     const scriptConsole: ConsoleEntry[] = [];
@@ -1436,9 +1447,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           ],
         };
 
-        // `pm.cookies` 需要解析后的请求 URL（3.5）。复用拦截处那一次解析的结果——
-        // 启用脚本的请求不该为此多跑一趟。URL 中引用 secret 变量的极端情形会以掩码
-        // 形态出现，属已知限制。
+        // `pm.cookies` 在前置阶段以**脚本执行前解析出的目标**为准（spec: pm.cookies 的
+        // 当前请求目标）。这次解析走揭示模式，因此不再有「URL 里引用 secret 会以掩码
+        // 形态出现」那条旧限制。
         requestUrl = resolved.url || null;
 
         const pre = await runScriptPhase(
@@ -1450,6 +1461,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           requestUrl,
           SCRIPT_TIMEOUT_MS,
           attempt,
+          sandboxRequest,
         );
 
         scriptError = pre.error;
@@ -1480,9 +1492,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           'test',
           phases.test,
           payload,
-          requestUrl,
+          // 后置阶段的 `pm.cookies` 以**实际发出的请求目标**为准（spec: pm.cookies 的
+          // 当前请求目标）。它取自后端回带的发送目标，而不是重定向之后的 `final_url`：
+          // 前置脚本改写过目标变量时，两者并不是一回事。
+          payload.request_url || requestUrl,
           SCRIPT_TIMEOUT_MS,
           attempt,
+          sandboxRequest,
         );
 
         scriptError = scriptError ?? post.error;
@@ -1496,8 +1512,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       // 取消不是失败（spec: http-engine「请求取消」）：不弹红条、**不动响应区**。响应区里
       // 谁在里面就留着——可能是上一次的，也可能是本次已经到达的那一份（取消发生在后置
       // 脚本阶段时，响应早就写回了）。
+      //
+      // 未解析变量同属「请求没有出去」：响应区不该被清空，但错误要报出来
+      // （spec: variable-engine「未解析变量提示」）。
       if (described.code !== CANCELLED_CODE) {
-        patchRequestTab(key, (item) => ({ ...item, response: null }));
+        if (described.code !== UNRESOLVED_CODE) {
+          patchRequestTab(key, (item) => ({ ...item, response: null }));
+        }
         setError(described.message);
       }
 

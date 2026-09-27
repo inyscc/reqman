@@ -502,9 +502,19 @@ pub fn preview_request(
     request: &SavedRequest,
     inherited_auth: &AuthConfig,
     layers: &ScopeLayers,
+    // 是否揭示 secret 取值：
+    // `false` 给出掩码（界面浮层用：不暴露可用凭据）；`true` 给出真实取值（脚本据此
+    // 构造 `pm.request`——脚本按既有约定本就能读到 secret 明文，见 D15）。
+    reveal: bool,
 ) -> RequestPreview {
     let resolved = resolve_request(request, inherited_auth, layers);
-    let mask = |text: &str| mask_secret_values(text, layers);
+    let mask = |text: &str| {
+        if reveal {
+            text.to_string()
+        } else {
+            mask_secret_values(text, layers)
+        }
+    };
 
     let body_text = match &resolved.body {
         ResolvedBody::None => None,
@@ -536,8 +546,10 @@ pub fn preview_request(
         }),
     };
 
+    // 认证字段**不随揭示模式放开**：spec「pm.request 的填充」只要求暴露认证方式、
+    // 不暴露凭据，因此这里始终走掩码。
     let auth_key = match &resolved.auth {
-        ResolvedAuth::ApiKey { key, .. } => Some(mask(key)),
+        ResolvedAuth::ApiKey { key, .. } => Some(mask_secret_values(key, layers)),
         _ => None,
     };
 
@@ -799,7 +811,7 @@ mod tests {
         let request = sample_request();
 
         let resolved = resolve_request(&request, &AuthConfig::none(), &layers);
-        let preview = preview_request(&request, &AuthConfig::none(), &layers);
+        let preview = preview_request(&request, &AuthConfig::none(), &layers, false);
 
         // 非 secret 字段逐字一致
         assert_eq!(preview.method, resolved.method);
@@ -941,7 +953,7 @@ mod tests {
         let mut request = sample_request();
         request.settings.verify_tls = false;
 
-        let preview = preview_request(&request, &AuthConfig::none(), &layers);
+        let preview = preview_request(&request, &AuthConfig::none(), &layers, false);
         assert!(preview.insecure_warning);
     }
 

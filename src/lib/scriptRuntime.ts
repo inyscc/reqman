@@ -30,7 +30,14 @@ import type { SandboxContext } from 'postman-sandbox';
 import { describeError, type Commands } from './commands';
 import { emptyBody } from './types';
 import { effectiveByName } from './variables';
-import type { CookieView, ResponsePayload, SavedRequest, StoredValue, Variable } from './types';
+import type {
+  CookieView,
+  RequestPreview,
+  ResponsePayload,
+  SavedRequest,
+  StoredValue,
+  Variable,
+} from './types';
 
 export type ScriptListen = 'prerequest' | 'test';
 
@@ -332,6 +339,15 @@ function readScopeValues(raw: unknown): ScopeValues {
   return out;
 }
 
+/** 一组变量里，生效条目是 secret 的那些名字（与 `scopesOf` 同一套生效判定）。 */
+function secretNamesOf(variables: Variable[]): string[] {
+  const names: string[] = [];
+  for (const [name, variable] of effectiveByName(variables)) {
+    if (variable.is_secret) names.push(name);
+  }
+  return names;
+}
+
 function scopesOf(variables: Variable[]): ScopeValues {
   const out: ScopeValues = {};
   // 同名组里最靠下的启用条目生效，禁用条目整个不进入沙箱可见的作用域——
@@ -499,14 +515,119 @@ function toInlineRequest(raw: unknown): SavedRequest {
   };
 }
 
-/** 把后端响应转成沙箱能构造 sdk.Response 的形状。 */
-function toSandboxResponse(payload: ResponsePayload) {
+/** 喂给沙箱的请求形态：postman-collection `Request` 的 JSON 形状。 */
+export interface SandboxRequest {
+  url: string;
+  method: string;
+  header: { key: string; value: string }[];
+  body?: { mode: 'raw'; raw: string };
+  auth?: { type: string };
+}
+
+/**
+ * 把解析后的请求转成沙箱认识的形状（spec: pm-script-runtime「pm.request 的填充」）。
+ *
+ * 取值来自**解析之后**的结果，脚本因此读得出本次请求要到达的目标与内容。认证只给方式、
+ * 不给凭据——凭据本就不参与变量解析（后端的解析结果里没有它），spec 也只要求暴露方式。
+ *
+ * 已知限制：请求体一律以 `raw` 模式给出（解析结果只提供文本形态），表单类正文因此不会
+ * 带上它原本的模式；正文内容本身与实际一致。
+ */
+export function toSandboxRequest(preview: RequestPreview): SandboxRequest {
+  const request: SandboxRequest = {
+    url: preview.url,
+    method: preview.method,
+    header: preview.headers.map(([key, value]) => ({ key, value })),
+  };
+
+  if (preview.body_text) request.body = { mode: 'raw', raw: preview.body_text };
+  if (preview.auth_kind && preview.auth_kind !== 'none' && preview.auth_kind !== 'inherit') {
+    request.auth = { type: preview.auth_kind };
+  }
+
+  return request;
+}
+
+/** 把脚本内 `pm.sendRequest` 的内联请求转成沙箱的请求形态。 */
+function fromInlineRequest(request: SavedRequest): SandboxRequest {
+  return {
+    url: request.url,
+    method: request.method,
+    header: request.headers.map((header) => ({ key: header.key, value: header.value })),
+    ...(request.body.raw ? { body: { mode: 'raw' as const, raw: request.body.raw } } : {}),
+  };
+}
+
+/**
+ * 解析响应头里的 `Set-Cookie`，得到 postman-collection 能吃的 Cookie 形态。
+ *
+ * 只处理常见的几个属性（域、路径、有效期、Secure、HttpOnly）。不从 Cookie Jar 读：
+ * jar 的写入时机与本条无关，直接读头更贴近这次响应本身。
+ */
+function parseSetCookie(headers: [string, string][]): Record<string, unknown>[] {
+  const cookies: Record<string, unknown>[] = [];
+
+  for (const [name, value] of headers) {
+    if (name.toLowerCase() !== 'set-cookie') continue;
+
+    const segments = value.split(';');
+    const pair = segments.shift() ?? '';
+    const separator = pair.indexOf('=');
+    if (separator <= 0) continue;
+
+    const cookie: Record<string, unknown> = {
+      key: pair.slice(0, separator).trim(),
+      value: pair.slice(separator + 1).trim(),
+      path: '/',
+    };
+
+    for (const segment of segments) {
+      const [rawName, ...rest] = segment.split('=');
+      const attribute = rawName.trim().toLowerCase();
+      const attributeValue = rest.join('=').trim();
+
+      if (attribute === 'domain') cookie.domain = attributeValue.replace(/^\./, '');
+      else if (attribute === 'path') cookie.path = attributeValue;
+      else if (attribute === 'secure') cookie.secure = true;
+      else if (attribute === 'httponly') cookie.httpOnly = true;
+      else if (attribute === 'max-age') {
+        const seconds = Number(attributeValue);
+        if (Number.isFinite(seconds)) cookie.maxAge = seconds;
+      } else if (attribute === 'expires') {
+        const at = Date.parse(attributeValue);
+        // tough-cookie 的 JSON 形态用 ISO 串；会话 Cookie 为 'Infinity'
+        if (Number.isFinite(at)) cookie.expires = new Date(at).toISOString();
+      }
+    }
+
+    cookies.push(cookie);
+  }
+
+  return cookies;
+}
+
+/**
+ * 把后端响应转成沙箱能构造 sdk.Response 的形状（spec: pm-script-runtime「pm.response 的填充」）。
+ *
+ * `stream` 按上游 `Response` 原生支持的形态给：文本直接给字符串，二进制给
+ * `{ type: 'Base64', data }`——`normalizeStream` 认这一种（`postman-collection` 的
+ * `response.js`），且 base64 字符串跨 Worker 序列化是安全的。
+ *
+ * `downloadedBytes` 是让 `size()` 给出正确取值的关键：`responseSize` 由
+ * `stream.byteLength` 派生，而字符串形态没有 `byteLength`。
+ */
+function toSandboxResponse(payload: ResponsePayload, originalRequest: SandboxRequest | null) {
   return {
     code: payload.status,
     status: payload.status_text,
     header: payload.headers.map(([key, value]) => ({ key, value })),
-    stream: payload.body_text ?? '',
+    stream:
+      payload.body_text ??
+      (payload.body_base64 ? { type: 'Base64', data: payload.body_base64 } : ''),
     responseTime: payload.elapsed_ms,
+    downloadedBytes: payload.size_bytes,
+    cookie: parseSetCookie(payload.headers),
+    ...(originalRequest ? { originalRequest } : {}),
   };
 }
 
@@ -713,8 +834,12 @@ function executeOne(
   listen: ScriptListen,
   code: string,
   scopes: Record<ContextScope, ScopeValues>,
+  /** 本次请求的形态，喂给 `pm.request`（spec: pm.request 的填充）；无法构造时为 `null`。 */
+  request: SandboxRequest | null,
   /** 当前请求目标的匹配 Cookie，喂给 `pm.cookies`；无 URL（无法解析）时为空。 */
   requestCookies: CookieView[],
+  /** 本次执行可见的 secret 名字；脚本内请求经 `local` 传值时带上它们，日志脱敏才不失效。 */
+  secretNames: string[],
   /** 单段脚本的执行上限（毫秒）。 */
   timeoutMs: number,
   /** 本次发送的取消出口；`null` 表示这次执行不参与取消。 */
@@ -800,12 +925,31 @@ function executeOne(
             const payload = await commands.sendRequest({
               inline,
               environment_id: target.environmentId,
+              // 脚本内的请求不参与「未解析变量拦截」：与 Postman 一致，脚本自己的请求
+              // 照发，未解析的占位符保留原文，脚本可在回调里看到结果
+              // （spec: variable-engine「脚本发起的请求的变量解析」）
+              strict_variables: false,
+              // 本次执行**当前**的作用域取值：数据库里还是上一次落库的旧值，而此前各段
+              // 脚本写入的新值只在宿主手里（本阶段结束才落库）。带上它们，脚本发起的
+              // 请求才解析得出新值（spec: 脚本发起的请求的变量解析）。
+              //
+              // 同名时按解析优先级覆盖：environment > collection > global。
+              local: {
+                ...scopes.globals,
+                ...scopes.collectionVariables,
+                ...scopes.environment,
+              },
+              // 这些取值里有 secret 明文，而它们不在数据库里——后端无从得知哪些是
+              // secret，名字必须一并给出，否则日志脱敏会对这条路径失效
+              local_secret_names: secretNames,
               // 会话标识与主请求共用：取消时它会被后端一并撤销，脚本这边则以
               // `cancelled` 错误走既有的回执出口——不新增桥事件
               attempt_id: cancellation?.attemptId ?? null,
             });
 
-            respond(null, toSandboxResponse(payload));
+            // 脚本内请求的响应也带上它自己的请求形态，让 `pm.response.originalRequest`
+            // 在两处（主请求的后置脚本、脚本内回调）是同一个含义
+            respond(null, toSandboxResponse(payload, fromInlineRequest(inline)));
           } catch (error) {
             // 交给脚本的必须是可读原因：后端失败给的是 `{ code, message }` 普通对象，
             // 用 describeError（与界面同一条归一化路径）取出 message，而不是 String(obj)。
@@ -845,12 +989,18 @@ function executeOne(
                 })),
               }
             : {}),
+          // 本次请求的形态：前置与后置脚本都要能读到它（spec: pm.request 的填充）。
+          // 上游在没有它时会造一个空 Request（method 回落 GET、url 空串），脚本于是
+          // 拿到一个看起来正常、实际没有内容的对象——这类静默错值最难查。
+          ...(request ? { request } : {}),
           // 只有后置脚本拿得到 pm.response。
           //
           // 沙箱的判定是 `TARGETS_WITH_RESPONSE[target] || _.has(context, 'response')`
           // ——只要上下文里带了 response，前置脚本也能拿到它。因此在**这里**挡住，
           // 而不是指望调用方不传：否则调用方一时疏忽就会破坏「仅后置可用」。
-          ...(response && listen === 'test' ? { response: toSandboxResponse(response) } : {}),
+          ...(response && listen === 'test'
+            ? { response: toSandboxResponse(response, request) }
+            : {}),
         },
       },
       (error, execution) => {
@@ -1077,6 +1227,13 @@ export async function runScriptPhase(
   timeoutMs: number = SCRIPT_TIMEOUT_MS,
   /** 本次发送的取消出口；`null` 表示这个阶段不参与取消。 */
   cancellation: PhaseCancellation | null = null,
+  /**
+   * 本次请求的形态，喂给 `pm.request`（spec: pm.request 的填充）。
+   *
+   * 一个阶段里的三段脚本拿到**同一份快照**：脚本对它的改动既不跨段可见，也不影响实际
+   * 发出的请求（design D6，与 Postman 的已知差异）。
+   */
+  request: SandboxRequest | null = null,
 ): Promise<ScriptPhaseResult> {
   const entries: ConsoleEntry[] = [];
   const assertions: TestAssertion[] = [];
@@ -1112,6 +1269,13 @@ export async function runScriptPhase(
     environment: scopesOf(before.environment),
     collectionVariables: scopesOf(before.collection),
   };
+  // 脚本经 `pm.sendRequest` 发起的请求会把这份内存作用域作为 local 交给后端解析，
+  // 而 secret 的判定在后端按名字集合做——名字不跟着过去，脱敏就会失效
+  const secretNames = [
+    ...secretNamesOf(before.globals),
+    ...secretNamesOf(before.collection),
+    ...secretNamesOf(before.environment),
+  ];
 
   const context = await createContext();
   // 行号偏移校准（9.5）：eval 帧行号 = 用户行号 + 偏移；失败则报告退化为无行号
@@ -1119,6 +1283,8 @@ export async function runScriptPhase(
   let error: string | null = null;
   // 可视化模板取最后一段设置的值（后置脚本通常在最后设置）
   let visualizer: VisualizerResult | null = null;
+  // 用户取消导致的中止：这时不落库（见函数末尾的说明）
+  let cancelled = false;
 
   try {
     // 沙箱派发 execution.console，宿主转译后重发为 'console'
@@ -1185,7 +1351,9 @@ export async function runScriptPhase(
           listen,
           code,
           scopes,
+          request,
           requestCookies,
+          secretNames,
           timeoutMs,
           cancellation,
         ),
@@ -1193,12 +1361,22 @@ export async function runScriptPhase(
       );
 
       // 取消：这一段的结果已不可信（沙箱即将被销毁），立刻收手，把已经产生的输出交回去
-      if (!outcome) break;
+      if (!outcome) {
+        cancelled = true;
+        break;
+      }
 
-      // 无论成败，本段看到的取值都要并入下一段的输入
-      scopes.globals = outcome.next.globals;
-      scopes.environment = outcome.next.environment;
-      scopes.collectionVariables = outcome.next.collectionVariables;
+      // 只在**这一段正常结束**时并入它回传的取值。
+      //
+      // 被超时中止的脚本在沙箱里是强杀掉的，结果里根本没有作用域快照——照收会把此前
+      // 各段写入的东西抹掉（实测：第一段写入、第二段死循环，取值全没了）。抛错的那一段
+      // 同理：它自己没跑完，它的写入不该被当成已完成的事实
+      // （spec: 脚本阶段被中止后的写入——保留的是**此前各段**的写入）。
+      if (!outcome.error) {
+        scopes.globals = outcome.next.globals;
+        scopes.environment = outcome.next.environment;
+        scopes.collectionVariables = outcome.next.collectionVariables;
+      }
 
       // 可视化模板取最后一段设置的值（后置脚本通常在最后设置）
       if (outcome.visualizer) visualizer = outcome.visualizer;
@@ -1212,7 +1390,12 @@ export async function runScriptPhase(
     await disposeContext(context);
   }
 
-  const written = await persistWrites(commands, target, before, scopes);
+  // 落库的划分依据是**中止来自外部还是脚本自身**（spec: 脚本阶段被中止后的写入）：
+  //
+  // - 用户取消：中止来自外部，副作用应当止于中止点，不落库；
+  // - 脚本抛错或超时：那是脚本自己的失败，不该撤销它此前已经做过的事（集合层脚本设好的
+  //   变量在请求层脚本写坏时仍然保留）。
+  const written = cancelled ? [] : await persistWrites(commands, target, before, scopes);
 
   return { console: entries, assertions, error, written, visualizer };
 }

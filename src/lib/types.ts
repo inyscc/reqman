@@ -245,6 +245,13 @@ export interface ResponsePayload {
   size_limit_bytes: number;
   insecure_warning: boolean;
   final_url: string;
+  /**
+   * 后端**实际用于发送**的请求目标。
+   *
+   * 与 `final_url` 不同：后者是重定向之后的地址。后置脚本的 `pm.cookies` 要以本字段
+   * 确定当前请求——前置脚本改写过目标变量时，两者并不是一回事。
+   */
+  request_url: string;
   via_proxy: boolean;
   http_version: string;
   unresolved: string[];
@@ -328,7 +335,21 @@ export interface SendRequestInput {
   inline?: SavedRequest | null;
   environment_id?: string | null;
   local?: Record<string, string>;
+  /**
+   * `local` 里哪些名字来自 secret 变量。
+   *
+   * 这些取值来自脚本阶段的内存作用域，数据库里没有对应的行，后端无从得知它们是不是
+   * secret——漏掉这个名单，日志与错误消息的脱敏就会对这条路径失效。
+   */
+  local_secret_names?: string[];
   data?: Record<string, string>;
+  /**
+   * 变量未能解析时是否拒绝发出（缺省严格）。
+   *
+   * 脚本经 `pm.sendRequest` 发起的请求显式关闭它：与 Postman 一致，脚本自己的请求照发，
+   * 未解析的占位符保留原文。
+   */
+  strict_variables?: boolean;
   /**
    * 本次发送的会话标识（spec: http-engine「请求取消」）。
    * 主请求与脚本内 `pm.sendRequest` 发出的请求共用它，取消按它撤销全部在飞请求。

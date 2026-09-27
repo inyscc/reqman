@@ -862,3 +862,343 @@ describe('pm.require（spec: pm 兼容面）', () => {
     expect(printed).toContain('pm.require(http)= rejected require(http)= rejected');
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------
+// pm.request 的填充（spec: pm-script-runtime「pm.request 的填充」）
+// ---------------------------------------------------------------------------
+
+/** 一份喂给沙箱的请求形态：解析后的取值。 */
+const sandboxRequest = {
+  url: 'https://api.test/users?page=2',
+  method: 'POST',
+  header: [{ key: 'X-Trace', value: 'abc' }],
+  body: { mode: 'raw' as const, raw: '{"a":1}' },
+  auth: { type: 'bearer' },
+};
+
+describe('pm.request 的填充', () => {
+  it('前置脚本读到方法、URL、请求头与请求体（2.4）', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'prerequest',
+      [
+        `console.log('method=', pm.request.method);
+         console.log('url=', pm.request.url.toString());
+         console.log('trace=', pm.request.headers.get('X-Trace'));
+         console.log('body=', pm.request.body.raw);`,
+      ],
+      null,
+      null,
+      undefined,
+      null,
+      sandboxRequest,
+    );
+
+    expect(result.error).toBeNull();
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    // 上游在没有 request 时会造一个空 Request（method 回落 GET、url 空串），
+    // 因此这几条断言同时覆盖了「确实喂进去了」这件事
+    expect(printed).toContain('method= POST');
+    expect(printed).toContain('url= https://api.test/users?page=2');
+    expect(printed).toContain('trace= abc');
+    expect(printed).toContain('body= {"a":1}');
+  }, 30_000);
+
+  it('认证只暴露方式，不暴露凭据（2.4）', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'prerequest',
+      [`console.log('auth=', pm.request.auth && pm.request.auth.type);`],
+      null,
+      null,
+      undefined,
+      null,
+      sandboxRequest,
+    );
+
+    expect(result.error).toBeNull();
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    expect(printed).toContain('auth= bearer');
+  }, 30_000);
+
+  it('pm.request 是快照：宿主不接收对它的改动（2.5）', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'prerequest',
+      [
+        `pm.request.headers.add({ key: 'X-Injected', value: '1' });
+         pm.request.url = 'https://evil.test/';`,
+      ],
+      null,
+      null,
+      undefined,
+      null,
+      sandboxRequest,
+    );
+
+    expect(result.error).toBeNull();
+    // 结果里没有任何「回传的请求」——宿主只回读三个持久化作用域与可视化模板，
+    // 因此脚本对 pm.request 的改动既不出沙箱，也影响不到实际发出的请求（design D6）
+    expect(Object.keys(result).sort()).toEqual([
+      'assertions',
+      'console',
+      'error',
+      'visualizer',
+      'written',
+    ]);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// pm.response 的填充（spec: pm-script-runtime「pm.response 的填充」）
+// ---------------------------------------------------------------------------
+
+describe('pm.response 的填充', () => {
+  it('二进制响应的正文可被正确读取（3.1）', async () => {
+    const { commands } = fakeCommands();
+    const bytes = Buffer.from([0xff, 0x00, 0x41]);
+    const binary = {
+      ...sentResponse(),
+      body_text: null,
+      body_base64: bytes.toString('base64'),
+    };
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'test',
+      [`console.log('len=', pm.response.text().length, 'code=', pm.response.code);`],
+      binary,
+    );
+
+    expect(result.error).toBeNull();
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    // 二进制正文不该退化成空串或损坏的内容
+    expect(printed).toContain('len= 3');
+    expect(printed).toContain('code= 201');
+  }, 30_000);
+
+  it('响应大小与响应 Cookie 可读且保真（3.2 / 3.4）', async () => {
+    const { commands } = fakeCommands();
+    const payload = {
+      ...sentResponse(),
+      size_bytes: 4096,
+      headers: [
+        ['content-type', 'application/json'],
+        ['set-cookie', 'sid=abc123; Path=/; Domain=api.test; Secure; HttpOnly; Max-Age=3600'],
+        ['set-cookie', 'theme=dark; Path=/'],
+      ] as [string, string][],
+    };
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'test',
+      [
+        `console.log('size=', pm.response.size().body);
+         var all = pm.response.cookies.all();
+         console.log('cookies=', all.length);
+         var sid = all.filter(function (item) { return item.name === 'sid'; })[0];
+         console.log('sid=', sid && sid.value, 'secure=', sid && sid.secure);`,
+      ],
+      payload,
+    );
+
+    expect(result.error).toBeNull();
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    // 大小取自后端回带的实际字节数：responseSize 是 stream 派生的，字符串形态下拿不到
+    expect(printed).toContain('size= 4096');
+    expect(printed).toContain('cookies= 2');
+    expect(printed).toContain('sid= abc123');
+    expect(printed).toContain('secure= true');
+  }, 30_000);
+
+  it('originalRequest 是本次请求（3.3）', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'test',
+      [
+        `console.log('orig=', pm.response.originalRequest && pm.response.originalRequest.method,
+           pm.response.originalRequest.url.toString());`,
+      ],
+      sentResponse(),
+      null,
+      undefined,
+      null,
+      { ...sandboxRequest, url: 'https://api.test/echo', method: 'POST', body: undefined },
+    );
+
+    expect(result.error).toBeNull();
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    expect(printed).toContain('orig= POST https://api.test/echo');
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// 连带修复（spec: variable-engine「脚本发起的请求的变量解析」、
+//   pm-script-runtime「脚本阶段被中止后的写入」「pm.cookies 的当前请求目标」）
+// ---------------------------------------------------------------------------
+
+describe('连带修复', () => {
+  it('前面脚本段写入的变量对后面脚本段发起的请求生效（4.1）', async () => {
+    const { commands, sendRequest } = fakeCommands([variable('x', 'OLD')]);
+
+    const result = await runScriptPhase(commands, target, 'prerequest', [
+      'pm.environment.set("x", "NEW");',
+      `pm.sendRequest({ url: 'https://api.test/{{x}}' }, function () {});`,
+    ]);
+
+    expect(result.error).toBeNull();
+    const input = sendRequest.mock.calls[0][0] as {
+      inline?: { url: string };
+      local?: Record<string, string>;
+    };
+
+    // 段与段之间共用一次执行：第一段写入的新值经 `local` 交给后端解析，因此第二段
+    // 发起的请求读到的不是数据库里那份 OLD（占位符本身由后端替换，沙箱不做替换）
+    expect(input.local?.x).toBe('NEW');
+    expect(input.inline?.url).toBe('https://api.test/{{x}}');
+  }, 30_000);
+
+  it('同一段脚本内的写入不外泄给该段自己发起的请求（上游限制，spec 已记录）', async () => {
+    const { commands, sendRequest } = fakeCommands([variable('x', 'OLD')]);
+
+    const result = await runScriptPhase(commands, target, 'prerequest', [
+      `pm.environment.set("x", "NEW");
+       pm.sendRequest({ url: 'https://api.test/{{x}}' }, function () {});`,
+    ]);
+
+    expect(result.error).toBeNull();
+    const input = sendRequest.mock.calls[0][0] as { local?: Record<string, string> };
+    // 宿主手上的作用域是「这一段开始之前」的：脚本在执行期间写入的值只有沙箱知道，
+    // 而沙箱既不做占位符替换、其 `pm.sendRequest` 又是只读属性（实测 writable=false、
+    // configurable=false，Proxy 也因 invariant 拦不住），因此这一段拿不到同段内的写入。
+    expect(input.local?.x).toBe('OLD');
+  }, 30_000);
+
+  it('脚本内请求带上自己的请求形态作为 originalRequest（3.3 的同一含义）', async () => {
+    const { commands, sendRequest } = fakeCommands();
+
+    const result = await runScriptPhase(commands, target, 'prerequest', [
+      `pm.sendRequest({ url: 'https://api.test/echo', method: 'POST' }, function (err, res) {
+         console.log('orig=', res.originalRequest && res.originalRequest.method);
+       });`,
+    ]);
+
+    expect(result.error).toBeNull();
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    expect(printed).toContain('orig= POST');
+    expect(sendRequest).toHaveBeenCalled();
+  }, 30_000);
+
+  it('后置阶段按传入的请求目标查询 Cookie（4.2）', async () => {
+    const base = fakeCommands();
+    const queried: string[] = [];
+    const commands = {
+      ...base.commands,
+      cookieQuery: vi.fn(async (url: string) => {
+        queried.push(url);
+        return [];
+      }),
+    } as unknown as Commands;
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'test',
+      [`console.log('cookies=', typeof pm.cookies);`],
+      sentResponse(),
+      // App 传的是后端回带的「实际发送目标」，而不是重定向后的最终地址
+      'https://api.test/after-script-change',
+    );
+
+    expect(result.error).toBeNull();
+    expect(queried).toEqual(['https://api.test/after-script-change']);
+  }, 30_000);
+
+  it('用户取消时不落库已执行脚本的写入（4.3）', async () => {
+    const { commands: base, calls } = fakeCommands();
+    let cancelled = false;
+    let fire: () => void = () => {};
+    const signal = new Promise<void>((resolve) => {
+      fire = resolve;
+    });
+    const cancellation = { attemptId: 'attempt-1', signal, isCancelled: () => cancelled };
+    // 挂住脚本发出的请求，模拟「取消发生在脚本段」
+    const hung = vi.fn(() => new Promise<ResponsePayload>(() => {}));
+    const commands = { ...base, sendRequest: hung } as unknown as Commands;
+
+    const phase = runScriptPhase(
+      commands,
+      target,
+      'prerequest',
+      [
+        'pm.environment.set("x", "1");',
+        'pm.sendRequest("https://api.test/slow", function () {});',
+      ],
+      null,
+      null,
+      undefined,
+      cancellation,
+    );
+
+    for (let i = 0; i < 200 && hung.mock.calls.length === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(hung).toHaveBeenCalledTimes(1);
+
+    cancelled = true;
+    fire();
+
+    const result = await phase;
+
+    // 用户取消：中止来自外部，副作用止于中止点——已执行那一段的写入不落库
+    expect(result.written).toEqual([]);
+    expect(calls).not.toContain('variableSet');
+    expect(calls).not.toContain('globalsSet');
+  }, 30_000);
+
+  it('脚本超时后保留此前各段的写入（4.3）', async () => {
+    const { commands, calls } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'prerequest',
+      ['pm.environment.set("x", "1");', 'while (true) {}'],
+      null,
+      null,
+      800,
+    );
+
+    // 脚本自身的失败（超时）不撤销它此前做过的事
+    expect(result.error).toBeTruthy();
+    expect(result.written).toContain('x');
+    expect(calls).toContain('variableSet');
+  }, 30_000);
+
+  it('脚本抛错后保留此前各段的写入（4.3）', async () => {
+    const { commands, calls } = fakeCommands();
+
+    const result = await runScriptPhase(commands, target, 'prerequest', [
+      'pm.environment.set("x", "1");',
+      'throw new Error("坏了");',
+    ]);
+
+    expect(result.error).toContain('坏了');
+    expect(result.written).toContain('x');
+    expect(calls).toContain('variableSet');
+  }, 30_000);
+});

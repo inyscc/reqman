@@ -461,12 +461,14 @@ pub fn set_global_proxy(state: &AppState, proxy: Option<ProxyConfig>) -> AppResu
 pub fn preview_request(
     state: &AppState,
     input: SendRequestInput,
+    reveal: bool,
 ) -> AppResult<RequestPreview> {
     net::preview(
         &state.db,
         state.key_provider.as_ref(),
         Some(&state.cookies),
         &input,
+        reveal,
     )
 }
 
@@ -1144,8 +1146,10 @@ pub fn cookie_query(state: State<'_, AppState>, url: String) -> AppResult<Vec<Co
 pub fn variables_preview(
     state: State<'_, AppState>,
     input: SendRequestInput,
+    // 是否揭示 secret 取值（缺省为掩码）。脚本构造 `pm.request` 时传 true。
+    reveal: Option<bool>,
 ) -> AppResult<RequestPreview> {
-    preview_request(&state, input)
+    preview_request(&state, input, reveal.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -1383,7 +1387,9 @@ mod tests {
                 inline: None,
                 environment_id: None,
                 local: Default::default(),
+                local_secret_names: Default::default(),
                 data: Default::default(),
+                strict_variables: true,
                 attempt_id: None,
             },
         )
@@ -1519,12 +1525,14 @@ mod tests {
         )
         .unwrap();
 
-        let preview = preview_request(&app, SendRequestInput::saved(&request.id)).expect("预览");
+        let preview =
+            preview_request(&app, SendRequestInput::saved(&request.id), false).expect("预览");
         assert_eq!(preview.url, "http://api.test/x");
         assert!(preview.unresolved.is_empty());
 
         // 内联载荷也能预览
-        let preview = preview_request(&app, SendRequestInput::inline(request.clone())).expect("预览");
+        let preview =
+            preview_request(&app, SendRequestInput::inline(request.clone()), false).expect("预览");
         assert_eq!(preview.url, "http://api.test/x");
     }
 

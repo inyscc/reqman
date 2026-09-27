@@ -46,6 +46,13 @@ pub enum ErrorCode {
     /// 用户主动中止了这次发送。**不是失败**：界面不该把它呈现为错误，
     /// 但它必须与超时等失败可区分（spec: http-engine「请求取消」）。
     Cancelled,
+
+    // 变量解析
+    /// 请求中存在未能解析的变量，请求因此没有发出（spec: variable-engine「未解析变量提示」）。
+    ///
+    /// 它不是网络失败：判定发生在解析完成之后、连接建立之前，因此这类请求不产生任何
+    /// 网络往返。界面据它把响应区留着（请求没出去），同时把变量名报出来。
+    UnresolvedVariables,
 }
 
 impl ErrorCode {
@@ -71,6 +78,7 @@ impl ErrorCode {
             ErrorCode::RequestBuild => "request_build",
             ErrorCode::Io => "io",
             ErrorCode::Cancelled => "cancelled",
+            ErrorCode::UnresolvedVariables => "unresolved_variables",
         }
     }
 }
@@ -185,11 +193,20 @@ pub fn classify_net_failure(
         return ErrorCode::DnsFailure;
     }
 
+    // TLS 失败的判定：证书问题、握手失败，以及**握手位置读到的不是 TLS 记录**
+    // （rustls 的 InvalidMessage 一族）。最后这一类在现实中几乎只来自一个原因——
+    // 用 https:// 访问了一个只提供 http 的服务——把它降级成笼统的连接失败，用户
+    // 就彻底摸不着头脑了。
     let looks_tls = s.contains("invalid peer certificate")
         || s.contains("certificate")
         || s.contains("unknownissuer")
         || s.contains("unknown issuer")
-        || s.contains("handshake failure");
+        || s.contains("handshake failure")
+        || looks_like_plaintext_at_tls(&s)
+        || s.contains("received fatal alert")
+        || s.contains("unsupported protocol")
+        || s.contains("peer sent no certificates")
+        || s.contains("invalid protocol version");
     if looks_tls {
         return ErrorCode::TlsError;
     }
@@ -279,13 +296,45 @@ pub fn classify_reqwest_error(err: &reqwest::Error) -> ErrorCode {
     )
 }
 
+/// 对端在 TLS 握手位置返回了非 TLS 数据（rustls 把它报成 `corrupt message of type …`）。
+///
+/// 现实中它几乎只有一个来源：**用 `https://` 访问了一个只提供 HTTP 的服务**（其次是
+/// 链路中间设备截断了连接）。所以这句话既该被归为 TLS 失败，也该换成用户能照着做的提示。
+fn looks_like_plaintext_at_tls(source: &str) -> bool {
+    let s = source.to_ascii_lowercase();
+
+    s.contains("corrupt message") || s.contains("invalidcontenttype")
+}
+
+/// 把最深层错误文本转成**给用户看**的文案。
+///
+/// 默认原样返回：系统与本机产生的文案（域名解析失败、连接被拒等）本来就能看懂。只有那些
+/// 对用户毫无指引的底层库措辞才被换掉——目前是「TLS 握手位置读到非 TLS 数据」这一类。
+/// 原始措辞仍保留在末尾，排查时不丢信息。
+pub fn describe_net_failure(source: &str) -> String {
+    let trimmed = source.trim();
+
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if looks_like_plaintext_at_tls(trimmed) {
+        return format!(
+            "TLS 握手失败：对端返回的不是加密数据。这通常是因为用 https:// 访问了一个只提供 \
+             http 的服务——请核对 URL 的协议与端口是否与目标一致。原始错误：{trimmed}"
+        );
+    }
+
+    trimmed.to_string()
+}
+
 /// 取最贴近根因的错误文本，用于呈现给用户。
 pub fn describe_net_error(err: &reqwest::Error) -> String {
     let deepest = deepest_source(err);
     if deepest.trim().is_empty() {
         err.to_string()
     } else {
-        deepest
+        describe_net_failure(&deepest)
     }
 }
 
@@ -337,6 +386,7 @@ mod tests {
             ErrorCode::RequestBuild,
             ErrorCode::Io,
             ErrorCode::Cancelled,
+            ErrorCode::UnresolvedVariables,
         ];
         let mut seen = std::collections::HashSet::new();
         for code in codes {
@@ -380,6 +430,45 @@ mod tests {
         assert_eq!(
             classify_net_failure(false, false, true, "builder error", None),
             ErrorCode::RequestBuild
+        );
+    }
+
+    #[test]
+    fn a_plaintext_service_behind_https_is_a_tls_failure_not_a_vague_connect_error() {
+        // rustls 在握手位置读到非 TLS 记录时报这句。它几乎只来自「用 https 访问了一个
+        // 只提供 http 的服务」，因此必须落在 TLS 类别里，而不是被当成笼统的连接失败。
+        assert_eq!(
+            classify_net_failure(
+                false,
+                true,
+                false,
+                "received corrupt message of type InvalidContentType",
+                None
+            ),
+            ErrorCode::TlsError
+        );
+    }
+
+    #[test]
+    fn that_failure_tells_the_user_to_check_the_scheme() {
+        let text = describe_net_failure("received corrupt message of type InvalidContentType");
+
+        // 用户看到的是可操作的原因（协议与目标不匹配），而不是 rustls 的枚举名
+        assert!(text.contains("https://"), "消息应点名 https：{text}");
+        assert!(text.contains("http 的服务"), "消息应点名目标其实是 http：{text}");
+        // 原始措辞留在末尾，排查时不丢信息
+        assert!(
+            text.contains("received corrupt message"),
+            "消息应保留原始错误：{text}"
+        );
+    }
+
+    #[test]
+    fn other_failures_keep_their_original_text() {
+        // 只有那一类被改写：其余失败保持原样，避免给出与成因不符的引导
+        assert_eq!(
+            describe_net_failure("Connection refused (os error 111)"),
+            "Connection refused (os error 111)"
         );
     }
 

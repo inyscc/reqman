@@ -749,7 +749,7 @@ describe('前端数据流骨架', () => {
     );
   }, 30_000);
 
-  it('未解析变量在发出请求之前被拦下，且请求不发出（spec: 未解析变量提示）', async () => {
+  it('未解析变量不再拦在前端：请求照发，判定交给后端的建连之前（spec: 未解析变量提示）', async () => {
     const { client, sendRequest } = harness({
       previewResult: preview({
         url: 'https://api.test/{{missing}}',
@@ -764,10 +764,31 @@ describe('前端数据流骨架', () => {
 
     fireEvent.click(screen.getByText('发送'));
 
-    const error = await screen.findByTestId('app-error');
-    expect(error.textContent).toContain('missing');
-    expect(error.textContent).toContain('id');
-    expect(sendRequest).not.toHaveBeenCalled();
+    // 拦在这一步会让「前置脚本写入变量 + 请求体引用它」这条 Postman 里的常规用法
+    // 永远发不出去，因此判定挪到了后端的建连之前——那里拿到的才是脚本之后的解析结果
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId('app-error')).toBeNull();
+  });
+
+  it('后端拦下未解析变量：错误可辨识，响应区里已有的内容不被清空（spec: 未解析变量提示）', async () => {
+    const { client, sendRequest } = harness();
+    render(<App client={client} />);
+    await openRequest();
+
+    // 先成功发一次，让响应区里有东西
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1));
+    expect(document.querySelector('.response-region')).toBeTruthy();
+
+    // 再让后端以「未解析变量」拒绝：请求没出去，响应区保持原样，但错误要报出来
+    sendRequest.mockRejectedValueOnce({
+      code: 'unresolved_variables',
+      message: '以下变量未能解析，请求没有发出：missing',
+    });
+    fireEvent.click(screen.getByText('发送'));
+
+    expect((await screen.findByTestId('app-error')).textContent).toContain('missing');
+    expect(document.querySelector('.response-region')).toBeTruthy();
   });
 
   it('占位符全部解析成功时发送照常发出（spec: 未解析变量提示）', async () => {
@@ -843,19 +864,16 @@ describe('前端数据流骨架', () => {
     await waitFor(() => expect(calls).toBe(4));
   });
 
-  it('拦截早于脚本门禁：未解析变量时门禁不会先出现（spec: 未解析变量提示）', async () => {
-    const { client, sendRequest } = harness({
-      scriptGateAllowed: false,
-      previewResult: preview({ url: 'https://api.test/{{missing}}', unresolved: ['missing'] }),
-    });
+  it('门禁先于发送出现：脚本未获准时请求不发出（spec: 可执行性门禁）', async () => {
+    const { client, sendRequest } = harness({ scriptGateAllowed: false });
     render(<App client={client} />);
     await openRequest();
 
     fireEvent.click(screen.getByText('发送'));
 
-    // 拦截在最前面：这条路径连门禁都到不了（门禁放行后的重发同样走这里，无从绕过）
-    expect((await screen.findByTestId('app-error')).textContent).toContain('missing');
-    expect(screen.queryByTestId('script-gate')).toBeNull();
+    // 门禁在脚本与网络之前：脚本没获准执行时，请求不会先发出去。未解析变量的判定
+    // 在门禁之后（脚本跑完才轮到它），因此这里不再由它来决定顺序。
+    expect(await screen.findByTestId('script-gate')).toBeTruthy();
     expect(sendRequest).not.toHaveBeenCalled();
   });
 

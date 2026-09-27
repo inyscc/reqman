@@ -963,8 +963,14 @@ async fn secrets_are_masked_in_the_preview_but_used_for_real() {
     request.headers = vec![KeyValue::new("X-Api-Key", "{{apiKey}}")];
     let saved = harness.save(&request);
 
-    let preview = preview(&harness.db, harness.key.as_ref(), None, &SendRequestInput::saved(&saved.id))
-        .expect("预览");
+    let preview = preview(
+        &harness.db,
+        harness.key.as_ref(),
+        None,
+        &SendRequestInput::saved(&saved.id),
+        false,
+    )
+    .expect("预览");
     assert!(preview.masked, "预览应标记存在被掩码的取值");
     assert_eq!(preview.headers[0].1, crate::logging::MASK);
 
@@ -987,11 +993,95 @@ async fn unresolved_variables_do_not_break_the_preview() {
     request.params = vec![KeyValue::new("p", "{{alsoMissing}}")];
     let saved = harness.save(&request);
 
-    let preview = preview(&harness.db, harness.key.as_ref(), None, &SendRequestInput::saved(&saved.id))
-        .expect("预览");
+    let preview = preview(
+        &harness.db,
+        harness.key.as_ref(),
+        None,
+        &SendRequestInput::saved(&saved.id),
+        false,
+    )
+    .expect("预览");
     assert!(preview.unresolved.contains(&"missing".to_string()));
     assert!(preview.unresolved.contains(&"alsoMissing".to_string()));
     assert!(preview.url.contains("{{missing}}"), "未解析变量应保留原文");
+}
+
+#[tokio::test]
+async fn unresolved_variables_block_the_send_before_any_round_trip() {
+    let server = TestServer::start(Reply::ok("{}"));
+    let harness = Harness::new("net-strict-unresolved");
+    let request = harness.request("R", "GET", &format!("{}/{{{{missing}}}}", server.base_url()));
+    let saved = harness.save(&request);
+
+    let err = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect_err("未解析变量应拦住本次发送");
+
+    // 可辨识的错误码：界面据此把响应区留着，同时把变量名报出来
+    assert_eq!(err.code, ErrorCode::UnresolvedVariables);
+    assert!(err.message.contains("missing"), "错误里应点名未解析的变量");
+    assert_eq!(server.request_count(), 0, "不应产生任何网络往返");
+}
+
+#[tokio::test]
+async fn a_non_strict_send_goes_out_with_the_placeholder_kept() {
+    // 脚本内 `pm.sendRequest` 走这条路：与 Postman 一致，脚本自己的请求照发
+    // （spec: variable-engine「脚本发起的请求的变量解析」）
+    let server = TestServer::start(Reply::ok("{}"));
+    let harness = Harness::new("net-non-strict");
+    let request = harness.request("R", "GET", &format!("{}/{{{{missing}}}}", server.base_url()));
+    let saved = harness.save(&request);
+
+    let mut input = SendRequestInput::saved(&saved.id);
+    input.strict_variables = false;
+
+    harness.send(&input).await.expect("非严格模式照发");
+    assert_eq!(server.request_count(), 1, "占位符照原样发出去");
+}
+
+#[tokio::test]
+async fn local_secret_names_keep_masking_for_values_that_never_reached_the_database() {
+    let harness = Harness::new("net-local-secret");
+    let mut request = harness.request("R", "GET", "http://api.test/x");
+    request.headers = vec![KeyValue::new("X-Token", "{{token}}")];
+    let saved = harness.save(&request);
+
+    // 脚本阶段的内存作用域：取值不在数据库里，脱敏只能靠调用方给出的名字
+    let mut input = SendRequestInput::saved(&saved.id);
+    input.local.insert("token".into(), "SCRIPT_SECRET_9876".into());
+    input.local_secret_names = vec!["token".into()];
+
+    let masked = preview(&harness.db, harness.key.as_ref(), None, &input, false).expect("预览");
+    assert!(masked.masked, "本地 secret 也应参与掩码判定");
+    assert_eq!(
+        masked.headers[0].1,
+        crate::logging::MASK,
+        "取值不应以明文出现在可观测输出里"
+    );
+
+    // 揭示模式给出真实取值：脚本据此构造 `pm.request`
+    let revealed = preview(&harness.db, harness.key.as_ref(), None, &input, true).expect("预览");
+    assert_eq!(revealed.headers[0].1, "SCRIPT_SECRET_9876");
+}
+
+#[tokio::test]
+async fn request_url_reports_the_target_that_was_actually_sent() {
+    let server = TestServer::start(Reply::ok("{}"));
+    let harness = Harness::new("net-request-url");
+    let target = format!("{}/path", server.base_url());
+    let request = harness.request("R", "GET", &target);
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("发送");
+
+    // 脚本后置阶段据它确定 `pm.cookies` 的当前请求：这里给的是**实际发送的目标**，
+    // 与重定向之后的 `final_url` 不是一回事
+    assert_eq!(payload.request_url, target);
+    assert_eq!(server.request_count(), 1);
 }
 
 #[tokio::test]
@@ -1002,7 +1092,9 @@ async fn request_without_any_entry_point_is_rejected() {
         inline: None,
         environment_id: None,
         local: Default::default(),
+        local_secret_names: Default::default(),
         data: Default::default(),
+        strict_variables: true,
         attempt_id: None,
     };
     let err = harness.send(&input).await.expect_err("应拒绝");
@@ -1052,13 +1144,19 @@ async fn environment_selection_affects_resolution() {
 
     let mut with_env_input = SendRequestInput::saved(&saved.id);
     with_env_input.environment_id = Some(dev.id.clone());
-    let with_env = preview(&harness.db, harness.key.as_ref(), None, &with_env_input).expect("预览");
+    let with_env =
+        preview(&harness.db, harness.key.as_ref(), None, &with_env_input, false).expect("预览");
     assert_eq!(with_env.url, "http://dev.example/x");
 
     // 未选环境时该变量未定义
-    let without_env =
-        preview(&harness.db, harness.key.as_ref(), None, &SendRequestInput::saved(&saved.id))
-            .expect("预览");
+    let without_env = preview(
+        &harness.db,
+        harness.key.as_ref(),
+        None,
+        &SendRequestInput::saved(&saved.id),
+        false,
+    )
+    .expect("预览");
     assert!(without_env.unresolved.contains(&"host".to_string()));
 }
 

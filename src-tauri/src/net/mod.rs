@@ -48,15 +48,33 @@ pub struct SendRequestInput {
     /// 仅在本次执行期间有效的本地变量。
     #[serde(default)]
     pub local: BTreeMap<String, String>,
+    /// `local` 里哪些名字来自 secret 变量。
+    ///
+    /// 这些取值由调用方在运行时提供（脚本阶段的内存作用域），数据库里没有它们的行，
+    /// 因此脱敏所需的 `secret_names` 拿不到——必须由调用方一并给出，否则经此路径
+    /// 参与解析的 secret 明文会以普通变量的身份进入日志与错误消息。
+    #[serde(default)]
+    pub local_secret_names: Vec<String>,
     /// 迭代数据。
     #[serde(default)]
     pub data: BTreeMap<String, String>,
+    /// 变量未能解析时是否拒绝发出（spec: variable-engine「未解析变量提示」）。
+    ///
+    /// 缺省为**严格**：用户触发的发送在变量解析不出来时不发。脚本经 `pm.sendRequest`
+    /// 发起的请求显式关掉它——与 Postman 一致，脚本自己的请求照发，占位符保留原文。
+    #[serde(default = "default_strict_variables")]
+    pub strict_variables: bool,
     /// 本次发送的会话标识（spec: http-engine「请求取消」）。
     ///
     /// 同一次发送里的主请求与脚本内 `pm.sendRequest` 发出的请求共用一个标识，取消按它
     /// 撤销该会话下的全部在飞请求。缺省时后端自取一个：只发一个请求的场景不必关心它。
     #[serde(default)]
     pub attempt_id: Option<String>,
+}
+
+/// `strict_variables` 的缺省值：严格。
+fn default_strict_variables() -> bool {
+    true
 }
 
 impl SendRequestInput {
@@ -66,7 +84,9 @@ impl SendRequestInput {
             inline: None,
             environment_id: None,
             local: BTreeMap::new(),
+            local_secret_names: Vec::new(),
             data: BTreeMap::new(),
+            strict_variables: true,
             attempt_id: None,
         }
     }
@@ -77,7 +97,9 @@ impl SendRequestInput {
             inline: Some(request),
             environment_id: None,
             local: BTreeMap::new(),
+            local_secret_names: Vec::new(),
             data: BTreeMap::new(),
+            strict_variables: true,
             attempt_id: None,
         }
     }
@@ -112,6 +134,12 @@ pub struct ResponsePayload {
     /// 证书校验被关闭时的显著警示。
     pub insecure_warning: bool,
     pub final_url: String,
+    /// 后端**实际用于发送**的请求目标（含认证落在查询串上的部分）。
+    ///
+    /// 与 `final_url` 不同：后者是重定向之后的地址。脚本的后置阶段要以本字段确定
+    /// `pm.cookies` 的当前请求——前置脚本改写过目标变量时，两者并不是一回事
+    /// （spec: pm-script-runtime「pm.cookies 的当前请求目标」）。
+    pub request_url: String,
     /// 本次请求是否经由代理发出。
     pub via_proxy: bool,
     /// 实际协商到的协议版本。
@@ -145,6 +173,8 @@ fn build_context(
     request: &SavedRequest,
     environment_id: Option<&str>,
     local: BTreeMap<String, String>,
+    // `local` 里哪些名字来自 secret；见 `SendRequestInput::local_secret_names`。
+    local_secret_names: &[String],
     data: BTreeMap<String, String>,
 ) -> AppResult<SendContext> {
     let workspace_id = workspace_of(db, request)?;
@@ -162,7 +192,7 @@ fn build_context(
 
     let inherited_auth = inherited_auth(db, request)?;
 
-    let layers = variables::load_scope_layers(
+    let mut layers = variables::load_scope_layers(
         db,
         &workspace_id,
         Some(&request.collection_id),
@@ -171,6 +201,13 @@ fn build_context(
         data,
         key_provider,
     )?;
+
+    // 本地作用域里的 secret 标记由调用方给出：这些取值来自脚本阶段的内存作用域，
+    // 数据库里没有对应的行，`load_scope_layers` 无从得知它们是不是 secret。
+    // 漏掉这一步，日志与错误消息的脱敏就会对这条路径失效。
+    layers
+        .secret_names
+        .extend(local_secret_names.iter().cloned());
 
     Ok(SendContext {
         environment,
@@ -239,11 +276,17 @@ pub fn resolve_request_source(db: &Db, input: &SendRequestInput) -> AppResult<Sa
 }
 
 /// 预览请求（只解析，不发送）。与真实发送共用同一解析实现与同一上下文构造。
+///
+/// `reveal` 决定 secret 取值以哪种形态呈现：`false` 给出掩码（界面浮层用，spec:
+/// variable-engine「Secret 变量掩码」），`true` 给出真实取值（脚本据此构造 `pm.request`，
+/// spec: pm-script-runtime「pm.request 的填充」）。两者是**同一次解析的两种呈现**——
+/// 做成两条命令就会有两份真相，判定范围只要有一处分叉，界面与脚本看到的东西就会不同。
 pub fn preview(
     db: &Db,
     key_provider: &dyn KeyProvider,
     jar: Option<&cookies::CookieJar>,
     input: &SendRequestInput,
+    reveal: bool,
 ) -> AppResult<RequestPreview> {
     let request = resolve_request_source(db, input)?;
     let context = build_context(
@@ -252,12 +295,14 @@ pub fn preview(
         &request,
         input.environment_id.as_deref(),
         input.local.clone(),
+        &input.local_secret_names,
         input.data.clone(),
     )?;
     let mut payload = engine::preview_request(
         &request,
         &context.inherited_auth,
         &context.layers,
+        reveal,
     );
 
     // 请求调试信息里的 Cookie 可见性（spec: Cookie 在请求中的自动附带）：
@@ -285,6 +330,7 @@ pub fn resolve_for_export(
         &request,
         input.environment_id.as_deref(),
         input.local.clone(),
+        &input.local_secret_names,
         input.data.clone(),
     )?;
     let resolved = engine::resolve_request(&request, &context.inherited_auth, &context.layers);
@@ -323,10 +369,26 @@ pub async fn send_request(
         &request,
         input.environment_id.as_deref(),
         input.local.clone(),
+        &input.local_secret_names,
         input.data.clone(),
     )?;
 
     let resolved = engine::resolve_request(&request, &context.inherited_auth, &context.layers);
+
+    // 变量未能解析时不发出请求（spec: variable-engine「未解析变量提示」）。
+    //
+    // 位置是刻意的：解析已经完成、连接尚未建立。放在**这里**而不是前端，是为了让
+    // 「判定用的那一份」与「真正要发出去的那一份」是同一个 resolved——前置脚本在
+    // 此之前刚跑完，它写入的变量因此按已定义处理，不会再被拦下。
+    if input.strict_variables && !resolved.unresolved.is_empty() {
+        return Err(AppError::new(
+            ErrorCode::UnresolvedVariables,
+            format!(
+                "以下变量未能解析，请求没有发出：{}",
+                resolved.unresolved.join("、")
+            ),
+        ));
+    }
 
     // 代理：请求 > 环境 > 全局，再结合系统设置与白名单
     let system_proxy = proxy::SystemProxyEnv::from_env();
@@ -472,6 +534,9 @@ pub async fn send_request(
         size_limit_bytes: limit,
         insecure_warning: resolved.settings.needs_insecure_warning(),
         final_url,
+        // 实际用于发送的目标（认证落在查询串上的部分已经并入），与 final_url 不同：
+        // 后者可能已被重定向改写
+        request_url: url.clone(),
         via_proxy: matches!(decision, ProxyDecision::Use { .. }),
         http_version: negotiated_version,
         unresolved: resolved.unresolved.clone(),
