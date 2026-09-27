@@ -1,5 +1,10 @@
-/** 底栏按钮能打开的模态（design D5）。 */
-export type ModalKind = 'cookies' | 'settings' | 'import-export';
+/**
+ * 应用内的单例模态（design D5）。
+ *
+ * 除底栏的三个入口之外，还包含「复制被未保存改动挡下」这一提示——它同样走这一个状态，
+ * 因此界面上任意时刻至多一个遮罩（design D9）。
+ */
+export type ModalKind = 'cookies' | 'settings' | 'import-export' | 'copy-blocked';
 
 export interface BottomBarProps {
   busy: boolean;

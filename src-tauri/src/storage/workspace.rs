@@ -422,6 +422,87 @@ pub fn create_folder(
     })
 }
 
+/// 复制目录：把它连同**整棵子树**在新位置重建一份。
+///
+/// 新目录落在源目录**同一个父级**下、**紧跟在源目录之后**，名字缺省 `{name} 副本`
+/// （与请求副本同一规则，见 [`super::requests::duplicate_request`]）。
+///
+/// 整棵子树在**同一个事务**内写入。递归复制要逐层插入，若中途失败而事务已经提交，
+/// 用户会得到一棵缺枝少叶的副本，只能手工清理（spec: 某一层失败时不留下半成品）。
+///
+/// 源集合的目录与请求在事务外一次读出（与 `duplicate_request` 先读后写的做法一致）；
+/// 层级的对应关系用「源 id → 新 id」表达，因此再深也不需要额外的栈。
+pub fn duplicate_folder(db: &Db, id: &str, new_name: Option<&str>) -> AppResult<Folder> {
+    let source = get_folder(db, id)?;
+    let name = match new_name {
+        Some(name) => require_name(name)?,
+        None => format!("{} 副本", source.name),
+    };
+
+    let folders = list_folders(db, &source.collection_id)?;
+    let requests = super::requests::list_requests(db, &source.collection_id)?;
+
+    db.write_tx(|conn| {
+        let tx = conn.transaction()?;
+
+        // 副本紧跟在源目录之后：放到同级末尾会让人以为复制没有发生。
+        // 顺序取**混合**序列（目录与请求共享 sort_order）后整体写回——只给新目录算一个
+        // sort_order 的话，同级里出现同序号条目时它会落错位置。
+        let parent = source.parent_folder_id.clone();
+        let mut order = children_in_order(&tx, &source.collection_id, parent.as_deref())?;
+        let at = order
+            .iter()
+            .position(|(item, _)| item == &source.id)
+            .ok_or_else(|| AppError::not_found(format!("目录不在其父级下：{}", source.id)))?;
+
+        let root = Folder {
+            id: new_id(),
+            name,
+            parent_folder_id: parent.clone(),
+            sort_order: (at + 1) as i64,
+            ..source.clone()
+        };
+        order.insert(at + 1, (root.id.clone(), NodeKind::Folder));
+        insert_folder(&tx, &root)?;
+
+        // 广度优先下钻：每处理一个源目录，就为它建一个对应的新目录，并把该源目录
+        // 直接下的子目录与请求复制到新目录下。`folders` / `requests` 是该集合的全集，
+        // 按父级过滤即得一层——不需要按层再查库。
+        let mut pending = vec![(source.id.clone(), root.id.clone())];
+        while let Some((source_parent, new_parent)) = pending.pop() {
+            for child in folders
+                .iter()
+                .filter(|folder| folder.parent_folder_id.as_deref() == Some(source_parent.as_str()))
+            {
+                let copy = Folder {
+                    id: new_id(),
+                    parent_folder_id: Some(new_parent.clone()),
+                    ..child.clone()
+                };
+                insert_folder(&tx, &copy)?;
+                pending.push((child.id.clone(), copy.id.clone()));
+            }
+
+            for request in requests
+                .iter()
+                .filter(|item| item.folder_id.as_deref() == Some(source_parent.as_str()))
+            {
+                let copy = SavedRequest {
+                    id: new_id(),
+                    folder_id: Some(new_parent.clone()),
+                    ..request.clone()
+                };
+                super::requests::insert_request(&tx, &copy)?;
+            }
+        }
+
+        // 整棵子树都插好之后再写回这一级的顺序：新目录此时已存在，才会被写到
+        write_children_order(&tx, &source.collection_id, parent.as_deref(), &order)?;
+        tx.commit()?;
+        Ok(root)
+    })
+}
+
 /// 以显式字段插入一条文件夹（导入在单个事务内使用）。
 pub(crate) fn insert_folder(conn: &Connection, folder: &Folder) -> AppResult<()> {
     let ts = now();
@@ -655,27 +736,78 @@ pub fn reorder_children(
 ) -> AppResult<()> {
     db.write_tx(|conn| {
         let tx = conn.transaction()?;
-        for (index, (id, kind)) in items.iter().enumerate() {
-            let changed = match kind {
-                NodeKind::Folder => tx.execute(
-                    "UPDATE folders SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND parent_folder_id IS ?4",
-                    params![index as i64, id, collection_id, parent_folder_id],
-                )?,
-                NodeKind::Request => tx.execute(
-                    "UPDATE requests SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND folder_id IS ?4",
-                    params![index as i64, id, collection_id, parent_folder_id],
-                )?,
-            };
-            if changed == 0 {
-                return Err(AppError::not_found(format!(
-                    "条目不存在或不属于该父级：{}",
-                    id
-                )));
-            }
-        }
+        write_children_order(&tx, collection_id, parent_folder_id, items)?;
         tx.commit()?;
         Ok(())
     })
+}
+
+/// 某个父级下的全部子条目，按 `collection_tree` 的渲染顺序：`sort_order` 升序，
+/// 同序号时目录在前，再按名称。
+///
+/// 目录与请求**共享同一组 `sort_order`**（见 [`reorder_children`]），所以取兄弟必须混排，
+/// 只查一张表会漏掉另一半，"插在某人之后"就会算错位置。
+pub(crate) fn children_in_order(
+    conn: &Connection,
+    collection_id: &str,
+    parent_folder_id: Option<&str>,
+) -> AppResult<Vec<(Id, NodeKind)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind FROM (
+            SELECT id, sort_order, name, 0 AS kind FROM folders
+              WHERE collection_id = ?1 AND parent_folder_id IS ?2
+            UNION ALL
+            SELECT id, sort_order, name, 1 AS kind FROM requests
+              WHERE collection_id = ?1 AND folder_id IS ?2
+         ) ORDER BY sort_order, kind, name, id",
+    )?;
+    let rows = stmt.query_map(params![collection_id, parent_folder_id], |row| {
+        let kind: i64 = row.get(1)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            if kind == 0 {
+                NodeKind::Folder
+            } else {
+                NodeKind::Request
+            },
+        ))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// 按下标写回某个父级下全部子条目的 `sort_order`（调用方负责事务）。
+///
+/// 入参必须是一个**混合**的有序列表（每项带种类），理由同 [`reorder_children`]。
+pub(crate) fn write_children_order(
+    conn: &Connection,
+    collection_id: &str,
+    parent_folder_id: Option<&str>,
+    items: &[(Id, NodeKind)],
+) -> AppResult<()> {
+    for (index, (id, kind)) in items.iter().enumerate() {
+        let changed = match kind {
+            NodeKind::Folder => conn.execute(
+                "UPDATE folders SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND parent_folder_id IS ?4",
+                params![index as i64, id, collection_id, parent_folder_id],
+            )?,
+            NodeKind::Request => conn.execute(
+                "UPDATE requests SET sort_order = ?1 WHERE id = ?2 AND collection_id = ?3 AND folder_id IS ?4",
+                params![index as i64, id, collection_id, parent_folder_id],
+            )?,
+        };
+        if changed == 0 {
+            return Err(AppError::not_found(format!(
+                "条目不存在或不属于该父级：{}",
+                id
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +918,122 @@ fn _touch(_: &AuthConfig) -> String {
 mod tests {
     use super::*;
     use crate::storage::requests;
+
+    // ---- 复制目录（spec: 复制请求与目录）----
+
+    #[test]
+    fn duplicating_a_folder_rebuilds_the_whole_subtree_at_the_same_parent() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let ws = self::list(&db).unwrap().remove(0);
+        let collection = create_collection(&db, &ws.id, "集合").expect("建集合").id;
+
+        let outer = create_folder(&db, &collection, None, "外层").expect("建外层");
+        let inner = create_folder(&db, &collection, Some(&outer.id), "内层").expect("建内层");
+        create_folder(&db, &collection, None, "同级目录").expect("建同级目录");
+
+        let mut deep = requests::create_request(
+            &db,
+            &collection,
+            Some(&inner.id),
+            "深处",
+            "GET",
+            "https://api.test/deep",
+        )
+        .expect("建请求");
+        deep.pre_request_script = Some("console.log('deep')".into());
+        requests::save_request(&db, &deep).expect("存脚本");
+        requests::create_request(
+            &db,
+            &collection,
+            Some(&outer.id),
+            "外层请求",
+            "POST",
+            "https://api.test/outer",
+        )
+        .expect("建请求");
+        requests::create_request(&db, &collection, None, "根请求", "GET", "https://api.test/root")
+            .expect("建请求");
+
+        let copy = duplicate_folder(&db, &outer.id, None).expect("复制目录");
+
+        // 名字与位置：`{name} 副本`，同一个父级（源目录在集合根，副本也在根）
+        assert_eq!(copy.name, "外层 副本");
+        assert_eq!(copy.parent_folder_id, None);
+        assert_eq!(copy.collection_id, collection);
+        assert_ne!(copy.id, outer.id);
+
+        // 副本紧跟源目录之后，而不是被丢到同级末尾——目录与请求混排，位置要按整体顺序算
+        let root_names: Vec<String> = collection_tree(&db, &collection)
+            .expect("读树")
+            .children
+            .iter()
+            .map(|node| node.name.clone())
+            .collect();
+        assert_eq!(
+            root_names,
+            vec!["外层", "外层 副本", "根请求", "同级目录"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+
+        let folders = list_folders(&db, &collection).expect("列目录");
+        assert_eq!(
+            folders.iter().filter(|folder| folder.name == "内层").count(),
+            2,
+            "源目录的子树原样保留"
+        );
+        // 层级照搬：副本里那份「内层」的父级是副本自己
+        let inner_copy = folders
+            .iter()
+            .find(|folder| {
+                folder.name == "内层" && folder.parent_folder_id.as_deref() == Some(copy.id.as_str())
+            })
+            .expect("副本里应有一份内层");
+
+        // 内容整体复制：副本里的「深处」带着脚本，且挂在副本的内层下
+        let requests_in_copy: Vec<_> = requests::list_requests(&db, &collection)
+            .expect("列请求")
+            .into_iter()
+            .filter(|request| request.name == "深处" && request.id != deep.id)
+            .collect();
+        assert_eq!(requests_in_copy.len(), 1, "副本里应有一份「深处」");
+        assert_eq!(
+            requests_in_copy[0].folder_id.as_deref(),
+            Some(inner_copy.id.as_str())
+        );
+        assert_eq!(
+            requests_in_copy[0].pre_request_script.as_deref(),
+            Some("console.log('deep')")
+        );
+
+        // 副本目录直接下的请求也照搬
+        let under_copy: Vec<_> = requests::list_requests(&db, &collection)
+            .expect("列请求")
+            .into_iter()
+            .filter(|request| request.folder_id.as_deref() == Some(copy.id.as_str()))
+            .collect();
+        assert_eq!(under_copy.len(), 1);
+        assert_eq!(under_copy[0].name, "外层请求");
+    }
+
+    #[test]
+    fn a_rejected_name_leaves_no_partial_copy() {
+        let db = Db::open_in_memory().expect("打开数据库");
+        let ws = self::list(&db).unwrap().remove(0);
+        let collection = create_collection(&db, &ws.id, "集合").expect("建集合").id;
+        let outer = create_folder(&db, &collection, None, "外层").expect("建外层");
+        create_folder(&db, &collection, Some(&outer.id), "内层").expect("建内层");
+
+        let before = list_folders(&db, &collection).expect("列目录").len();
+        duplicate_folder(&db, &outer.id, Some("   ")).expect_err("空名应被拒");
+
+        assert_eq!(
+            list_folders(&db, &collection).expect("列目录").len(),
+            before,
+            "失败不留下任何新节点"
+        );
+    }
 
     #[test]
     fn first_start_creates_a_default_workspace() {

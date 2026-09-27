@@ -23,7 +23,12 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { SplitHandle } from './components/SplitHandle';
 import { VariablesPeek } from './components/VariablesPeek';
 import { VariablesPanel } from './components/VariablesPanel';
-import { WorkspaceTree, type EntitySelection, type RenameTarget } from './components/WorkspaceTree';
+import {
+  WorkspaceTree,
+  type EntitySelection,
+  type RenameTarget,
+  type WorkspaceTreeHandle,
+} from './components/WorkspaceTree';
 import { commands as defaultCommands, describeError, type Commands } from './lib/commands';
 import { createEditingRegistry, SURFACE_PRIORITY } from './lib/editing';
 import { applyTreeMove, type TreeMove } from './lib/treeMoves';
@@ -236,14 +241,37 @@ function collectionHasDirtyTab(tabs: SessionTab[], collectionId: string): boolea
   );
 }
 
-function folderHasDirtyTab(tabs: SessionTab[], subtree: Set<string>): boolean {
-  return tabs.some(
+/** 某目录子树里带着未保存改动的标签：删除要问、复制直接禁止，两处共用同一判定。 */
+function dirtyTabsInFolder(tabs: SessionTab[], subtree: Set<string>): SessionTab[] {
+  return tabs.filter(
     (item) =>
       isTabDirty(item) &&
       (item.kind === 'request'
         ? item.draft.folder_id != null && subtree.has(item.draft.folder_id)
         : item.entityKind === 'folder' && subtree.has(item.entityId)),
   );
+}
+
+function folderHasDirtyTab(tabs: SessionTab[], subtree: Set<string>): boolean {
+  return dirtyTabsInFolder(tabs, subtree).length > 0;
+}
+
+/**
+ * 树操作的快捷键是否应当让位给当前的输入目标（spec: 树操作的快捷键）。
+ *
+ * 与「保存」相反：「保存」要求在输入框与代码编辑器里同样生效，而复制 / 重命名键在
+ * 可编辑区域里恰恰是用户想用来做别的事的地方——重命名键在 macOS 上是文本框的「移到
+ * 行尾」，复制键在编辑器里常被当作删除行或重复行。
+ *
+ * 代码编辑器（Monaco）用一个隐藏的 textarea 接收输入，`textarea` 那一条已经覆盖它，
+ * `.monaco-editor` 只作兜底。
+ */
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName.toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+  return target.closest('.monaco-editor') !== null;
 }
 
 export interface AppProps {
@@ -387,12 +415,26 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [sidebarTab, setSidebarTab] = useState<'collections' | 'environments'>('collections');
   /** 低频面板的单例模态（design D5）：非空时打开对应弹窗，同一时间至多一个。 */
   const [modal, setModal] = useState<ModalKind | null>(null);
+  /**
+   * 复制被未保存改动挡下时要点名的对象。它只是那个模态的**数据**——开关仍在 `modal`
+   * 里（`'copy-blocked'`），因此不存在两个遮罩并存的可能（design D9）。
+   */
+  const [copyBlocked, setCopyBlocked] = useState<string[] | null>(null);
   /** 被未保存改动挡下的意图；非空时界面给出三选一提示。 */
   const [pendingIntent, setPendingIntent] = useState<PendingIntent | null>(null);
   /** 菜单的「重命名」只负责把焦点交给面板头里的名称框（design D3）。 */
   const [pendingRenameFocus, setPendingRenameFocus] = useState(false);
   const entityNameRef = useRef<HTMLInputElement>(null);
   const requestNameRef = useRef<HTMLInputElement>(null);
+  /** 树里的就地改名入口：快捷键要触发它，而"哪一行可见"只由树内部知道（design D7）。 */
+  const treeHandleRef = useRef<WorkspaceTreeHandle>(null);
+  /**
+   * 复制的两个入口经 ref 交给快捷键的 effect。
+   *
+   * 那个 effect 只依赖 `saveCurrentSurface`，直接闭包引用会取到旧渲染里的状态；
+   * `activeKeyRef` / `requestCloseTabRef` 是同一套做法。
+   */
+  const duplicateRef = useRef<(kind: 'request' | 'folder', id: string) => void>(() => {});
   /** Ctrl+S 的一次保存尚未结束时，不再重复提交。 */
   const savingRef = useRef(false);
   /** 关闭标签的实现声明在组件靠后处；全局快捷键 effect 经 ref 引用，避免「声明前使用」。 */
@@ -1150,6 +1192,34 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         return;
       }
 
+      if (event.key.toLowerCase() === 'd' || event.key.toLowerCase() === 'e') {
+        // 带 Shift 的组合另有归属（浏览器里 Ctrl+Shift+D 是「所有标签页加入书签」）
+        if (event.shiftKey) return;
+        // 模态打开时不作用于树：树不是模态里的编辑面，而复制键会**真的**发起一次
+        // 复制。与「保存」同源——它同样把模态纳入"当前生效面"的判断（design D6 / D9）
+        if (modalRef.current !== null) return;
+        // 可编辑区域里让位：这两个键在输入框与代码编辑器里是用户自己的键（design D7）
+        if (isEditableTarget(event.target)) return;
+        // 即使本次不触发动作，也要吞掉运行环境的默认行为（书签 / 页内搜索）
+        event.preventDefault();
+
+        const tab = tabsRef.current.find((item) => item.id === activeKeyRef.current);
+        if (!tab) return;
+
+        if (event.key.toLowerCase() === 'd') {
+          // 作用对象是当前点击的实体：点击树行即打开它，所以这里读激活标签（design D6）。
+          // 集合级复制本次不做，于是在集合标签上无动作。
+          if (tab.kind === 'request') duplicateRef.current('request', tab.requestId);
+          else if (tab.entityKind === 'folder') duplicateRef.current('folder', tab.entityId);
+          return;
+        }
+
+        // 重命名走树里的就地改名——与菜单里那一项是同一条路径，两者因此必然等价
+        if (tab.kind === 'request') treeHandleRef.current?.startRename(tab.requestId);
+        else treeHandleRef.current?.startRename(tab.entityId);
+        return;
+      }
+
       if (event.key.toLowerCase() === 'w') {
         event.preventDefault();
         const active = activeKeyRef.current;
@@ -1763,6 +1833,16 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
    * 原先面板头的「另存为」一致：为副本打开并激活一个标签，原标签与其草稿原样保留。
    */
   const duplicateRequestById = async (id: string) => {
+    // 该请求带着未保存改动时禁止复制：副本取的是数据库里的内容，放行只会静默丢掉
+    // 编辑器里的改动（spec: 未保存的改动阻止复制）。
+    const dirty = tabsRef.current.find(
+      (item) => item.kind === 'request' && item.requestId === id && item.dirty,
+    );
+    if (dirty) {
+      blockCopy([tabName(dirty)]);
+      return;
+    }
+
     setError(null);
     try {
       const copy = await client.requestDuplicate(id, null);
@@ -1789,6 +1869,54 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     } catch (caught) {
       setError(describeError(caught).message);
     }
+  };
+
+  /**
+   * 复制被未保存改动挡下：弹出独立的模态提示（spec: 未保存的改动阻止复制）。
+   *
+   * 刻意**不提供**「放弃改动并继续」：规则是"禁止复制"，给一个绕过的按钮等于把它
+   * 降级成一条提示。名字交给模态显示，页面内不出现并行的错误条。
+   */
+  const blockCopy = (names: string[]) => {
+    setError(null);
+    setCopyBlocked(names);
+    // 走单例状态：另立一个开关的话，两处同时触发会叠出两个遮罩，
+    // 而「按 Esc 该关哪一个」也变得不确定（design D9）
+    setModal('copy-blocked');
+  };
+
+  /**
+   * 复制目录：连同整棵子树在新位置重建一份（spec: 复制请求与目录）。
+   *
+   * 判定范围是**整棵子树**——复制会把其中每个请求都取一遍，任何一个带着未保存改动都会
+   * 被静默丢掉，因此一并挡住并点名。判定与请求复制共用 `dirtyTabsInFolder`，两条路径
+   * 对"这棵子树干不干净"给出同一个答案。
+   *
+   * 新目录不需要特意展开：折叠状态记的是"被折叠的 id"，新 id 不在其中，于是它默认
+   * 就是展开的（父级与源目录相同，用户看得见源目录即看得见它）。
+   */
+  const duplicateFolderById = async (id: string) => {
+    const dirty = dirtyTabsInFolder(
+      tabsRef.current,
+      collectFolderSubtreeIds(treesRef.current, id),
+    );
+    if (dirty.length > 0) {
+      blockCopy(dirty.map(tabName));
+      return;
+    }
+
+    setError(null);
+    try {
+      await client.folderDuplicate(id, null);
+      if (workspaceId) await loadTree(workspaceId);
+    } catch (caught) {
+      setError(describeError(caught).message);
+    }
+  };
+
+  duplicateRef.current = (kind, id) => {
+    if (kind === 'request') void duplicateRequestById(id);
+    else void duplicateFolderById(id);
   };
 
   /** 该请求是否带着一个有未保存改动的标签——删除前的守卫判据。 */
@@ -1990,6 +2118,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         <div className="sidebar-body">
           {sidebarTab === 'collections' ? (
             <WorkspaceTree
+              ref={treeHandleRef}
               trees={displayTrees}
               selectedRequestId={activeRequestTab?.requestId ?? null}
               selectedEntity={selectedEntity}
@@ -2004,6 +2133,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               onDeleteFolder={removeFolder}
               onDeleteRequest={removeRequestById}
               onDuplicateRequest={(id) => void duplicateRequestById(id)}
+              onDuplicateFolder={(id) => void duplicateFolderById(id)}
               onRenameEntity={(entity) => renameEntity(entity)}
               onRenameRequest={(id) => renameRequest(id)}
               onRenameCommit={(target, name) => void renameFromTree(target, name)}
@@ -2379,6 +2509,18 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
       {/* 自绘边缘缩放边条（design D6）：贴窗口内沿的透明窄条 */}
       <ResizeStrips windowApi={windowCloser} />
+
+      {modal === 'copy-blocked' && copyBlocked && (
+        <Modal title="无法复制" onClose={() => setModal(null)}>
+          <p>以下内容还有未保存的改动，复制会丢掉它们：</p>
+          <ul className="copy-blocked-list">
+            {copyBlocked.map((name) => (
+              <li key={name}>{name}</li>
+            ))}
+          </ul>
+          <p className="muted">先保存（Ctrl+S）再复制。</p>
+        </Modal>
+      )}
 
       {modal === 'cookies' && (
         <Modal title="Cookie" onClose={() => setModal(null)}>

@@ -377,11 +377,18 @@ main.main {
   align-items: center;
   gap: var(--space-2);
   flex: 0 1 auto;
-  /* 最小宽度必须容得下「种类图标 + 一点名字 + 关闭按钮」：标签再多也只该压缩
-     名字，不能压到内容以下——否则内容会溢出标签盒，× 跑到标签外面去。
-     （原先这里是 min-width: 0，标签一多就把 × 挤出去了。） */
-  min-width: 96px;
+  /* 宽度只由内容决定（spec: 会话标签的宽度与内部对齐）。
+     这里原先是一条 min-width: 96px：它把内容不足的标签撑到 96px，多出来的宽度全落在
+     关闭入口之后——短名字的标签凭空空出一段，长名字（方法徽标较长）的标签却不会，
+     同一行因此出现两种留白。
+     下限改为 **min-content**（即不再写死数值）：名字可以一路缩到 16px，但关闭入口
+     不会被挤出标签盒。这与原先的 min-width: 0 相反——那个值允许标签被压到内容以下，
+     × 会跑到标签外面（tests-browser 有用例专门盯这件事）。 */
+  min-width: auto;
   max-width: 260px;
+  /* 行盒不再由继承的 1.5 撑高：标签内三者的盒高差越小，「按盒居中」越接近
+     「视觉齐平」（见下方 .tab-kind-icon / .method-badge 的说明） */
+  line-height: 1;
   padding: var(--space-1) var(--space-3);
   /* 无边框：标签的边界由底色说出来，不描边（Postman 的做法）。
      透明边框保留 1px 占位，激活时尺寸不变、整条不重排。 */
@@ -417,9 +424,21 @@ main.main {
 }
 
 .session-tab .session-tab-name {
+  /* 剩余宽度归名称：关闭入口因此始终贴在标签末尾，名字长了就省略号截断 */
+  flex: 1 1 auto;
+  min-width: 16px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* 标签内的方法徽标与种类图标属于同一视觉级别：给文字型标记一个固定盒高，
+   使它与图标、关闭格的中心重合。否则三者的行盒高度各不相同，`align-items: center`
+   只保证「盒子中心」一致，看到的却是图标比文字冒出来一截。 */
+.session-tab .method-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
 }
 
 /* 关闭入口与未保存指示共用同一格（design D9）：绝对定位让二者重叠，
@@ -472,6 +491,9 @@ main.main {
    而图标本身就能分辨，且与树中的绘制是同一份（components/icons.tsx）。 */
 .tab-kind-icon {
   flex: none;
+  /* 12px 的实心块按块级参与布局：中心与相邻文字的中心对齐，
+     不再受行内基线的影响（标签内三者的垂心一致） */
+  display: block;
   color: var(--muted);
 }
 
@@ -2098,8 +2120,9 @@ input.switch.switch-danger {
   color: var(--muted);
 }
 
-/* 树上就地改名的输入框：占住名字原来的位置，字号与树一致，
-   因此进入与退出编辑都不改变行的布局（高度、右边「⋯」的位置都不动）。 */
+/* 树上就地改名的输入框：字号与树一致，进入与退出编辑都不改变行高与右边「⋯」的位置。
+   宽度上要独占名称区域——编辑态下那个吸收剩余空间的 `.grow` 占位不渲染，
+   因此这里的 `flex: 1` 拿到的是整段可用宽度，而不是与它各分一半。 */
 .node-rename {
   flex: 1;
   min-width: 0;
@@ -2175,11 +2198,15 @@ select.method-select[data-method='OPTIONS'] {
   line-height: 1;
 }
 
+/* 行内操作菜单：与下拉菜单同源——portal 到 body、fixed 自定位（坐标由
+   `useMenuPlacement` 按触发器的实测矩形给出，放不下时向上展开）。
+   留在行内用绝对定位时会被所在滚动容器裁掉：集合树与环境列表都是滚动容器，
+   最底部的那一行因此「点不出菜单」。
+   z 序与 `.dropdown-menu` 一致：高于模态遮罩（20）与变量浮层（30）。
+   生长原点由内联按实际展开方向给出（向上展开时从底边长出）。 */
 .node-menu {
-  position: absolute;
-  top: 100%;
-  right: var(--space-1);
-  z-index: 20;
+  position: fixed;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
@@ -2189,17 +2216,31 @@ select.method-select[data-method='OPTIONS'] {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
-  /* 弹出层从触发器方向生长（design D0 的 origin-aware） */
-  transform-origin: top right;
 }
 
 .node-menu button {
+  /* 名称在左、键位在右：两端对齐，键位因此落在同一条竖线上 */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
   padding: var(--space-2) var(--space-4);
   border: none;
   background: transparent;
   border-radius: var(--radius-sm);
   text-align: left;
   font-size: var(--text-sm);
+}
+
+/* 键位文案：弱化即可。危险项变红时它不跟着红——键位本身不是危险信息 */
+.node-menu-shortcut {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+/* 复制被未保存改动挡下时列出的对象 */
+.copy-blocked-list {
+  margin: var(--space-2) 0 var(--space-3) var(--space-6);
 }
 
 .node-menu button:hover {

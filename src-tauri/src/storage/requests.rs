@@ -239,7 +239,7 @@ pub fn save_request(db: &Db, request: &SavedRequest) -> AppResult<SavedRequest> 
     get_request(db, &to_save.id)
 }
 
-/// 另存为副本：生成一条独立的新请求。
+/// 另存为副本：生成一条独立的新请求，**紧跟在源请求之后**。
 pub fn duplicate_request(db: &Db, id: &str, new_name: Option<&str>) -> AppResult<SavedRequest> {
     let source = get_request(db, id)?;
     let name = match new_name {
@@ -247,37 +247,39 @@ pub fn duplicate_request(db: &Db, id: &str, new_name: Option<&str>) -> AppResult
         None => format!("{} 副本", source.name),
     };
 
-    let copied = SavedRequest {
+    let mut copied = SavedRequest {
         id: new_id(),
         name,
         ..source
     };
+    let collection_id = copied.collection_id.clone();
+    let folder_id = copied.folder_id.clone();
 
     db.write_tx(|conn| {
         let tx = conn.transaction()?;
-        let next: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM requests
-             WHERE collection_id = ?1 AND folder_id IS ?2",
-            params![copied.collection_id, copied.folder_id],
-            |row| row.get(0),
-        )?;
-        let mut to_insert = copied.clone();
-        to_insert.sort_order = next;
-        insert_request(&tx, &to_insert)?;
+
+        // 副本紧跟在源请求之后：放到同级末尾会让人以为复制没有发生。
+        // 顺序取**混合**序列（同级的目录与请求共享 sort_order）后整体写回——只给新请求算
+        // 一个 sort_order，在同级出现同序号条目时它会落错位置。
+        let mut order =
+            super::workspace::children_in_order(&tx, &collection_id, folder_id.as_deref())?;
+        let at = order
+            .iter()
+            .position(|(item, _)| item == id)
+            .ok_or_else(|| AppError::not_found(format!("请求不在其父级下：{}", id)))?;
+        order.insert(
+            at + 1,
+            (copied.id.clone(), super::workspace::NodeKind::Request),
+        );
+        copied.sort_order = (at + 1) as i64;
+
+        insert_request(&tx, &copied)?;
+        super::workspace::write_children_order(&tx, &collection_id, folder_id.as_deref(), &order)?;
         tx.commit()?;
         Ok(())
     })?;
 
-    let mut saved = copied;
-    saved.sort_order = db.read(|conn| {
-        conn.query_row(
-            "SELECT sort_order FROM requests WHERE id = ?1",
-            [&saved.id],
-            |row| row.get(0),
-        )
-        .map_err(AppError::from)
-    })?;
-    Ok(saved)
+    Ok(copied)
 }
 
 pub fn rename_request(db: &Db, id: &str, name: &str) -> AppResult<SavedRequest> {
@@ -468,6 +470,14 @@ mod tests {
         let copy = duplicate_request(&db, &original.id, None).expect("另存为");
         assert_ne!(copy.id, original.id);
         assert_eq!(copy.name, "原始 副本");
+
+        // 副本紧跟源请求之后：放到同级末尾会让人以为复制没有发生
+        let names: Vec<String> = list_requests(&db, &collection_id)
+            .unwrap()
+            .into_iter()
+            .map(|request| request.name)
+            .collect();
+        assert_eq!(names, vec!["原始".to_string(), "原始 副本".to_string()]);
 
         // 修改副本不应影响原件
         let mut edited = copy.clone();

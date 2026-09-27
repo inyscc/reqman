@@ -55,6 +55,13 @@ export function EnvironmentsPanel({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  /**
+   * 当前打开的行内菜单锚在哪个元素上。
+   *
+   * 环境行是在列表里内联渲染的（同一个组件实例），没法像集合树那样一行一个 ref，
+   * 因此在**打开菜单的那一刻**把元素记下来：右键用行容器、「⋯」用按钮本身。
+   */
+  const menuAnchor = useRef<Element | null>(null);
   /** 正在就地改名的环境 id 与草稿值。 */
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState('');
@@ -286,6 +293,7 @@ export function EnvironmentsPanel({
               // 且打开菜单不改变激活的环境（spec: Environments tab 的环境管理）
               onContextMenu={(event) => {
                 event.preventDefault();
+                menuAnchor.current = event.currentTarget;
                 setMenuId(environment.id);
               }}
             >
@@ -329,6 +337,7 @@ export function EnvironmentsPanel({
                   title="更多操作"
                   onClick={(event) => {
                     event.stopPropagation();
+                    menuAnchor.current = event.currentTarget;
                     setMenuId(menuId === environment.id ? null : environment.id);
                   }}
                 >
@@ -337,7 +346,7 @@ export function EnvironmentsPanel({
               )}
 
               {menuId === environment.id && (
-                <NodeMenu items={menu} onClose={() => setMenuId(null)} />
+                <NodeMenu items={menu} anchor={menuAnchor} onClose={() => setMenuId(null)} />
               )}
 
               {confirmId === environment.id && (

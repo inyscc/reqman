@@ -171,6 +171,14 @@ pub fn create_folder(
     )
 }
 
+pub fn duplicate_folder(
+    state: &AppState,
+    id: &str,
+    new_name: Option<String>,
+) -> AppResult<Folder> {
+    workspace::duplicate_folder(&state.db, id, new_name.as_deref())
+}
+
 pub fn rename_folder(state: &AppState, id: &str, name: &str) -> AppResult<Folder> {
     workspace::rename_folder(&state.db, id, name)
 }
@@ -757,6 +765,15 @@ pub fn folder_create(
     name: String,
 ) -> AppResult<Folder> {
     create_folder(&state, &collection_id, parent_folder_id, &name)
+}
+
+#[tauri::command]
+pub fn folder_duplicate(
+    state: State<'_, AppState>,
+    id: String,
+    new_name: Option<String>,
+) -> AppResult<Folder> {
+    duplicate_folder(&state, &id, new_name)
 }
 
 #[tauri::command]

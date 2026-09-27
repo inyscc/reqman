@@ -496,6 +496,7 @@ function harness(options: {
       throw new Error('未使用');
     },
     folderCreate,
+    folderDuplicate: vi.fn(async () => makeFolder({ id: 'f-copy', name: '我的文件夹 副本' })),
     folderRename,
     folderDelete,
     folderMove: async () => {
@@ -1465,7 +1466,9 @@ describe('前端数据流骨架', () => {
 
     fireEvent.click(screen.getByText('发送'));
 
-    await waitFor(() => expect(sendRequest).toHaveBeenCalled());
+    // 这条链路要起脚本沙箱（worker）：整套件并发跑时首次启动可能超过 waitFor 的默认 1s，
+    // 用例级 30s 的超时管不到它，因此这里显式放宽
+    await waitFor(() => expect(sendRequest).toHaveBeenCalled(), { timeout: 15_000 });
     // 写入落到了全局作用域的工作区上
     expect(globalsSet).toHaveBeenCalledWith('w1', 'g1', 'from-script', false);
     // 顺序是硬要求：变量解析发生在后端发送时，脚本写入若晚于发送就静默失效
@@ -1688,10 +1691,19 @@ function openNodeMenu(name: string) {
   return row;
 }
 
+/**
+ * 当前打开的行内菜单。
+ *
+ * 菜单是覆盖层：它 portal 到 `document.body`（不再是被点那一行的子元素，否则会被所在
+ * 滚动容器裁掉——集合树最底部的节点因此点不出菜单）。所以查询必须走全局范围，
+ * `tree()` / `envList()` 这些局部作用域查不到它；同一时刻只存在一个菜单。
+ */
+const menu = () => screen.getByRole('menu');
+
 /** 打开集合 / 文件夹的脚本面板：入口在「⋯」菜单里（单击目录行改为切换展开）。 */
 async function openEntityPanel(name: string) {
   openNodeMenu(name);
-  fireEvent.click(tree().getByText('编辑脚本'));
+  fireEvent.click(within(menu()).getByText('编辑脚本'));
   // 集合面板默认停在变量页（spec: 集合面板的变量与脚本站签），脚本用例要显式切过去；
   // 文件夹没有页签栏，因此这个按钮不存在。实体是异步取回的，先等面板挂载再找页签。
   await screen.findByTestId('entity-script-panel');
@@ -1746,10 +1758,10 @@ describe('集合树的折叠与目录操作', () => {
     await tree().findByText('我的集合');
 
     openNodeMenu('我的集合');
-    expect(tree().getByRole('menu')).toBeTruthy();
+    expect(menu()).toBeTruthy();
 
     fireEvent.keyDown(document, { key: 'Escape' });
-    expect(tree().queryByRole('menu')).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
   });
 
   it('菜单里的新建请求仍挂在正确的父级下（2.3）', async () => {
@@ -3211,7 +3223,7 @@ describe('变量表格与集合面板（rework-collection-tree-and-variable-mode
     await openRequest();
 
     openNodeMenu('我的集合');
-    fireEvent.click(tree().getByText('编辑脚本'));
+    fireEvent.click(within(menu()).getByText('编辑脚本'));
 
     // 默认变量页：集合变量的表格直接出现
     expect(await screen.findByLabelText('变量名 baseUrl')).toBeTruthy();
@@ -3244,7 +3256,7 @@ describe('变量表格与集合面板（rework-collection-tree-and-variable-mode
     await openRequest();
 
     openNodeMenu('我的集合');
-    fireEvent.click(tree().getByText('编辑脚本'));
+    fireEvent.click(within(menu()).getByText('编辑脚本'));
     await screen.findByTestId('entity-script-panel');
 
     fireEvent.change(await screen.findByLabelText('新增变量的名称'), {
@@ -3510,7 +3522,7 @@ describe('未保存守卫', () => {
     await openDirty(client);
 
     openNodeMenu('我的请求');
-    fireEvent.click(tree().getByText('删除'));
+    fireEvent.click(within(menu()).getByText('删除'));
 
     expect(guard()).toBeTruthy();
     expect(screen.getByLabelText('请求地址')).toBeTruthy();
@@ -4347,7 +4359,7 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     stillExpanded();
 
     fireEvent.click(more);
-    fireEvent.keyDown(view.getByText('编辑脚本'), { key: 'Enter' });
+    fireEvent.keyDown(within(menu()).getByText('编辑脚本'), { key: 'Enter' });
     stillExpanded();
   });
 
@@ -4373,7 +4385,7 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     fireEvent.mouseOver(row);
     fireEvent.click(view.getByLabelText('更多操作'));
 
-    expect(view.getByRole('menu')).toBeTruthy();
+    expect(menu()).toBeTruthy();
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(view.queryByText('深处的请求')).not.toBeNull();
   });
@@ -4385,7 +4397,7 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
 
     fireEvent.mouseOver(row);
     fireEvent.click(view.getByLabelText('更多操作'));
-    fireEvent.click(view.getByText('编辑脚本'));
+    fireEvent.click(within(menu()).getByText('编辑脚本'));
 
     expect(actions.onSelectEntity).toHaveBeenCalledWith({
       kind: 'folder',
@@ -4486,13 +4498,13 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     fireEvent.click(tree().getByLabelText('折叠 外层'));
     expect(tree().getByLabelText('展开 外层')).toBeTruthy();
     openMenu();
-    fireEvent.click(tree().getByText('新建请求'));
+    fireEvent.click(within(menu()).getByText('新建请求'));
     await waitFor(() => expect(requestCreate).toHaveBeenCalled());
     expect(tree().getByLabelText('折叠 外层')).toBeTruthy();
 
     fireEvent.click(tree().getByLabelText('折叠 外层'));
     openMenu();
-    fireEvent.click(tree().getByText('新建子文件夹'));
+    fireEvent.click(within(menu()).getByText('新建子文件夹'));
     await waitFor(() => expect(folderCreate).toHaveBeenCalledWith('c1', '外层', '新文件夹'));
     expect(tree().getByLabelText('折叠 外层')).toBeTruthy();
   });
@@ -4964,11 +4976,9 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     expect(screen.queryByTestId('unsaved-guard')).toBeNull();
   });
 
-  it('树菜单的「复制」追加一个标签，原标签与草稿保留（1.4）', async () => {
+  it('树菜单的「复制」在有未保存改动时被挡下，弹出独立的模态提示（spec: 未保存的改动阻止复制）', async () => {
     const { client } = harness();
-    vi.spyOn(client, 'requestDuplicate').mockResolvedValueOnce(
-      makeRequest({ id: 'r-dup', name: '我的请求 副本' }),
-    );
+    const duplicate = vi.spyOn(client, 'requestDuplicate');
     render(<App client={client} />);
     await openRequest();
     fireEvent.change(screen.getByLabelText('请求地址'), {
@@ -4977,14 +4987,14 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     await screen.findByText('未保存');
 
     openNodeMenu('我的请求');
-    fireEvent.click(tree().getByText('复制'));
+    fireEvent.click(within(menu()).getByText('复制'));
 
-    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
-    // 原标签与它的草稿都还在：切回原标签验证（复制后激活的是新副本）
-    fireEvent.click(tabByName('我的请求'));
-    expect((screen.getByLabelText('请求地址') as HTMLInputElement).value).toBe(
-      'https://api.test/draft',
-    );
+    // 复制取的是数据库里的内容，放行只会静默丢掉编辑器里的改动——因此不执行
+    expect(duplicate).not.toHaveBeenCalled();
+    // 提示是独立的模态（不是页面里的某一行文字），并点名是哪个对象
+    const dialog = await screen.findByRole('dialog', { name: '无法复制' });
+    expect(within(dialog).getByText('我的请求')).toBeTruthy();
+    expect(screen.getAllByTestId('session-tab')).toHaveLength(1);
   });
 
   it('复制非激活请求：按被点的那个节点复制，原请求与其草稿不受影响（spec: 集合树的操作入口默认隐藏）', async () => {
@@ -4997,7 +5007,7 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
 
     // 当前打开的是「我的请求」，被复制的是另一个节点
     openNodeMenu('另一个请求');
-    fireEvent.click(tree().getByText('复制'));
+    fireEvent.click(within(menu()).getByText('复制'));
 
     await waitFor(() => expect(duplicate).toHaveBeenCalledWith('r2', null));
     await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
@@ -5136,7 +5146,7 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     render(<App client={client} />);
     await openRequest();
     openNodeMenu('我的请求');
-    fireEvent.click(tree().getByText('删除'));
+    fireEvent.click(within(menu()).getByText('删除'));
     await waitFor(() => expect(screen.queryByLabelText('请求地址')).toBeNull());
     expect(requestDeleteSpy).toHaveBeenCalled();
   });
@@ -5705,5 +5715,215 @@ describe('响应呈现格式（response-format-selector）', () => {
 
     expect(screen.getByTestId('request-response-format').getAttribute('data-value')).toBe('json');
     expect(await screen.findByText('未保存')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 树操作的快捷键与目录复制（change: fix-menu-placement-and-session-tabs）
+// ---------------------------------------------------------------------------
+
+/** 树里就地改名输入框的标签：与面板头的名称框同名，查询因此限定在树内。 */
+const renameBox = (name: string) => tree().queryByLabelText(`重命名 ${name}`);
+
+describe('树操作的快捷键', () => {
+  it('Ctrl+D 复制当前点击的请求并打开副本标签', async () => {
+    const harnessed = harness();
+    const duplicate = vi
+      .spyOn(harnessed.client, 'requestDuplicate')
+      .mockResolvedValueOnce(makeRequest({ id: 'r-dup', name: '我的请求 副本' }));
+    render(<App client={harnessed.client} />);
+    await openRequest();
+
+    fireEvent.keyDown(window, { key: 'd', ctrlKey: true });
+
+    // 作用对象是当前点击的实体——点击树行即打开它，所以这里读的是激活标签
+    await waitFor(() => expect(duplicate).toHaveBeenCalledWith('r1', null));
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
+  });
+
+  it('Ctrl+E 让当前点击的目录进入就地改名态', async () => {
+    const harnessed = harness({ folder: makeFolder({ id: 'f1', name: '我的文件夹' }) });
+    render(<App client={harnessed.client} />);
+
+    fireEvent.click(await tree().findByText('我的文件夹'));
+    await waitFor(() => expect(tree().getByText('我的文件夹')).toBeTruthy());
+    expect(renameBox('我的文件夹')).toBeNull();
+
+    fireEvent.keyDown(window, { key: 'e', ctrlKey: true });
+
+    await waitFor(() => expect(renameBox('我的文件夹')).not.toBeNull());
+  });
+
+  it('焦点在输入框内时重命名键不触发', async () => {
+    const harnessed = harness();
+    render(<App client={harnessed.client} />);
+    await openRequest();
+
+    const address = screen.getByLabelText('请求地址') as HTMLInputElement;
+    address.focus();
+    fireEvent.keyDown(address, { key: 'e', ctrlKey: true });
+
+    // 输入框里的这个键仍是用户自己的（macOS 上是「移到行尾」）
+    expect(tree().queryByLabelText(/^重命名 /)).toBeNull();
+  });
+
+  it('重命名的目标藏在折叠目录里时先展开它', async () => {
+    const harnessed = harness({ folder: makeFolder({ id: '外层', name: '外层' }) });
+    const client = {
+      ...harnessed.client,
+      workspaceTree: async () => nestedTrees(),
+      requestGet: async (id: string) =>
+        makeRequest({ id, name: '深处的请求', folder_id: '内层', url: 'https://api.test/deep' }),
+    };
+    render(<App client={client} />);
+
+    fireEvent.click(await tree().findByText('深处的请求'));
+    await screen.findByLabelText('请求地址');
+
+    // 折叠外层：目标行随之从 DOM 里消失——此时直接设改名状态，用户看不到任何东西
+    fireEvent.click(tree().getByLabelText('折叠 外层'));
+    await waitFor(() => expect(tree().queryByText('深处的请求')).toBeNull());
+
+    fireEvent.keyDown(window, { key: 'e', ctrlKey: true });
+
+    // 改名输入框存在，同时证明了两件事：那两层被展开（行重新渲染），且已进入编辑态。
+    // 不能断言行内的名字文本——此时那一格已经换成输入框了。
+    await waitFor(() => expect(renameBox('深处的请求')).not.toBeNull());
+    expect(tree().getByLabelText('折叠 内层')).toBeTruthy();
+  });
+
+  it('菜单里标出复制与重命名的键位', async () => {
+    const harnessed = harness();
+    render(<App client={harnessed.client} />);
+    await openRequest();
+
+    openNodeMenu('我的请求');
+    expect(within(menu()).getByText('Ctrl+D')).toBeTruthy();
+    expect(within(menu()).getByText('Ctrl+E')).toBeTruthy();
+  });
+
+  it('模态打开时快捷键不作用于树', async () => {
+    const harnessed = harness();
+    const duplicate = vi.spyOn(harnessed.client, 'requestDuplicate');
+    render(<App client={harnessed.client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('Cookie'));
+    await screen.findByTestId('cookie-panel');
+
+    fireEvent.keyDown(window, { key: 'd', ctrlKey: true });
+    fireEvent.keyDown(window, { key: 'e', ctrlKey: true });
+
+    // 树不是模态里的编辑面：复制键会真的发起一次复制，重命名键会把编辑态送进遮罩之后
+    expect(duplicate).not.toHaveBeenCalled();
+    expect(tree().queryByLabelText(/^重命名 /)).toBeNull();
+    expect(screen.getAllByTestId('session-tab')).toHaveLength(1);
+  });
+
+  it('带 Shift 的组合不触发（运行环境里另有归属）', async () => {
+    const harnessed = harness();
+    const duplicate = vi.spyOn(harnessed.client, 'requestDuplicate');
+    render(<App client={harnessed.client} />);
+    await openRequest();
+
+    fireEvent.keyDown(window, { key: 'd', ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: 'e', ctrlKey: true, shiftKey: true });
+
+    expect(duplicate).not.toHaveBeenCalled();
+    expect(tree().queryByLabelText(/^重命名 /)).toBeNull();
+  });
+
+  it('菜单开着时按重命名键：菜单先收起，两种浮层态不并存', async () => {
+    const harnessed = harness();
+    render(<App client={harnessed.client} />);
+    await openRequest();
+
+    openNodeMenu('我的请求');
+    expect(within(menu()).getByText('Ctrl+E')).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: 'e', ctrlKey: true });
+
+    // 编辑态不显示「⋯」，菜单会因此失去锚点——位置不会重算，它会留在原地继续可用
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+    expect(renameBox('我的请求')).not.toBeNull();
+  });
+});
+
+describe('复制目录与未保存改动的阻挡', () => {
+  it('文件夹菜单的「复制」递归复制该目录', async () => {
+    const harnessed = harness({ folder: makeFolder({ id: 'f1', name: '我的文件夹' }) });
+    const duplicate = vi.spyOn(harnessed.client, 'folderDuplicate');
+    render(<App client={harnessed.client} />);
+    await tree().findByText('我的文件夹');
+
+    openNodeMenu('我的文件夹');
+    fireEvent.click(within(menu()).getByText('复制'));
+
+    await waitFor(() => expect(duplicate).toHaveBeenCalledWith('f1', null));
+  });
+
+  it('Ctrl+D 在目录上复制的是该目录', async () => {
+    const harnessed = harness({ folder: makeFolder({ id: 'f1', name: '我的文件夹' }) });
+    const duplicate = vi.spyOn(harnessed.client, 'folderDuplicate');
+    render(<App client={harnessed.client} />);
+
+    fireEvent.click(await tree().findByText('我的文件夹'));
+    // 等标签建立：快捷键读的是"当前点击的实体"，点击是异步的，抢在之前按会没有对象
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(1));
+
+    fireEvent.keyDown(window, { key: 'd', ctrlKey: true });
+
+    await waitFor(() => expect(duplicate).toHaveBeenCalledWith('f1', null));
+  });
+
+  it('目录内有未保存改动时复制被挡下，并弹独立的模态点名', async () => {
+    const harnessed = harness({
+      request: makeRequest({ id: 'r1', name: '我的请求', folder_id: 'f1' }),
+      folder: makeFolder({ id: 'f1', name: '我的文件夹' }),
+    });
+    const duplicate = vi.spyOn(harnessed.client, 'folderDuplicate');
+    const client = {
+      ...harnessed.client,
+      workspaceTree: async () => [
+        {
+          collection,
+          children: [
+            folderNode(
+              '我的文件夹',
+              [
+                // 节点的归属与实际请求一致：打开标签时优先用树里的这份请求，
+                // 归属对不上的话"这棵子树干不干净"就会算错
+                {
+                  kind: 'request',
+                  id: 'r1',
+                  name: '我的请求',
+                  sort_order: 0,
+                  children: [],
+                  request: makeRequest({ id: 'r1', name: '我的请求', folder_id: 'f1' }),
+                },
+              ],
+              'f1',
+            ),
+          ],
+        },
+      ],
+    };
+    render(<App client={client} />);
+
+    // 打开目录下的请求并改一处：子树里因此有一处未保存改动
+    fireEvent.click(await tree().findByText('我的请求'));
+    await screen.findByLabelText('请求地址');
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/draft' },
+    });
+    await screen.findByText('未保存');
+
+    openNodeMenu('我的文件夹');
+    fireEvent.click(within(menu()).getByText('复制'));
+
+    // 复制会把子树里每个请求都取一遍，放行只会静默丢掉这处改动
+    expect(duplicate).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole('dialog', { name: '无法复制' });
+    expect(within(dialog).getByText('我的请求')).toBeTruthy();
   });
 });

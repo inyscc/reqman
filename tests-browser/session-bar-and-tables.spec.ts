@@ -362,6 +362,53 @@ describe('会话标签行的溢出（真实引擎）', () => {
       await page.close();
     }
   });
+
+  it('标签内的种类标记 / 方法徽标与名称垂直中心一致（spec: 会话标签的宽度与内部对齐）', async () => {
+    const page = await openApp({ width: 1200, height: 640 });
+    try {
+      for (let index = 1; index <= 3; index += 1) {
+        await page.getByRole('button', { name: `GET 请求 ${index}`, exact: true }).click();
+      }
+      // 再开一个实体标签（种类图标那一类），让两种标记都出现在同一行里
+      await page.getByTestId('workspace-tree').getByText('探针集合', { exact: true }).click();
+      await page.getByRole('tab').first().waitFor();
+
+      // 量三者的垂直中心：它们由 `align-items: center` 按盒子居中，因此只要盒高不同，
+      // 看到的就是「图标比文字冒出来一截」。容差 1px 给亚像素渲染。
+      const offsets = await page.evaluate(() => {
+        const center = (node: Element) => {
+          const rect = node.getBoundingClientRect();
+          return rect.top + rect.height / 2;
+        };
+
+        return Array.from(document.querySelectorAll<HTMLElement>('.session-tab'))
+          .map((tab) => {
+            const name = tab.querySelector('.session-tab-name');
+            const marker = tab.querySelector('.method-badge, .tab-kind-icon');
+            const close = tab.querySelector('.session-tab-close');
+            if (!name || !marker) return null;
+
+            return {
+              name: center(name),
+              marker: center(marker),
+              close: close ? center(close) : null,
+            };
+          })
+          .filter((item): item is { name: number; marker: number; close: number | null } => item !== null);
+      });
+
+      expect(offsets.length, '没有量到任何标签').toBeGreaterThan(0);
+
+      for (const item of offsets) {
+        expect(Math.abs(item.name - item.marker), '标记与名称的垂心应一致').toBeLessThanOrEqual(1);
+        if (item.close !== null) {
+          expect(Math.abs(item.name - item.close), '关闭格与名称的垂心应一致').toBeLessThanOrEqual(1);
+        }
+      }
+    } finally {
+      await page.close();
+    }
+  });
 });
 
 describe('树滚动条不占行宽（真实引擎）', () => {

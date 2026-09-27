@@ -88,6 +88,7 @@ pub fn run() {
             commands::collection_delete,
             commands::collection_reorder,
             commands::folder_create,
+            commands::folder_duplicate,
             commands::folder_rename,
             commands::folder_get,
             commands::folder_delete,

@@ -1,4 +1,15 @@
-import { useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import {
+  forwardRef,
+  useCallback,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type ReactNode,
+  type Ref,
+  type RefObject,
+} from 'react';
 import { FolderIcon } from './icons';
 import { NodeMenu, type MenuItem } from './NodeMenu';
 import { OverlayScrollbar } from './OverlayScrollbar';
@@ -20,6 +31,52 @@ export interface EntitySelection {
   collectionId: string;
 }
 
+/**
+ * 树对外暴露的命令式入口（spec: ui-layout「树操作的快捷键」）。
+ *
+ * 快捷键挂在 App 的 window 监听上，而「哪一行此刻可见」由树自己的折叠与搜索状态决定，
+ * 所以「让某行进入就地改名」只能由树来做。
+ */
+export interface WorkspaceTreeHandle {
+  /**
+   * 让某个节点进入就地改名态，必要时先让它可见。
+   *
+   * 就地改名的输入框只在**该行被渲染**时存在：目标被折叠的祖先藏起、或被搜索词过滤掉
+   * 时，直接设状态会让用户按了键却看不到任何反应。
+   */
+  startRename: (id: string) => void;
+}
+
+/**
+ * 菜单里标出的键位（spec: ui-layout「树操作的快捷键」）。
+ *
+ * 不做平台判断：`Ctrl+S` 的实现本来就是 `ctrlKey || metaKey` 通吃，菜单文案写成
+ * `Ctrl+` 与之并行，不再引入第二套真相。
+ */
+const RENAME_SHORTCUT = 'Ctrl+E';
+const DUPLICATE_SHORTCUT = 'Ctrl+D';
+
+/** 从集合一层层找到该节点，返回它所在的路径（集合 id 起、含自身）；找不到返回 null。 */
+function pathTo(trees: CollectionTree[], id: string): string[] | null {
+  for (const tree of trees) {
+    if (tree.collection.id === id) return [tree.collection.id];
+    const below = pathInNodes(tree.children, id);
+    if (below) return [tree.collection.id, ...below];
+  }
+  return null;
+}
+
+function pathInNodes(nodes: TreeNode[], id: string): string[] | null {
+  for (const node of nodes) {
+    if (node.id === id) return [node.id];
+    if (node.kind === 'folder') {
+      const below = pathInNodes(node.children, id);
+      if (below) return [node.id, ...below];
+    }
+  }
+  return null;
+}
+
 export interface WorkspaceTreeProps {
   trees: CollectionTree[];
   selectedRequestId: string | null;
@@ -35,6 +92,8 @@ export interface WorkspaceTreeProps {
   onDeleteRequest: (id: string) => void;
   /** 复制一条请求（spec: 集合树的操作入口默认隐藏）：请求节点菜单里的「复制」。 */
   onDuplicateRequest: (id: string) => void;
+  /** 复制一个目录（连同整棵子树）：文件夹节点菜单里的「复制」。 */
+  onDuplicateFolder: (id: string) => void;
   /** 选中实体并把焦点交给面包屑的名称输入框。 */
   onRenameEntity: (entity: EntitySelection) => void;
   onRenameRequest: (id: string) => void;
@@ -62,6 +121,8 @@ interface TreeActions {
   onDeleteFolder: (id: string) => void;
   onDeleteRequest: (id: string) => void;
   onDuplicateRequest: (id: string) => void;
+  /** 复制一个目录（连同整棵子树）。 */
+  onDuplicateFolder: (id: string) => void;
   onRenameEntity: (entity: EntitySelection) => void;
   onRenameRequest: (id: string) => void;
   onToggle: (id: string) => void;
@@ -198,9 +259,19 @@ function useRowReveal(id: string, view: TreeView) {
   };
 }
 
-function MoreButton({ id, view }: { id: string; view: TreeView }) {
+function MoreButton({
+  id,
+  view,
+  buttonRef,
+}: {
+  id: string;
+  view: TreeView;
+  /** 菜单要据这个按钮的实测位置决定朝上还是朝下展开（见 NodeMenu 的 anchor）。 */
+  buttonRef: RefObject<HTMLButtonElement | null>;
+}) {
   return (
     <button
+      ref={buttonRef}
       className="node-more"
       aria-label="更多操作"
       title="更多操作"
@@ -314,6 +385,8 @@ function EntryRow({
   const revealed = view.activeId === id || view.menuId === id;
   const entity: EntitySelection = { kind, id, collectionId };
   const reveal = useRowReveal(id, view);
+  // 「⋯」按钮本身：菜单锚在它身上，据此决定朝上还是朝下
+  const moreRef = useRef<HTMLButtonElement>(null);
   const row: RowRef = { id, kind, collectionId, parent, index };
 
   // 新建的条目落在这一行下面，所以先确保这一行是展开的（否则新条目生出来就被折叠藏住）。
@@ -333,7 +406,17 @@ function EntryRow({
       },
     },
     { label: '编辑脚本', onSelect: () => actions.onSelectEntity(entity) },
-    { label: '重命名', onSelect: () => view.startRename(id) },
+    { label: '重命名', shortcut: RENAME_SHORTCUT, onSelect: () => view.startRename(id) },
+    // 集合级复制会连带集合变量表，本次不做（design D8）：只有文件夹有「复制」。
+    ...(kind === 'folder'
+      ? [
+          {
+            label: '复制',
+            shortcut: DUPLICATE_SHORTCUT,
+            onSelect: () => actions.onDuplicateFolder(id),
+          },
+        ]
+      : []),
     {
       label: kind === 'folder' ? '删除文件夹' : '删除集合',
       danger: true,
@@ -379,7 +462,9 @@ function EntryRow({
         // 与请求行同款：右键与「⋯」是同一份菜单、同一个展开状态
         onContextMenu={(event) => {
           event.preventDefault();
-          view.setMenu(id);
+          // 编辑名字时不弹菜单：它是锚在那一行右侧「⋯」上的，而编辑态下那个入口不渲染，
+          // 没有锚点的菜单只会落到左上角
+          if (view.renamingId !== id) view.setMenu(id);
         }}
         {...reveal}
       >
@@ -418,11 +503,19 @@ function EntryRow({
             }
           />
         ) : (
-          <span className="tree-name">{name}</span>
+          <>
+            <span className="tree-name">{name}</span>
+            {/* 吸收剩余空间的占位只在非编辑态存在：编辑态留下它，输入框就只会分到一半宽度 */}
+            <span className="grow" />
+          </>
         )}
-        <span className="grow" />
-        {revealed && <MoreButton id={id} view={view} />}
-        {view.menuId === id && <NodeMenu items={menu} onClose={() => view.setMenu(null)} />}
+        {/* 编辑名字时不亮出操作入口：此时它不是可用的目标，还会占掉名称区域 */}
+        {revealed && view.renamingId !== id && (
+          <MoreButton id={id} view={view} buttonRef={moreRef} />
+        )}
+        {view.menuId === id && (
+          <NodeMenu items={menu} anchor={moreRef} onClose={() => view.setMenu(null)} />
+        )}
       </div>
 
       {view.confirmId === id && (
@@ -473,6 +566,8 @@ function RequestRow({
 }) {
   const revealed = view.activeId === node.id || view.menuId === node.id;
   const reveal = useRowReveal(node.id, view);
+  // 「⋯」按钮本身：菜单锚在它身上，据此决定朝上还是朝下
+  const moreRef = useRef<HTMLButtonElement>(null);
   // 请求行不含「移入」语义——它装不下任何东西，因此只有上 / 下半区
   const row: RowRef = {
     id: node.id,
@@ -482,8 +577,12 @@ function RequestRow({
     index,
   };
   const menu: MenuItem[] = [
-    { label: '重命名', onSelect: () => view.startRename(node.id) },
-    { label: '复制', onSelect: () => actions.onDuplicateRequest(node.id) },
+    { label: '重命名', shortcut: RENAME_SHORTCUT, onSelect: () => view.startRename(node.id) },
+    {
+      label: '复制',
+      shortcut: DUPLICATE_SHORTCUT,
+      onSelect: () => actions.onDuplicateRequest(node.id),
+    },
     { label: '删除', danger: true, onSelect: () => actions.onDeleteRequest(node.id) },
   ];
 
@@ -514,7 +613,8 @@ function RequestRow({
         // （spec: 集合树的操作入口默认隐藏）。preventDefault 挡掉运行环境自带的页面菜单。
         onContextMenu={(event) => {
           event.preventDefault();
-          view.setMenu(node.id);
+          // 同 EntryRow：编辑态没有可锚定的「⋯」，右键不开菜单
+          if (view.renamingId !== node.id) view.setMenu(node.id);
         }}
         {...reveal}
       >
@@ -548,15 +648,18 @@ function RequestRow({
             }
           />
         ) : (
-          <span className="tree-name">{node.name}</span>
+          <>
+            <span className="tree-name">{node.name}</span>
+            {/* 同 EntryRow：编辑态不留占位，输入框因此撑满名称区域 */}
+            <span className="grow" />
+          </>
         )}
-        <span className="grow" />
-        {revealed && <MoreButton id={node.id} view={view} />}
+        {/* 同 EntryRow：编辑态留给名称区域，不留操作入口 */}
+        {revealed && view.renamingId !== node.id && (
+          <MoreButton id={node.id} view={view} buttonRef={moreRef} />
+        )}
         {view.menuId === node.id && (
-          <NodeMenu
-            items={menu}
-            onClose={() => view.setMenu(null)}
-          />
+          <NodeMenu items={menu} anchor={moreRef} onClose={() => view.setMenu(null)} />
         )}
       </div>
     </li>
@@ -710,8 +813,9 @@ function TreeToolbar({
   );
 }
 
-export function WorkspaceTree(props: WorkspaceTreeProps) {
+function WorkspaceTreeInner(props: WorkspaceTreeProps & { handle: Ref<WorkspaceTreeHandle> }) {
   const {
+    handle,
     trees,
     selectedRequestId,
     selectedEntity,
@@ -724,6 +828,7 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     onDeleteFolder,
     onDeleteRequest,
     onDuplicateRequest,
+    onDuplicateFolder,
     onRenameEntity,
     onRenameRequest,
     onRenameCommit,
@@ -759,6 +864,7 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     onDeleteFolder,
     onDeleteRequest,
     onDuplicateRequest,
+    onDuplicateFolder,
     onRenameEntity,
     onRenameRequest,
     onToggle: (id) => {
@@ -858,6 +964,34 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     return `drop-${dropTarget.marker.position}`;
   };
 
+  /**
+   * 让某一行进入就地改名态，必要时先把它露出来。
+   *
+   * 输入框只在**该行被渲染**时存在（`view.renamingId === id ? <input/> : ...`），因此
+   * 折叠的祖先、或被搜索词过滤掉的行都要先展开/清词——否则用户按了快捷键却看不到任何
+   * 反应。搜索态下先清词再展开：清词让整棵树重新可见，展开才有意义。
+   */
+  const startRenameById = useCallback(
+    (id: string) => {
+      const path = pathTo(trees, id);
+      // 编辑态不显示行末的操作入口，已经打开的菜单因此失去锚点（它锚在「⋯」上）。
+      // 位置不会重算、菜单会留在原地继续可用——于是直接收起，不让两种浮层态并存
+      setMenuId(null);
+      setQuery('');
+      setCollapsed((previous) => {
+        if (!path) return previous;
+        const next = new Set(previous);
+        for (const item of path) next.delete(item);
+        return next;
+      });
+      setRenamingId(id);
+    },
+    [trees],
+  );
+
+  // 把入口交给 App：快捷键挂在那边，而"哪一行此刻可见"只在这里知道
+  useImperativeHandle(handle, () => ({ startRename: startRenameById }), [startRenameById]);
+
   const view: TreeView = {
     collapsed,
     searching,
@@ -939,3 +1073,15 @@ export function WorkspaceTree(props: WorkspaceTreeProps) {
     </div>
   );
 }
+
+/**
+ * 树的对外门面：命令式入口（就地改名）以 ref 交出去。
+ *
+ * 快捷键挂在 App 的 window 监听上，而「哪一行此刻可见」由树内部的折叠与搜索状态决定，
+ * 所以这个入口只能由树自己提供（spec: ui-layout「树操作的快捷键」）。
+ */
+export const WorkspaceTree = forwardRef<WorkspaceTreeHandle, WorkspaceTreeProps>(
+  function WorkspaceTree(props, ref) {
+    return <WorkspaceTreeInner {...props} handle={ref} />;
+  },
+);

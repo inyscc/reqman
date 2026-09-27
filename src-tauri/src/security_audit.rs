@@ -379,6 +379,9 @@ fn the_command_surface_is_the_audited_one() {
         "collection_delete",
         "collection_reorder",
         "folder_create",
+        // 复制目录：递归复制整棵子树（子文件夹 + 请求），只读写本地库。
+        // 不接受路径、不发起网络请求、不引入新的能力类别。
+        "folder_duplicate",
         "folder_rename",
         // 只读查询：取回文件夹实体本身（文件夹级脚本挂在实体上），理由同上。
         "folder_get",

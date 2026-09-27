@@ -1,6 +1,7 @@
-import { useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { useMenuDismiss } from '../lib/useMenuDismiss';
+import { useMenuPlacement } from '../lib/useMenuPlacement';
 
 export interface DropdownOption<T extends string> {
   value: T;
@@ -37,9 +38,6 @@ export interface DropdownProps<T extends string> {
   disabled?: boolean;
 }
 
-/** 菜单与触发器之间的间隙。 */
-const MENU_GAP = 4;
-
 /**
  * 菜单自身的选择器。
  *
@@ -47,13 +45,6 @@ const MENU_GAP = 4;
  * 这条只能靠选择器豁免（见 `useMenuDismiss` 的第三个参数）。
  */
 const MENU_SELECTOR = '.dropdown-menu';
-
-interface MenuPosition {
-  top: number;
-  left?: number;
-  right?: number;
-  minWidth: number;
-}
 
 /**
  * 通用下拉（spec: 通用下拉的观感与菜单行为；design D1 / D3）。
@@ -78,13 +69,21 @@ export function Dropdown<T extends string>({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
-  const [position, setPosition] = useState<MenuPosition | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   /** 菜单的可访问名借触发器的那个（aria-labelledby），不另写一份 aria-label——
       两个同名的 aria-label 会让按名称定位一个时不唯一。 */
   const triggerId = useId();
+  // 定位与行内菜单同源（spec: ui-polish「浮层在垂直方向的定位」）：垂直方向按可用空间
+  // 决定向上还是向下，水平方向收在视口内
+  const position = useMenuPlacement({
+    open,
+    anchor: trigger,
+    menu,
+    align,
+    matchAnchorWidth: true,
+  });
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -148,63 +147,6 @@ export function Dropdown<T extends string>({
   };
 
   useMenuDismiss(root, close, MENU_SELECTOR);
-
-  /**
-   * 菜单渲染到 `document.body` 并自行定位。
-   *
-   * 它必须脱离祖先的裁剪：设置模态的正文是滚动容器（`overflow: auto`），菜单留在里面
-   * 时一贴近底边就被切掉——「在页面里被遮挡」正是这个原因。fixed 定位下百分比尺寸没有
-   * 意义，因此最小宽度按触发器实测宽度给出。
-   */
-  useLayoutEffect(() => {
-    if (!open) {
-      // 关闭后清掉位置；值相等时 React 不会重渲染，因此不会与 effect 形成循环
-      setPosition(null);
-      return;
-    }
-
-    const place = () => {
-      const rect = trigger.current?.getBoundingClientRect();
-      const node = menu.current;
-      if (!rect || !node) return;
-
-      const width = node.offsetWidth;
-      const height = node.offsetHeight;
-      const viewportWidth = window.innerWidth;
-      const viewportHeight = window.innerHeight;
-
-      // 垂直：下方放不下、而上方更宽裕时翻到触发器上方
-      const below = viewportHeight - rect.bottom - MENU_GAP;
-      const above = rect.top - MENU_GAP;
-      const top =
-        height > below && above > below
-          ? Math.max(MENU_GAP, above - height)
-          : rect.bottom + MENU_GAP;
-
-      // 水平：默认与触发器左缘对齐，放不下时收回视口内；align='right' 先试右缘对齐
-      let left: number | undefined = Math.max(
-        MENU_GAP,
-        Math.min(rect.left, viewportWidth - MENU_GAP - width),
-      );
-      let right: number | undefined;
-
-      if (align === 'right') {
-        const desired = viewportWidth - rect.right;
-        if (desired + width <= viewportWidth - MENU_GAP) {
-          left = undefined;
-          right = Math.max(MENU_GAP, desired);
-        }
-      }
-
-      setPosition({ top, left, right, minWidth: rect.width });
-    };
-
-    place();
-    // 只跟窗口尺寸走：菜单高度靠 `.dropdown-options` 的 max-height 收口，选项过滤不会
-    // 把它撑出视口（因此不必把 options / query 纳入依赖——它们是每次渲染都换身份的数组）
-    window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
-  }, [open, align]);
 
   const classes = ['dropdown', open ? 'open' : '', className].filter(Boolean).join(' ');
 

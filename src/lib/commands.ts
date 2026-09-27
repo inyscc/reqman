@@ -103,6 +103,9 @@ export function createCommands(call: Invoker) {
       call<Collection>('collection_set_script', { id, preRequestScript, testScript }),
     folderCreate: (collectionId: string, parentFolderId: string | null, name: string) =>
       call<Folder>('folder_create', { collectionId, parentFolderId, name }),
+    /** 复制目录：连同整棵子树，落在同一父级下；`newName` 缺省为「源名字 副本」。 */
+    folderDuplicate: (id: string, newName?: string | null) =>
+      call<Folder>('folder_duplicate', { id, newName: newName ?? null }),
     folderRename: (id: string, name: string) => call<Folder>('folder_rename', { id, name }),
     folderDelete: (id: string) => call<void>('folder_delete', { id }),
     /**

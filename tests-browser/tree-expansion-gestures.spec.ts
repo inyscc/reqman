@@ -171,6 +171,14 @@ async function invoked(page: Page): Promise<string[]> {
   return page.evaluate(() => (window as unknown as Record<string, unknown>).__invoked as string[]);
 }
 
+/**
+ * 集合树的手势与行内控件。
+ *
+ * 注意「⋯」菜单（`.node-menu`）是**覆盖层**：它 portal 到 `document.body`、按触发器的
+ * 实测矩形自定位——留在行内会被树的滚动容器裁掉，最底部的节点因此点不出菜单。所以菜单
+ * 与它的选项要用 `page.getBy…` 查，不能挂在 `tree` 作用域下（`tree` 只覆盖树本身）。
+ * 行内就地的重命名输入框仍在树里，照旧用 `tree.getByLabel(...)`。
+ */
 describe('集合树展开手势（真实引擎）', () => {
   it('单击目录行即时切换展开，并打开该实体的面板（新增一个标签）', async () => {
     const page = await openApp();
@@ -221,6 +229,47 @@ describe('集合树展开手势（真实引擎）', () => {
     expect(await visibleNow(page, '深处的请求')).toBe(false);
   });
 
+  it('贴近底边的行，菜单向上展开且完整可见（spec: 浮层在垂直方向的定位）', async () => {
+    const page = await openApp();
+    page.setDefaultTimeout(10_000);
+
+    // 压矮视口并把树滚到底：最后一行贴近**视口**下沿，下方放不下整个菜单。
+    // 方向判定看的是视口（菜单是覆盖层，不再受容器裁剪），所以这里要的是真正贴底
+    await page.setViewportSize({ width: 900, height: 240 });
+    await page.evaluate(() => {
+      const scroller = document.querySelector('.tree-root') as HTMLElement | null;
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    });
+
+    const last = page.locator('.tree-root .node').last();
+    await last.hover();
+    await last.getByLabel('更多操作').click();
+    await expect.poll(() => page.getByRole('menu').count()).toBeGreaterThan(0);
+
+    const geometry = await page.evaluate(() => {
+      const menu = document.querySelector('.node-menu') as HTMLElement | null;
+      // 「⋯」只在悬停或菜单打开的那一行渲染，因此此刻页面上只有一个
+      const trigger = document.querySelector('.node-more') as HTMLElement | null;
+      if (!menu || !trigger) return null;
+
+      const menuRect = menu.getBoundingClientRect();
+      const triggerRect = trigger.getBoundingClientRect();
+
+      return {
+        menuTop: menuRect.top,
+        menuBottom: menuRect.bottom,
+        triggerTop: triggerRect.top,
+        viewportHeight: window.innerHeight,
+      };
+    });
+
+    expect(geometry, '菜单或触发器没有量到').not.toBeNull();
+    // 下方放不下 → 翻到上方：菜单整体落在触发行之上，且不越出视口
+    expect(geometry!.menuBottom).toBeLessThanOrEqual(geometry!.triggerTop + 1);
+    expect(geometry!.menuTop).toBeGreaterThanOrEqual(0);
+    expect(geometry!.menuBottom).toBeLessThanOrEqual(geometry!.viewportHeight);
+  });
+
   it('行已获得焦点时，⋯ 菜单仍能打开并进入脚本面板', async () => {
     const page = await openApp();
     page.setDefaultTimeout(10_000);
@@ -236,8 +285,8 @@ describe('集合树展开手势（真实引擎）', () => {
     await row.hover();
     await row.getByLabel('更多操作').click();
 
-    await expect.poll(() => tree.getByRole('menu').count()).toBeGreaterThan(0);
-    await tree.getByText('编辑脚本').click();
+    await expect.poll(() => page.getByRole('menu').count()).toBeGreaterThan(0);
+    await page.getByText('编辑脚本').click();
 
     await page.getByTestId('entity-script-panel').waitFor();
     expect(await page.getByLabel('文件夹名称').inputValue()).toBe('外层');
@@ -286,10 +335,11 @@ describe('集合树展开手势（真实引擎）', () => {
     await row.getByLabel('更多操作').focus();
     await page.keyboard.press('Enter');
     expect(await expandedNow(page, '外层')).toBe(true);
-    await expect.poll(() => tree.getByRole('menu').count()).toBeGreaterThan(0);
+    await expect.poll(() => page.getByRole('menu').count()).toBeGreaterThan(0);
 
-    // 菜单项：同上，且应当照常打开脚本面板
-    await tree.getByText('编辑脚本').focus();
+    // 菜单项：同上，且应当照常打开脚本面板。
+    // 按 role 取而不是按文本：项里还并列着键位，文本节点不再整块等于项名
+    await page.getByRole('menuitem', { name: /编辑脚本/ }).focus();
     await page.keyboard.press('Enter');
     expect(await expandedNow(page, '外层')).toBe(true);
     await page.getByTestId('entity-script-panel').waitFor();
@@ -331,22 +381,35 @@ describe('请求节点的右键菜单（真实引擎）', () => {
     const row = tree.locator('.node').filter({ hasText: '外层请求' }).first();
     await row.click({ button: 'right' });
 
-    await expect.poll(() => tree.getByRole('menu').count()).toBe(1);
+    await expect.poll(() => page.getByRole('menu').count()).toBe(1);
     expect(
       await page.evaluate(
         () => (window as unknown as Record<string, unknown>).__ctxPrevented,
       ),
     ).toBe(true);
 
-    const fromRightClick = await tree.getByRole('menu').locator('button').allTextContents();
+    const fromRightClick = await page
+      .getByRole('menu')
+      .locator('button .node-menu-label')
+      .allTextContents();
     expect(fromRightClick).toEqual(['重命名', '复制', '删除']);
+
+    // 操作项右侧并列显示键位（spec: 树操作的快捷键）
+    const shortcuts = await page
+      .getByRole('menu')
+      .locator('.node-menu-shortcut')
+      .allTextContents();
+    expect(shortcuts).toEqual(['Ctrl+E', 'Ctrl+D']);
 
     // 同一份菜单：换成「⋯」打开，操作项必须完全一致（两处逻辑不分叉）
     await page.keyboard.press('Escape');
-    await expect.poll(() => tree.getByRole('menu').count()).toBe(0);
+    await expect.poll(() => page.getByRole('menu').count()).toBe(0);
     await row.hover();
     await row.getByLabel('更多操作').click();
-    const fromMoreButton = await tree.getByRole('menu').locator('button').allTextContents();
+    const fromMoreButton = await page
+      .getByRole('menu')
+      .locator('button .node-menu-label')
+      .allTextContents();
     expect(fromMoreButton).toEqual(fromRightClick);
 
     // 右键只开菜单，不改变选中：主区没有因此打开任何请求
@@ -492,12 +555,37 @@ describe('树上就地改名（真实引擎）', () => {
     const before = await heightOf();
 
     await row.getByLabel('更多操作').click();
-    await tree.getByText('重命名').click();
+    await page.getByText('重命名').click();
 
     const input = tree.getByLabel('重命名 外层');
     await input.waitFor();
     // 就地编辑不改变行的几何：输入框接替了名字占的那一格
     expect(await heightOf()).toBe(before);
+
+    // 编辑态不亮出操作入口：它白占名称区域（按输入框反查所在行——
+    // 编辑态下这一行的文本已经是输入框的 value，按文本找会落到相邻行上）
+    const editingRow = tree.locator('.node').filter({ has: page.locator('.node-rename') });
+    await expect.poll(() => editingRow.locator('.node-more').count()).toBe(0);
+
+    // 输入框独占名称区域：它与右侧操作入口之间只隔行内那段 gap，
+    // 中间不再夹着被占位吸收的空白——改前那段空白会吃掉一半剩余宽度。
+    const nameArea = await page.evaluate(() => {
+      const round = (value: number) => Math.round(value);
+      // 从输入框反查它所在的行：编辑态下这一行的文本已变成输入框的 value，
+      // 按 textContent 找会落到相邻的"外层请求"那一行上
+      const input = document.querySelector('.node-rename') as HTMLElement;
+      const row = input.closest('.node') as HTMLElement;
+      const more = row.querySelector('.node-more') as HTMLElement | null;
+      const edge = more ? more.getBoundingClientRect().left : row.getBoundingClientRect().right;
+      return {
+        input: round(input.getBoundingClientRect().width),
+        row: round(row.getBoundingClientRect().width),
+        toEdge: round(edge - input.getBoundingClientRect().right),
+      };
+    });
+    // 名字只有两个字；半行宽时不可能超过行宽的一半这么多
+    expect(nameArea.input).toBeGreaterThan(nameArea.row * 0.5);
+    expect(nameArea.toEdge).toBeLessThan(24);
 
     // Esc：退出编辑，不落库
     await input.press('Escape');
@@ -507,7 +595,7 @@ describe('树上就地改名（真实引擎）', () => {
     // 再进一次，改名并回车：命令落到后端，树上显示新名字
     await row.hover();
     await row.getByLabel('更多操作').click();
-    await tree.getByText('重命名').click();
+    await page.getByText('重命名').click();
     const editing = tree.getByLabel('重命名 外层');
     await editing.fill('改名后的外层');
     await editing.press('Enter');
@@ -526,7 +614,7 @@ describe('脚本编辑器的铺满（真实引擎）', () => {
     const row = tree.locator('.node').filter({ hasText: '外层' }).first();
     await row.hover();
     await row.getByLabel('更多操作').click();
-    await tree.getByText('编辑脚本').click();
+    await page.getByText('编辑脚本').click();
     await page.getByTestId('entity-script-panel').waitFor();
 
     const geometry = await page.evaluate(() => {
