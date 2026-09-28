@@ -101,3 +101,23 @@ export function EyeIcon({ off = false, ...rest }: { off?: boolean } & SVGProps<S
     </svg>
   );
 }
+
+/**
+ * 折行：满宽的一行、一条折回来并带箭头的一行、一条短行。
+ *
+ * 用同一套 `GLYPH` / `STROKE`，因为它的落点就是响应正文工具条右端那枚图标按钮——
+ * 和同一排（以及工具条上其他）图标按钮同处一个视野，尺寸与描边不同会立刻显出来。
+ *
+ * 开 / 关不画在字形里：图标本身只说明「这个是折行」，状态由按钮的按下态表达
+ * （`aria-pressed` + 主色，与 `.icon-btn` 那条同一套）。
+ */
+export function WrapIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...GLYPH} {...props}>
+      <path {...STROKE} d="M2 3.4h12" />
+      <path {...STROKE} d="M2 7.4h10a2 2 0 0 1 0 4H9.3" />
+      <path {...STROKE} d="M10.7 10.1l-1.3 1.3 1.3 1.3" />
+      <path {...STROKE} d="M2 11.4h4" />
+    </svg>
+  );
+}

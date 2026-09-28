@@ -7,6 +7,8 @@
 // 这是纯逻辑，不依赖 React（组件侧的绑定见 useEditing.ts），与 store.ts /
 // useStore.ts 的分层一致。
 
+import { DEFAULT_INDENT_UNIT } from './sandbox';
+
 /**
  * raw 正文的格式化动作支持的语言（spec: raw 正文的格式化动作）。
  *
@@ -20,10 +22,17 @@ export type RawFormatMode = 'beautify' | 'minify';
  *
  * 解析失败时抛出（`JSON.parse` 的错误）——不为不理解的内容编一个"也许对"的结果，
  * 也不静默返回原文；由调用方决定怎么提示。传入的不是 JSON 语言时不会被调用。
+ *
+ * 缩进按应用级的「缩进数 + 缩进类型」来（调用方经 `indentUnit()` 换算后传入），
+ * 与响应的格式化输出同一份取值——不再固定为 2 空格。
  */
-export function formatRawBody(text: string, mode: RawFormatMode): string {
+export function formatRawBody(
+  text: string,
+  mode: RawFormatMode,
+  indent: string = DEFAULT_INDENT_UNIT,
+): string {
   const parsed: unknown = JSON.parse(text);
-  return mode === 'beautify' ? JSON.stringify(parsed, null, 2) : JSON.stringify(parsed);
+  return mode === 'beautify' ? JSON.stringify(parsed, null, indent) : JSON.stringify(parsed);
 }
 
 export interface EditingSurface {

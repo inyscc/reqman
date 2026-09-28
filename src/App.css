@@ -42,6 +42,16 @@
   /* 模态遮罩 */
   --scrim: rgba(16, 24, 40, 0.42);
 
+  /* 发送中的响应区反馈（spec: ui-layout「发送中的响应区反馈」）：一层**半透明**的灰白遮罩把
+     旧响应压暗（不是抹掉——它仍要在遮罩下可辨认），正文区顶边一条进度线，线上一段亮色
+     从左往右跑。
+     底色取灰而不是白：白遮罩压在白底上等于没压，进度线也会跟着看不见。
+     但**不跟着本仓库的冷中性色阶偏蓝**：这一层铺满整块正文区，偏蓝的灰在大面积上会被读成
+     "整块变蓝"，而不是"被压暗"。参照软件那一块是中性的灰白。 */
+  --sending-scrim: rgba(240, 240, 241, 0.82);
+  --sending-line: rgba(16, 24, 40, 0.1);
+  --sending-scan: var(--accent);
+
   /* 方法色：按是否幂等分两组（ui-layout「集合树的外观与密度」）。
      颜色只表达「这个请求会不会改数据」，方法之间的区分由文字承担。 */
   --method-safe: #067647;
@@ -1734,6 +1744,9 @@ input.switch {
   width: 36px;
   height: 20px;
   padding: 0;
+  /* 清掉 UA 给 checkbox 的默认外边距（右侧 3px）：不清的话开关会比同行的其它控件
+     左缩一点，行式列表那条「控件右缘对齐成一条竖线」就断了。 */
+  margin: 0;
   border-radius: 999px;
   background: var(--border);
   cursor: pointer;
@@ -2575,6 +2588,134 @@ pre.body.hex-body {
   white-space: pre;
   word-break: normal;
   overflow-x: auto;
+}
+
+/* 关掉折行时的纯文本降级面（大正文 / 二进制回退）：与结构化视图的折行行为保持一致
+   （spec: code-editors「代码编辑面的折行」）。Hex 不在其列——它上面那条规则永远生效。 */
+pre.body.nowrap-body {
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
+}
+
+/* 响应正文区（工具条之下、正文之上）：铺满链路的中间层，也是发送遮罩的定位上下文。
+   折行开关不在这一层——它停在工具条上，遮罩因此盖不到它。 */
+.response-body-area {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 响应正文工具条最右端的折行开关（spec: ui-layout「折行」）。
+   它是**图标控件**：不带可见文字标签，名称与提示留给辅助技术，开 / 关读在 pressed 态上。
+   参照图（Postman 的同一位置）是浅灰填充、无描边的圆角方块，因此底色常驻——
+   它不再压在正文之上，不需要靠底色把自己从文字里剥出来。
+   指针悬停响应区才显形（与之前一致）：显隐只改 opacity 与指针事件，不推动工具条排版，
+   所以它显现时右侧的内容类型标签也不会挪位。键盘焦点落在它上面时同样显形，
+   否则键盘用户够不到它；显形前不吃指针事件，避免指针只是扫过就改了请求。 */
+.wrap-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms var(--ease-out),
+    color 120ms ease;
+}
+
+.wrap-toggle:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* 开 / 关只落在控件自己身上（与 `.icon-btn[aria-pressed]` 同一套读法） */
+.wrap-toggle[aria-pressed='true'] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.response-region:hover .wrap-toggle,
+.wrap-toggle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wrap-toggle {
+    transition: none;
+  }
+}
+
+/* 发送中的响应区反馈（spec: ui-layout「发送中的响应区反馈」）。
+   浮层压在正文上：无旧响应时遮罩铺满正文区，有旧响应时遮罩把它压暗而**不清空**它——
+   旧响应仍在 DOM 里、数据也没丢，只是这一阵看起来淡了。
+   折行开关在工具条上（这一层之外），因此遮罩不覆盖它——工具条照常可见、控件禁用。 */
+.response-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: var(--space-4);
+  background: var(--sending-scrim);
+  overflow: hidden;
+}
+
+/* 进度线（跑马灯）：正文区**顶边**一条 2px 的线，线上一段亮色从左往右循环跑。
+   参照软件就是这条线——不是铺满整块的扫光带：扫光带压的是"这一块内容"，进度线只宣告
+   "还在等"，与下面那份被压暗的响应互不干扰。 */
+.response-loading::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--sending-line);
+}
+
+/* 跑动的那一段：单向、周期 1.4s（不短于 1.2s），只用 transform 移动，不触发重排。
+   两端的渐隐让它在进出时不像被硬切成两截。这是本仓库第一个循环动画——既有动效基线
+   排除的是「发送中的状态切换」那种瞬时过渡，进度线是进度指示，不推迟任何东西（见 design D5）。 */
+.response-loading::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 32%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--sending-scan), transparent);
+  transform: translateX(-100%);
+  animation: response-scan 1.4s linear infinite;
+}
+
+@keyframes response-scan {
+  from {
+    transform: translateX(-100%);
+  }
+
+  /* 100 / 32 ≈ 3.13：整段完全走出右端，循环接得上 */
+  to {
+    transform: translateX(313%);
+  }
+}
+
+/* 偏好减少动效：撤掉跑动的那一段（细线本身留着）。加载态仍说得清——遮罩还在，
+   响应头的「发送中」标识常驻 */
+@media (prefers-reduced-motion: reduce) {
+  .response-loading::after {
+    animation: none;
+    background: none;
+  }
 }
 
 iframe.preview {

@@ -114,6 +114,14 @@ describe('raw 正文的格式化（spec: raw 正文的格式化动作）', () =>
     );
   });
 
+  it('缩进按传入的单元：缩进类型为 Tab 时以制表符缩进', () => {
+    expect(formatRawBody('{"a":1,"b":[1,2]}', 'beautify', '\t')).toBe(
+      '{\n\t"a": 1,\n\t"b": [\n\t\t1,\n\t\t2\n\t]\n}',
+    );
+    // Minify 与缩进无关，照旧压成紧凑形式
+    expect(formatRawBody('{"a": 1}', 'minify', '\t')).toBe('{"a":1}');
+  });
+
   it('Minify 去掉多余空白，只留语法必需的间隔', () => {
     expect(formatRawBody('{\n  "a": 1,\n  "b": [1, 2]\n}', 'minify')).toBe('{"a":1,"b":[1,2]}');
   });

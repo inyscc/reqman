@@ -22,14 +22,19 @@ vi.mock('../src/components/CodeSurface', () => ({
     ariaLabel?: string;
     testId?: string;
     placeholder?: string;
+    /** 折行的生效值：落到 DOM 上，供「请求侧与响应侧拿到同一个值」的断言读取。 */
+    wrap?: boolean;
     onChange?: (value: string) => void;
-  }) =>
-    props.readOnly
-      ? createElement('pre', { 'data-testid': props.testId }, props.value)
+  }) => {
+    const wrap = props.wrap === false ? 'off' : 'on';
+    return props.readOnly
+      ? createElement('pre', { 'data-testid': props.testId, 'data-wrap': wrap }, props.value)
       : createElement('textarea', {
           'aria-label': props.ariaLabel,
           placeholder: props.placeholder,
+          'data-wrap': wrap,
           value: props.value,
           onChange: (event: { target: { value: string } }) => props.onChange?.(event.target.value),
-        }),
+        });
+  },
 }));

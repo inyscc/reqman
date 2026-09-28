@@ -94,7 +94,18 @@ export interface RequestSettings {
    * 缺省 / `inherit` = 跟随全局；旧数据没有这个字段，因此是可选且不迁移。
    */
   response_format?: 'inherit' | 'auto' | 'json';
+  /**
+   * 折行的请求级覆盖（spec: ui-layout「折行」）。缺省 / `inherit` = 跟随应用级缺省；
+   * 与 `response_format` 同款：可选、不迁移。
+   *
+   * 它随请求往返，Rust 侧 `RequestSettings` 必须同步该字段——否则保存时会被丢弃
+   * （见 design D8）。
+   */
+  wrap_lines?: WrapLinesOverride;
 }
+
+/** 折行的请求级取值：跟全局走，或显式开 / 关。 */
+export type WrapLinesOverride = 'inherit' | 'on' | 'off';
 
 export interface SavedRequest {
   id: string;

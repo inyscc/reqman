@@ -34,13 +34,16 @@ interface SurfaceApi {
   foldingCount(uri: string): Promise<number>;
   /** 以下为编辑器外观用例的钩子（change: add-editor-appearance-settings）。 */
   setAppearance(patch: Partial<EditorAppearance>): void;
-  /** 读编辑器与模型上**实际生效**的字体与缩进选项。 */
+  /** 读编辑器与模型上**实际生效**的字体、缩进与折行选项。 */
   optionsOf(uri: string): Promise<{
     fontFamily: string;
     fontSize: number;
     tabSize: number | null;
     insertSpaces: boolean | null;
+    wordWrap: string;
   } | null>;
+  /** 改某个编辑面的折行（change: unify-indent-wrap-and-send-overlay）。 */
+  setWrap(uri: string, wrap: boolean): void;
   /** 给当前编辑器实例贴一个编号；`markOf` 拿不回来即说明实例被重建过。 */
   markEditor(uri: string): Promise<number>;
   markOf(uri: string): Promise<number | null>;
@@ -75,6 +78,8 @@ function Harness() {
   const [js, setJs] = useState('pm.environment.');
   const [json, setJson] = useState(INITIAL_JSON);
   const [response] = useState(RESPONSE_BODY);
+  /** 各编辑面的折行（缺省开）；脚本面不参与折行设置，因此不在这里。 */
+  const [wraps, setWraps] = useState<Record<string, boolean>>({});
   const jsRef = useRef(js);
   const jsonRef = useRef(json);
   jsRef.current = js;
@@ -133,8 +138,10 @@ function Harness() {
           fontSize: editor.getOption(monaco.editor.EditorOption.fontSize),
           tabSize: model?.getOptions().tabSize ?? null,
           insertSpaces: model?.getOptions().insertSpaces ?? null,
+          wordWrap: editor.getOption(monaco.editor.EditorOption.wordWrap),
         };
       },
+      setWrap: (uri, wrap) => setWraps((previous) => ({ ...previous, [uri]: wrap })),
       markEditor: async (uri) => {
         const { editor } = await editorOf(uri);
         if (!editor) throw new Error(`没有找到编辑器：${uri}`);
@@ -187,6 +194,7 @@ function Harness() {
         value={json}
         onChange={setJson}
         fill
+        wrap={wraps[JSON_URI] ?? true}
       />
       <CodeSurface
         uri={RESPONSE_URI}
@@ -195,6 +203,7 @@ function Harness() {
         value={response}
         readOnly
         fill
+        wrap={wraps[RESPONSE_URI] ?? true}
       />
     </div>
   );

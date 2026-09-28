@@ -37,10 +37,10 @@ async function renderSection() {
 const settle = (ms = 800) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('设置模态的编辑器配置节', () => {
-  it('四项以行式列表呈现，缺省即设计值，行内无解释性文案', async () => {
+  it('五项以行式列表呈现，缺省即设计值，行内无解释性文案', async () => {
     const { section } = await renderSection();
 
-    expect(section.querySelectorAll('.settings-row')).toHaveLength(4);
+    expect(section.querySelectorAll('.settings-row')).toHaveLength(5);
 
     // 字体族：自由文本；空即缺省，因此框里就是那条系统栈，示例同时收在 placeholder 里
     const family = screen.getByTestId('editor-font-family');
@@ -56,9 +56,30 @@ describe('设置模态的编辑器配置节', () => {
     expect(type.tagName).toBe('BUTTON');
     expect(type.getAttribute('data-value')).toBe('space');
 
+    // 换行是布尔项：以开关呈现（复选框语义 + switch 角色），缺省开启
+    const wrapSwitch = screen.getByTestId('editor-wrap');
+    expect(wrapSwitch.tagName).toBe('INPUT');
+    expect(wrapSwitch.getAttribute('type')).toBe('checkbox');
+    expect(wrapSwitch.getAttribute('role')).toBe('switch');
+    expect((wrapSwitch as HTMLInputElement).checked).toBe(true);
+
     // 「语义落在操作上」：这一节只有名称与控件，没有解释后果或原理的句子
     expect(section.querySelectorAll('.settings-hint')).toHaveLength(0);
     expect(section.textContent ?? '').not.toMatch(/。/);
+  });
+
+  it('换行开关落库（false 才是关）', async () => {
+    const { store } = await renderSection();
+
+    fireEvent.click(screen.getByTestId('editor-wrap'));
+    await waitFor(() => expect(store.get('editor_appearance:wrap')).toBe('false'), {
+      timeout: 3_000,
+    });
+
+    fireEvent.click(screen.getByTestId('editor-wrap'));
+    await waitFor(() => expect(store.get('editor_appearance:wrap')).toBe('true'), {
+      timeout: 3_000,
+    });
   });
 
   it('缩进类型下拉给出「空格 / Tab」两项', async () => {
@@ -73,6 +94,22 @@ describe('设置模态的编辑器配置节', () => {
     expect(labels).toHaveLength(2);
     expect(labels[0]).toContain('空格');
     expect(labels[1]).toContain('Tab');
+  });
+
+  it('响应呈现区只剩「响应格式检测」一项，界面上不存在第二处缩进设置', async () => {
+    await renderSection();
+
+    const heading = Array.from(document.querySelectorAll('.settings-section h4')).find(
+      (node) => node.textContent === '响应',
+    );
+    const responseSection = heading?.closest('section');
+    expect(responseSection).toBeTruthy();
+    expect(responseSection?.querySelectorAll('.settings-row')).toHaveLength(1);
+    expect(responseSection?.textContent).toContain('响应格式检测');
+
+    // 缩进全应用只有一处：编辑器配置区那一处；旧行连同其 testid 都不该再出现
+    expect(screen.queryByTestId('indent-width')).toBeNull();
+    expect(document.body.textContent ?? '').not.toContain('格式化缩进宽度');
   });
 
   it('区间外的输入不成为设置值，合法值照常落库', async () => {

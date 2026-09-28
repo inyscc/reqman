@@ -1106,15 +1106,16 @@ describe('前端数据流骨架', () => {
     fireEvent.change(screen.getByLabelText('raw 正文'), { target: { value: '{"a":1,"b":[1,2]}' } });
     expect(await screen.findByText('未保存')).toBeTruthy();
 
+    // 缩进取应用级设置（缺省缩进数 4），不再是硬编码的 2 空格
     fireEvent.click(screen.getByTestId('body-beautify'));
     expect((screen.getByLabelText('raw 正文') as HTMLTextAreaElement).value).toBe(
-      '{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ]\n}',
+      '{\n    "a": 1,\n    "b": [\n        1,\n        2\n    ]\n}',
     );
 
     saveWithKeyboard();
     await waitFor(() => expect(requestSave).toHaveBeenCalledTimes(1));
     const saved = requestSave.mock.calls.at(-1)?.[0] as SavedRequest;
-    expect(saved.body.raw).toBe('{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ]\n}');
+    expect(saved.body.raw).toBe('{\n    "a": 1,\n    "b": [\n        1,\n        2\n    ]\n}');
     expect(saved.body.raw_language).toBe('json');
   });
 
@@ -5576,23 +5577,24 @@ describe('响应呈现格式（response-format-selector）', () => {
     expect(body.endsWith('a.b')).toBe(true);
   });
 
-  it('缩进宽度跟着全局设置走进响应正文', async () => {
+  it('编辑器的缩进设置走进响应正文的格式化输出', async () => {
     const { client, settingsSet } = harness({ sendResult: response({ body_text: '{"a":1}' }) });
     render(<App client={client} />);
 
     fireEvent.click(await screen.findByText('设置'));
     await screen.findByTestId('settings-panel');
 
-    // 缺省：Auto + 2 空格
-    expect(screen.getByTestId('format-detection').getAttribute('data-value')).toBe('auto');
-    expect(screen.getByTestId('indent-width').getAttribute('data-value')).toBe('2');
+    // 应用内只有一处缩进设置：编辑器配置区的「缩进数」（缺省 4）；响应呈现区不再有第二处
+    expect(screen.queryByTestId('indent-width')).toBeNull();
+    const count = screen.getByTestId('editor-indent-count') as HTMLInputElement;
+    expect(count.value).toBe('4');
 
-    fireEvent.click(screen.getByTestId('indent-width'));
-    fireEvent.click(screen.getByRole('option', { name: '4 空格' }));
+    fireEvent.change(count, { target: { value: '8' } });
 
-    // 设置面改动停止后自动落库；落库的值同时回写给 App，之后的响应才按新宽度格式化
+    // 设置面改动停止后自动落库；落库之外 `applyEditorAppearance` 还会推给 App，
+    // 之后的响应才按新的缩进格式化（spec: code-editors「等宽面的外观与缩进」）
     await waitFor(() =>
-      expect(settingsSet).toHaveBeenCalledWith('response_presentation', 'indent_width', '4'),
+      expect(settingsSet).toHaveBeenCalledWith('editor_appearance', 'indent_count', '8'),
     );
 
     await openRequest();
@@ -5600,8 +5602,39 @@ describe('响应呈现格式（response-format-selector）', () => {
     await screen.findByTestId('status');
 
     await waitFor(() =>
-      expect(screen.getByTestId('response-body').textContent).toBe('{\n    "a": 1\n}'),
+      expect(screen.getByTestId('response-body').textContent).toBe('{\n        "a": 1\n}'),
     );
+  });
+
+  it('折行关掉后纯文本降级面跟着不折；Hex 视图例外（spec: code-editors「代码编辑面的折行」）', async () => {
+    const { client } = harness({
+      sendResult: response({
+        content_type: 'text/plain',
+        body_text: 'hello',
+        size_bytes: 11 * 1024 * 1024,
+      }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('status');
+
+    // 正文体积超过编辑面阈值 → 走纯文本降级面；缺省折行开启时不加额外的类
+    const body = screen.getByTestId('response-body');
+    expect(body.tagName).toBe('PRE');
+    expect(body.className).toBe('body');
+
+    // 从请求 Settings 把折行关掉
+    fireEvent.click(screen.getByRole('button', { name: 'Settings', exact: true }));
+    fireEvent.click(screen.getByTestId('request-wrap-lines'));
+    fireEvent.click(screen.getByRole('option', { name: '关' }));
+
+    expect(screen.getByTestId('response-body').className).toContain('nowrap-body');
+
+    // Hex 视图豁免：三列靠空格对齐，它永远不折行，也不吃这个类
+    fireEvent.click(screen.getByTestId('response-format'));
+    fireEvent.click(screen.getByRole('option', { name: /^Hex/ }));
+    expect(screen.getByTestId('response-body').className).toBe('body hex-body');
   });
 
   it('全局格式检测设为 JSON 后，新响应初始即按 JSON 解释', async () => {
@@ -5715,6 +5748,82 @@ describe('响应呈现格式（response-format-selector）', () => {
 
     expect(screen.getByTestId('request-response-format').getAttribute('data-value')).toBe('json');
     expect(await screen.findByText('未保存')).toBeTruthy();
+  });
+
+  it('请求 Settings 里能覆盖折行，并计入未保存：关闭标签先询问（spec: ui-layout「折行」）', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings', exact: true }));
+    expect(screen.getByTestId('request-wrap-lines').getAttribute('data-value')).toBe('inherit');
+
+    fireEvent.click(screen.getByTestId('request-wrap-lines'));
+    fireEvent.click(screen.getByRole('option', { name: '关' }));
+
+    expect(screen.getByTestId('request-wrap-lines').getAttribute('data-value')).toBe('off');
+    expect(await screen.findByText('未保存')).toBeTruthy();
+
+    // 未保存守卫照常拦下关闭，取消后停在原地
+    fireEvent.click(screen.getByLabelText('关闭标签'));
+    expect(screen.queryByTestId('unsaved-guard')).toBeTruthy();
+    fireEvent.click(screen.getByText('取消'));
+    await waitFor(() => expect(screen.queryByTestId('unsaved-guard')).toBeNull());
+    expect(screen.getByTestId('request-wrap-lines').getAttribute('data-value')).toBe('off');
+  });
+
+  it('折行的生效值同时到达请求正文与响应正文（spec: code-editors「代码编辑面的折行」）', async () => {
+    const { client } = harness({
+      sendResult: response({ body_text: '{"a":1}' }),
+      // raw 正文的编辑面才会被折行设置影响（其它类型没有代码编辑面）
+      request: makeRequest({
+        body: { ...emptyBody(), kind: 'raw', raw: '{"a":1}', raw_language: 'json' },
+      }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('status');
+
+    const requestBody = () => screen.getByLabelText('raw 正文');
+    // 请求编辑器与响应面板都有「Body」标签，因此按容器限定
+    const requestTab = (name: string) =>
+      within(document.querySelector('.request-editor') as HTMLElement).getByRole('button', {
+        name,
+        exact: true,
+      });
+
+    // 缺省跟随全局（开）：两处编辑面都折行
+    fireEvent.click(requestTab('Body'));
+    expect(requestBody().getAttribute('data-wrap')).toBe('on');
+    expect(screen.getByTestId('response-body').getAttribute('data-wrap')).toBe('on');
+
+    // 在请求 Settings 里关掉折行 → 两处同时改（响应正文是只读面，不切标签就在 DOM 里）
+    fireEvent.click(requestTab('Settings'));
+    fireEvent.click(screen.getByTestId('request-wrap-lines'));
+    fireEvent.click(screen.getByRole('option', { name: '关' }));
+
+    expect(screen.getByTestId('response-body').getAttribute('data-wrap')).toBe('off');
+    fireEvent.click(requestTab('Body'));
+    expect(requestBody().getAttribute('data-wrap')).toBe('off');
+  });
+
+  it('「发送中」标识与遮罩只随发送态出现：保存请求时不出现（spec: ui-layout「发送中的响应区反馈」）', async () => {
+    const harnessed = harness();
+    // 保存挂住不返回：界面停在「忙」上，才有机会看响应区
+    vi.spyOn(harnessed.client, 'requestSave').mockReturnValue(new Promise<SavedRequest>(() => {}));
+    render(<App client={harnessed.client} />);
+    await openRequest();
+
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/edited' },
+    });
+    await screen.findByText('未保存');
+    saveWithKeyboard();
+
+    await waitFor(() => expect(harnessed.client.requestSave).toHaveBeenCalled());
+    expect(screen.queryByTestId('response-sending'), '保存不该让响应头显示发送中').toBeNull();
+    expect(screen.queryByTestId('response-loading'), '保存不该让响应区出现遮罩').toBeNull();
   });
 });
 

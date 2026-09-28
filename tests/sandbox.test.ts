@@ -60,12 +60,17 @@ describe('格式化', () => {
     expect(pretty).toContain('<b>1</b>');
   });
 
-  it('缩进宽度可配（2 / 4 / 8），固定空格', () => {
-    expect(prettyJson('{"a":1}', 2).split('\n')[1]).toBe('  "a": 1');
-    expect(prettyJson('{"a":1}', 4).split('\n')[1]).toBe('    "a": 1');
-    expect(prettyJson('{"a":1}', 8).split('\n')[1]).toBe('        "a": 1');
-    // XML 走同一档宽度
-    expect(prettyXml('<a><b>1</b></a>', 4).split('\n')[1]).toBe('    <b>1</b>');
+  it('缩进单元可配：空格串或一个制表符', () => {
+    expect(prettyJson('{"a":1}', '  ').split('\n')[1]).toBe('  "a": 1');
+    expect(prettyJson('{"a":1}', '    ').split('\n')[1]).toBe('    "a": 1');
+    expect(prettyJson('{"a":1}', '\t').split('\n')[1]).toBe('\t"a": 1');
+    // XML 走同一个缩进单元
+    expect(prettyXml('<a><b>1</b></a>', '    ').split('\n')[1]).toBe('    <b>1</b>');
+    expect(prettyXml('<a><b>1</b></a>', '\t').split('\n')[1]).toBe('\t<b>1</b>');
+  });
+
+  it('Tab 缩进下每层一个制表符', () => {
+    expect(prettyJson('{"a":{"b":1}}', '\t')).toBe('{\n\t"a": {\n\t\t"b": 1\n\t}\n}');
   });
 
   it('字节数可读化', () => {
@@ -119,9 +124,9 @@ describe('响应正文的解释（spec: 响应内容与格式化）', () => {
     });
   });
 
-  it('缩进宽度作用于强制与自动两条路径', () => {
-    expect(renderBody('json', 'text', '{"a":1}', 4).text).toContain('\n    "a"');
-    expect(renderBody('auto', 'json', '{"a":1}', 8).text).toContain('\n        "a"');
+  it('缩进单元作用于强制与自动两条路径', () => {
+    expect(renderBody('json', 'text', '{"a":1}', '    ').text).toContain('\n    "a"');
+    expect(renderBody('auto', 'json', '{"a":1}', '\t').text).toContain('\n\t"a"');
   });
 
   it('Hex 是字节视图，不产出文本', () => {

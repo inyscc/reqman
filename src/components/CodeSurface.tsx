@@ -24,6 +24,11 @@ export interface CodeSurfaceProps {
   fill?: boolean;
   /** 脚本面：预热 JS/TS 语言服务，保证 `pm.*` 补全首次即就绪。 */
   enableCompletion?: boolean;
+  /**
+   * 折行（spec: code-editors「代码编辑面的折行」）。生效值由宿主解析后传入——它可能来自
+   * 应用级缺省，也可能被请求级覆盖，编辑面自己不去读设置。
+   */
+  wrap?: boolean;
   onChange?: (value: string) => void;
 }
 
@@ -46,6 +51,16 @@ function indentOptions(appearance: EditorAppearance) {
     // 「缩进数 4」在打开一份 2 空格缩进的 JSON 后就显得不生效（spec 明写以设置为准）。
     detectIndentation: false,
   };
+}
+
+/**
+ * 折行 → Monaco 选项。
+ *
+ * `'on'` 是按视口宽度折行；关掉时超出部分由横向滚动承担。它只改变行的呈现方式，
+ * 不动正文内容，因此编辑器的滚动位置与折叠状态都不受影响。
+ */
+function wrapOptions(wrap: boolean): Monaco.editor.IEditorOptions {
+  return { wordWrap: wrap ? 'on' : 'off' };
 }
 
 /** 把外观写到编辑器与它的模型上——创建时与订阅回调共用这一个入口。 */
@@ -79,6 +94,7 @@ export function CodeSurface(props: CodeSurfaceProps) {
     height,
     fill = false,
     enableCompletion = false,
+    wrap = true,
   } = props;
 
   const hostRef = useRef<HTMLDivElement>(null);
@@ -89,8 +105,8 @@ export function CodeSurface(props: CodeSurfaceProps) {
   // 也避免异步创建完成时读到旧值。
   const onChangeRef = useRef(props.onChange);
   onChangeRef.current = props.onChange;
-  const liveRef = useRef({ language, readOnly, ariaLabel, placeholder, enableCompletion });
-  liveRef.current = { language, readOnly, ariaLabel, placeholder, enableCompletion };
+  const liveRef = useRef({ language, readOnly, ariaLabel, placeholder, enableCompletion, wrap });
+  liveRef.current = { language, readOnly, ariaLabel, placeholder, enableCompletion, wrap };
 
   useEffect(() => {
     let cancelled = false;
@@ -129,6 +145,7 @@ export function CodeSurface(props: CodeSurfaceProps) {
         overviewRulerLanes: 0,
         folding: true,
         ...indentOptions(appearance),
+        ...wrapOptions(liveRef.current.wrap),
         ariaLabel: liveRef.current.ariaLabel,
         placeholder: liveRef.current.placeholder,
         padding: { top: 8, bottom: 8 },
@@ -180,6 +197,12 @@ export function CodeSurface(props: CodeSurfaceProps) {
   useEffect(() => {
     editorRef.current?.updateOptions({ readOnly });
   }, [readOnly]);
+
+  // 折行改动即时作用于已打开的编辑面：与外观同纪律——只 updateOptions，不重建编辑器，
+  // 因此正文内容与折叠状态都保住（spec: code-editors「代码编辑面的折行」）
+  useEffect(() => {
+    editorRef.current?.updateOptions(wrapOptions(wrap));
+  }, [wrap]);
 
   useEffect(() => {
     editorRef.current?.updateOptions({ ariaLabel });

@@ -24,10 +24,14 @@ export type ResponseFormat = 'auto' | 'raw' | 'json' | 'xml' | 'html' | 'hex';
 /** 内容类型**检测**出的格式，供下拉标记与 `auto` 解释共用。 */
 export type DetectedFormat = 'json' | 'xml' | 'html' | 'markdown' | 'text';
 
-/** 格式化缩进宽度：固定空格，不提供 Tab（spec: http-engine「格式化缩进宽度」）。 */
-export type IndentWidth = 2 | 4 | 8;
-
-export const INDENT_WIDTHS: readonly IndentWidth[] = [2, 4, 8];
+/**
+ * 格式化输出的**缩进单元**：一层缩进用的字符串——若干空格，或一个制表符。
+ *
+ * 它由编辑器外观的「缩进数 + 缩进类型」经 `indentUnit()`（`editorAppearance.ts`）算出，
+ * 本模块只消费、不再持有第二套缩进配置（spec: code-editors「等宽面的外观与缩进」）。
+ * 缺省值只在调用方不关心缩进时兜底——应用内的真实取值一律由上层传入。
+ */
+export const DEFAULT_INDENT_UNIT = '  ';
 
 export const FORMAT_LABELS: Record<ResponseFormat, string> = {
   auto: '跟随检测',
@@ -109,7 +113,7 @@ export function revokeSandboxUrl(url: string | undefined): void {
 }
 
 /** 尝试格式化 JSON；失败则原样返回（强制解释失败不报错，spec: http-engine）。 */
-export function prettyJson(body: string, indent: IndentWidth = 2): string {
+export function prettyJson(body: string, indent: string = DEFAULT_INDENT_UNIT): string {
   try {
     return JSON.stringify(JSON.parse(body), null, indent);
   } catch {
@@ -146,8 +150,8 @@ function tokenizeXml(source: string): string[] {
 }
 
 /** 对 XML 做最小缩进；不改变内容语义，纯文本叶子元素保持在同一行。 */
-export function prettyXml(body: string, indent: IndentWidth = 2): string {
-  const pad = ' '.repeat(indent);
+export function prettyXml(body: string, indent: string = DEFAULT_INDENT_UNIT): string {
+  const pad = indent;
   const compact = body.replace(/>\s+</g, '><').trim();
   if (!compact.startsWith('<')) return body;
 
@@ -211,7 +215,7 @@ export function renderBody(
   format: ResponseFormat,
   detected: DetectedFormat,
   body: string,
-  indent: IndentWidth = 2,
+  indent: string = DEFAULT_INDENT_UNIT,
 ): RenderedBody {
   if (format === 'hex') return { view: 'hex' };
   if (format === 'raw') return { view: 'text', text: body, language: 'plaintext' };

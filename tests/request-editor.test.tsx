@@ -477,6 +477,79 @@ describe('请求体类型的选择行（spec: 请求体类型的选择行）', (
   });
 });
 
+describe('请求级折行覆盖（spec: ui-layout「折行」）', () => {
+  /** 直接渲染 Body 页，注入折行的生效值与出口（宿主只消费回调，不在这里实现落库）。 */
+  function wrapSurface(
+    body: Partial<SavedRequest['body']>,
+    options: { wrapLines?: boolean; sending?: boolean } = {},
+  ) {
+    const onWrapLinesChange = vi.fn();
+    render(
+      <RequestEditor
+        draft={draft({ body: { ...emptyBody(), ...body } })}
+        tab="body"
+        onTab={() => {}}
+        onChange={() => {}}
+        onCurl={async () => ({ command: 'curl', contains_secret: false, warnings: [] })}
+        wrapLines={options.wrapLines ?? true}
+        onWrapLinesChange={onWrapLinesChange}
+        sending={options.sending}
+      />,
+    );
+    return { onWrapLinesChange };
+  }
+
+  it('折行开关对任意 raw 语言都出现，格式化动作仍只在 JSON 下出现', () => {
+    wrapSurface({ kind: 'raw', raw: '<a/>', raw_language: 'xml' });
+
+    expect(screen.getByTestId('body-wrap')).toBeTruthy();
+    expect(screen.queryByTestId('body-beautify')).toBeNull();
+    expect(screen.queryByTestId('body-minify')).toBeNull();
+  });
+
+  it('非 raw 类型下没有折行开关', () => {
+    wrapSurface({ kind: 'form_data' });
+
+    expect(screen.queryByTestId('body-wrap')).toBeNull();
+  });
+
+  it('开关以 aria-pressed 反映生效值，点击把取反后的值交给宿主', () => {
+    const { onWrapLinesChange } = wrapSurface(
+      { kind: 'raw', raw: '{"a":1}', raw_language: 'json' },
+      { wrapLines: true },
+    );
+
+    expect(screen.getByTestId('body-wrap').getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByTestId('body-wrap'));
+    expect(onWrapLinesChange).toHaveBeenCalledWith(false);
+  });
+
+  it('发送进行中开关不可用', () => {
+    wrapSurface({ kind: 'raw', raw: '{"a":1}', raw_language: 'json' }, { sending: true });
+
+    expect((screen.getByTestId('body-wrap') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('Settings 给出「跟随全局 / 开 / 关」三态，缺省跟随全局，改动写回请求', () => {
+    const { latest } = harness(draft(), 'settings');
+
+    const row = screen.getByTestId('request-wrap-lines');
+    expect(row.getAttribute('data-value')).toBe('inherit');
+
+    fireEvent.click(row);
+    fireEvent.click(screen.getByRole('option', { name: '关' }));
+    expect(latest().settings.wrap_lines).toBe('off');
+
+    fireEvent.click(screen.getByTestId('request-wrap-lines'));
+    fireEvent.click(screen.getByRole('option', { name: '开' }));
+    expect(latest().settings.wrap_lines).toBe('on');
+
+    fireEvent.click(screen.getByTestId('request-wrap-lines'));
+    fireEvent.click(screen.getByRole('option', { name: '跟随全局' }));
+    expect(latest().settings.wrap_lines).toBe('inherit');
+  });
+});
+
 describe('raw 正文的格式化动作（spec: raw 正文的格式化动作）', () => {
   const bodyTab = (body: Partial<SavedRequest['body']>) =>
     harness(draft({ body: { ...emptyBody(), ...body } }), 'body');
@@ -484,8 +557,11 @@ describe('raw 正文的格式化动作（spec: raw 正文的格式化动作）',
   it('Beautify 把 JSON 重排为缩进形式，Minify 压回紧凑形式', () => {
     const { latest } = bodyTab({ kind: 'raw', raw: '{"a":1,"b":[1,2]}', raw_language: 'json' });
 
+    // 缩进取应用级设置：缺省缩进数是 4，因此这里应是 4 个空格（不再是硬编码的 2 个）
     fireEvent.click(screen.getByTestId('body-beautify'));
-    expect(latest().body.raw).toBe('{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ]\n}');
+    expect(latest().body.raw).toBe(
+      '{\n    "a": 1,\n    "b": [\n        1,\n        2\n    ]\n}',
+    );
 
     fireEvent.click(screen.getByTestId('body-minify'));
     expect(latest().body.raw).toBe('{"a":1,"b":[1,2]}');

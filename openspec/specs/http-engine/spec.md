@@ -224,20 +224,6 @@ Hex 视图 SHALL 以「偏移 + 十六进制 + ASCII」三列呈现响应的原�
 - **WHEN** 用户查看非文本类型的响应
 - **THEN** 系统以适合该类型的方式呈现，且不改变原始内容的可获取性
 
-### Requirement: 格式化缩进宽度
-
-系统 SHALL 提供应用级的格式化缩进宽度设置，可选值为 2、4 或 8，SHALL 固定使用空格缩进且 SHALL NOT 提供 Tab 选项；缺省值为 2。该设置 SHALL 同时作用于 JSON 与 XML 的格式化输出。
-
-#### Scenario: 修改缩进宽度生效
-
-- **WHEN** 用户把缩进宽度从 2 改为 4，随后查看一个 JSON 响应的格式化视图
-- **THEN** 缩进以 4 个空格呈现
-
-#### Scenario: 不提供 Tab
-
-- **WHEN** 用户打开缩进宽度设置
-- **THEN** 可选项只有 2、4、8 三个空格宽度，不存在 Tab 或「跟随编辑器」之类的选项
-
 ### Requirement: 处理中内容的渲染隔离
 系统 SHALL 在预览 HTML、SVG 与 Markdown 等可执行内容时隔离其渲染，使其中包含的脚本 SHALL NOT 执行，SHALL NOT 访问应用界面、数据与后端能力。
 

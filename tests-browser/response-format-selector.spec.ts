@@ -377,15 +377,15 @@ describe('响应呈现格式（真实引擎）', () => {
 
       const section = page.locator('.request-editor .settings-section');
       expect(await section.locator('input.switch').count()).toBe(2);
-      // 超时改为三态下拉后，这一节的下拉从 3 个变成 4 个（spec: 请求级超时覆盖）
-      expect(await section.locator('.dropdown').count()).toBe(4);
+      // 下拉：协议版本 / 响应格式 / 折行 / 代理（spec: 请求级折行覆盖起多出「折行」这一项）
+      expect(await section.locator('.dropdown').count()).toBe(5);
       expect(await section.locator('select').count()).toBe(0);
     } finally {
       await page.close();
     }
   });
 
-  it('全局缩进宽度落库后作用于之后的响应', async () => {
+  it('编辑器的缩进设置落库后作用于之后的响应正文', async () => {
     const page = await openApp([
       payload({ content_type: 'application/json', body_text: '{"a":1}' }),
     ]);
@@ -393,19 +393,19 @@ describe('响应呈现格式（真实引擎）', () => {
       await page.getByRole('button', { name: '设置', exact: true }).click();
       await page.getByTestId('settings-panel').waitFor();
 
-      // 缺省：Auto + 2 空格
+      // 缩进全应用只有一处：编辑器配置区的「缩进数」，缺省 4；响应呈现区不再有第二处
       expect(await page.getByTestId('format-detection').getAttribute('data-value')).toBe('auto');
-      expect(await page.getByTestId('indent-width').getAttribute('data-value')).toBe('2');
+      expect(await page.getByTestId('indent-width').count()).toBe(0);
+      expect(await page.getByTestId('editor-indent-count').inputValue()).toBe('4');
 
-      await page.getByTestId('indent-width').click();
-      await page.getByRole('option', { name: '4 空格' }).click();
+      await page.getByTestId('editor-indent-count').fill('2', { timeout: 5_000 });
 
       // 设置面在改动停止后自动落库
       await page.waitForFunction(
         () =>
           (globalThis as never as { __settings: Record<string, string> }).__settings[
-            'response_presentation:indent_width'
-          ] === '4',
+            'editor_appearance:indent_count'
+          ] === '2',
         undefined,
         { timeout: 5_000 },
       );
@@ -413,7 +413,7 @@ describe('响应呈现格式（真实引擎）', () => {
       await page.keyboard.press('Escape');
       await send(page);
 
-      expect(await waitBody(page, '{\n    "a": 1\n}')).toContain('    "a": 1');
+      expect(await waitBody(page, '{\n  "a": 1\n}')).toContain('  "a": 1');
     } finally {
       await page.close();
     }

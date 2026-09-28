@@ -288,5 +288,63 @@ describe('CodeSurface 真身（Monaco in Blink）', () => {
       expect(await invoke<number>(page, 'viewLineCount', JSON_URI)).toBe(folded);
       await page.close();
     });
+
+    it('折行只改选项：wordWrap 随之变化，编辑器不重建、折叠状态保持', async () => {
+      const { page } = await openHarness();
+
+      const before = await invoke<{ wordWrap: string } | null>(page, 'optionsOf', JSON_URI);
+      expect(before?.wordWrap, '缺省折行开启').toBe('on');
+      const beforeValue = await invoke<string>(page, 'getValue', JSON_URI);
+
+      const mark = await invoke<number>(page, 'markEditor', JSON_URI);
+
+      // 折叠范围是异步算出来的（同上一条）：先触发一次折叠模型，再折、再等 DOM 真的少行
+      await invoke<number>(page, 'foldingCount', JSON_URI);
+      await invoke(page, 'foldAll', JSON_URI);
+      await page.waitForFunction(
+        (total) => {
+          const host = document.querySelectorAll('.monaco-editor')[1];
+          return host ? host.querySelectorAll('.view-line').length < total : false;
+        },
+        JSON_TOTAL_LINES,
+        { timeout: 5_000 },
+      );
+      const folded = await invoke<number>(page, 'viewLineCount', JSON_URI);
+
+      await invoke(page, 'setWrap', JSON_URI, false);
+      await page.waitForFunction(
+        (uri) =>
+          (
+            window as unknown as {
+              __surface__: {
+                optionsOf: (value: string) => Promise<{ wordWrap: string } | null>;
+              };
+            }
+          ).__surface__
+            .optionsOf(uri)
+            .then((options) => options?.wordWrap === 'off'),
+        JSON_URI,
+        { timeout: 5_000 },
+      );
+
+      expect(
+        (await invoke<{ wordWrap: string } | null>(page, 'optionsOf', JSON_URI))?.wordWrap,
+      ).toBe('off');
+
+      const markAfter = await invoke<number | null>(page, 'markOf', JSON_URI);
+      expect(markAfter, '折行改动重建了编辑器（正文与折叠会因此丢失）').toBe(mark);
+      expect(
+        await invoke<number>(page, 'viewLineCount', JSON_URI),
+        '折行只改行的呈现，折叠状态应保持',
+      ).toBe(folded);
+
+      // 折行只改呈现，不动正文
+      expect(await invoke<string>(page, 'getValue', JSON_URI)).toBe(beforeValue);
+
+      // 脚本编辑面不吃折行设置：它没拿到这个值，选项照旧
+      const script = await invoke<{ wordWrap: string } | null>(page, 'optionsOf', JS_URI);
+      expect(script?.wordWrap, '脚本面不该被折行设置影响').toBe('on');
+      await page.close();
+    });
   });
 });

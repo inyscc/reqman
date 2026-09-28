@@ -36,7 +36,11 @@ import { readSplitRatio, SPLIT_DEFAULT, writeSplitRatio } from './lib/layout';
 import {
   DEFAULT_EDITOR_APPEARANCE,
   applyEditorAppearance,
+  indentUnit,
   readEditorAppearance,
+  resolveWrapLines,
+  subscribeEditorAppearance,
+  type EditorAppearance,
 } from './lib/editorAppearance';
 import {
   DEFAULT_PRESENTATION,
@@ -411,6 +415,17 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
    * 保存后经 `onPresentationChange` 回写这里，改动因此立即生效。
    */
   const [presentation, setPresentation] = useState<ResponsePresentation>(DEFAULT_PRESENTATION);
+
+  /**
+   * 编辑器外观的应用级当前值。
+   *
+   * `applyEditorAppearance` 是它的唯一写入口（启动读取与设置面保存都经它）；这里订阅一份，
+   * 供**响应正文的格式化缩进**与**折行的应用级缺省**使用——这两处不必经 Monaco，但必须与
+   * 编辑面看到的是同一份值（spec: code-editors「等宽面的外观与缩进」）。
+   */
+  const [editorAppearance, setEditorAppearance] = useState<EditorAppearance>(
+    DEFAULT_EDITOR_APPEARANCE,
+  );
   /** 侧栏内部 tab：Collections / Environments（design D2）。 */
   const [sidebarTab, setSidebarTab] = useState<'collections' | 'environments'>('collections');
   /** 低频面板的单例模态（design D5）：非空时打开对应弹窗，同一时间至多一个。 */
@@ -877,6 +892,10 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       .catch(() => applyEditorAppearance(DEFAULT_EDITOR_APPEARANCE));
   }, [client]);
 
+  // 订阅这份外观：设置面保存时也会 `applyEditorAppearance`，因此不需要额外的回写通道，
+  // 响应正文的缩进与折行缺省就会跟着变（不改这处的话，改设置要重开请求才生效）。
+  useEffect(() => subscribeEditorAppearance(setEditorAppearance), []);
+
   useEffect(() => {
     if (!workspaceId) return;
     void loadVariables(workspaceId, environmentId).catch((caught) =>
@@ -1022,6 +1041,23 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     if (!key) return;
     patchRequestTab(key, (item) => ({ ...item, draft: next, dirty: true }));
     requestStore.markDirty(next.id);
+  };
+
+  /**
+   * 折行的**生效值**：应用级缺省 + 当前请求的覆盖（spec: ui-layout「折行」）。
+   *
+   * 解析规则只在 `resolveWrapLines` 一处；响应正文、请求正文与两处开关都吃这一个值。
+   */
+  const wrapLines = resolveWrapLines(editorAppearance.wrap, draft?.settings.wrap_lines);
+
+  /**
+   * 把当前请求的折行落为**显式**值——请求 Body 类型行的开关与响应正文工具条右端的开关都走
+   * 这里，等同于在请求 Settings 标签页里改同一项（spec: ui-layout「折行」）。
+   * 「跟随全局」只在 Settings 行里可选，因此这里只写 on / off。
+   */
+  const setWrapLines = (next: boolean) => {
+    if (!draft) return;
+    editDraft({ ...draft, settings: { ...draft.settings, wrap_lines: next ? 'on' : 'off' } });
   };
 
   /** 切换请求编辑器的内层标签（Params/Body/…）：只动当前标签。 */
@@ -2457,6 +2493,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               tab={tab}
               onTab={setInnerTab}
               onChange={editDraft}
+              wrapLines={wrapLines}
+              onWrapLinesChange={setWrapLines}
+              sending={sending !== null && sending.key === activeTabKey}
               onPickFile={() => client.pickUploadFile()}
               onCurl={() => {
                 // 与发送共用同一份输入（未保存时走内联载荷），因此两处命令必然一致
@@ -2478,10 +2517,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             <div className="response-region">
               <ResponsePanel
                 response={response}
-                busy={busy}
                 error={null}
                 onSaveFull={() => void saveFullResponse()}
                 presentation={presentation}
+                indent={indentUnit(editorAppearance)}
+                wrapLines={wrapLines}
+                onWrapLinesChange={setWrapLines}
+                sending={sending !== null && sending.key === activeTabKey}
                 requestFormat={draft.settings.response_format}
                 scriptConsole={scriptReport?.console}
                 scriptAssertions={scriptReport?.assertions}

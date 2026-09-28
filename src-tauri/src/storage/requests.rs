@@ -363,7 +363,7 @@ mod tests {
     use super::*;
     use crate::storage::model::{
         ApiKeyLocation, BodyKind, KeyValue, RawLanguage, RequestBody, ResponseFormatOverride,
-        TimeoutSetting,
+        TimeoutSetting, WrapLinesOverride,
     };
     use crate::error::ErrorCode;
     use crate::storage::{variables, workspace, Db};
@@ -412,6 +412,9 @@ mod tests {
                 verify_tls: false,
                 // 响应格式的请求级覆盖也随请求往返（spec: ui-layout「请求级响应格式覆盖」）
                 response_format: ResponseFormatOverride::Json,
+                // 折行的请求级覆盖同样：它住在 settings 里，Rust 侧漏掉就会被静默丢弃
+                // （spec: ui-layout「折行」；design D8）
+                wrap_lines: WrapLinesOverride::Off,
                 ..RequestSettings::default()
             };
             request.pre_request_script = Some("console.log('pre')".into());
@@ -449,6 +452,11 @@ mod tests {
         assert_eq!(
             restored.settings.response_format,
             ResponseFormatOverride::Json
+        );
+        assert_eq!(
+            restored.settings.wrap_lines,
+            WrapLinesOverride::Off,
+            "请求级折行必须经保存-读回仍在（否则用户设的值会静默回到跟随全局）"
         );
         assert_eq!(restored.pre_request_script.as_deref(), Some("console.log('pre')"));
         assert_eq!(

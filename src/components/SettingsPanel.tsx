@@ -17,7 +17,6 @@ import {
   writeEditorAppearance,
   type IndentType,
 } from '../lib/editorAppearance';
-import { INDENT_WIDTHS, type IndentWidth } from '../lib/sandbox';
 import {
   DEFAULT_APP_TIMEOUT,
   DEFAULT_REQUEST_LIMITS,
@@ -113,11 +112,10 @@ export function SettingsPanel({
   const [raw, setRaw] = useState<string | null>(null);
   const [unreadable, setUnreadable] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** 响应呈现配置（spec: ui-layout「设置模态的响应呈现配置」）。 */
+  /** 响应呈现配置（spec: ui-layout「设置模态的响应呈现配置」：只剩响应格式检测一项）。 */
   const [formatDetection, setFormatDetection] = useState<FormatDetection>(
     presentation.formatDetection,
   );
-  const [indentWidth, setIndentWidth] = useState<IndentWidth>(presentation.indentWidth);
   /** 请求类偏好（spec: ui-layout「设置模态的请求配置」）。 */
   const [appTimeout, setAppTimeout] = useState<AppTimeout>(DEFAULT_APP_TIMEOUT);
   const [limits, setLimits] = useState<RequestLimits>(DEFAULT_REQUEST_LIMITS);
@@ -128,18 +126,20 @@ export function SettingsPanel({
   const [fontSize, setFontSize] = useState(DEFAULT_EDITOR_APPEARANCE.fontSize);
   const [indentCount, setIndentCount] = useState(DEFAULT_EDITOR_APPEARANCE.indentCount);
   const [indentType, setIndentType] = useState<IndentType>(DEFAULT_EDITOR_APPEARANCE.indentType);
+  /** 折行的应用级缺省（spec: ui-layout「折行」）；请求级可覆盖它。 */
+  const [wrap, setWrap] = useState(DEFAULT_EDITOR_APPEARANCE.wrap);
   /** 读回来的基线：未保存守卫据此判断草稿有没有偏离已配置的值。 */
   const [baseline, setBaseline] = useState({
     mode: 'allow' as 'allow' | 'deny',
     hosts: '',
     formatDetection: presentation.formatDetection as FormatDetection,
-    indentWidth: presentation.indentWidth as IndentWidth,
     appTimeout: DEFAULT_APP_TIMEOUT as AppTimeout,
     limits: DEFAULT_REQUEST_LIMITS as RequestLimits,
     fontFamily: DEFAULT_EDITOR_APPEARANCE.fontFamily,
     fontSize: DEFAULT_EDITOR_APPEARANCE.fontSize,
     indentCount: DEFAULT_EDITOR_APPEARANCE.indentCount,
     indentType: DEFAULT_EDITOR_APPEARANCE.indentType,
+    wrap: DEFAULT_EDITOR_APPEARANCE.wrap,
     proxy: null as ProxyConfig | null,
   });
 
@@ -175,7 +175,6 @@ export function SettingsPanel({
       setMode(nextMode);
       setHosts(nextHosts);
       setFormatDetection(storedPresentation.formatDetection);
-      setIndentWidth(storedPresentation.indentWidth);
       setAppTimeout(preferences.timeout);
       setLimits(preferences.limits);
       setProxy(storedProxy);
@@ -183,17 +182,18 @@ export function SettingsPanel({
       setFontSize(storedAppearance.fontSize);
       setIndentCount(storedAppearance.indentCount);
       setIndentType(storedAppearance.indentType);
+      setWrap(storedAppearance.wrap);
       setBaseline({
         mode: nextMode,
         hosts: nextHosts,
         formatDetection: storedPresentation.formatDetection,
-        indentWidth: storedPresentation.indentWidth,
         appTimeout: preferences.timeout,
         limits: preferences.limits,
         fontFamily: storedAppearance.fontFamily,
         fontSize: storedAppearance.fontSize,
         indentCount: storedAppearance.indentCount,
         indentType: storedAppearance.indentType,
+        wrap: storedAppearance.wrap,
         proxy: storedProxy,
       });
       // 读回来的值即应用当前生效的值，同步给 App
@@ -219,13 +219,13 @@ export function SettingsPanel({
     setError(null);
     try {
       await writeSendRequestPolicy(client, { mode, hosts: list });
-      const nextPresentation = { formatDetection, indentWidth };
+      const nextPresentation = { formatDetection };
       await writePresentation(client, nextPresentation);
       // 请求类偏好与全局代理也立即落库并作用于之后的请求；代理凭据的加密在命令层完成
       await writeRequestPreferences(client, { timeout: appTimeout, limits });
       await client.globalProxySet(proxy);
-      // 外观四项一起落库；写库之外还要把值推给**当前已打开**的编辑面与等宽 CSS 面
-      const nextAppearance = { fontFamily, fontSize, indentCount, indentType };
+      // 外观五项一起落库；写库之外还要把值推给**当前已打开**的编辑面与等宽 CSS 面
+      const nextAppearance = { fontFamily, fontSize, indentCount, indentType, wrap };
       await writeEditorAppearance(client, nextAppearance);
       // 改动立即作用于之后的响应呈现，不需要重启（spec: ui-layout 配置生效）
       onPresentationChange?.(nextPresentation);
@@ -243,13 +243,13 @@ export function SettingsPanel({
     mode !== baseline.mode ||
     hosts !== baseline.hosts ||
     formatDetection !== baseline.formatDetection ||
-    indentWidth !== baseline.indentWidth ||
     JSON.stringify(appTimeout) !== JSON.stringify(baseline.appTimeout) ||
     JSON.stringify(limits) !== JSON.stringify(baseline.limits) ||
     fontFamily !== baseline.fontFamily ||
     fontSize !== baseline.fontSize ||
     indentCount !== baseline.indentCount ||
     indentType !== baseline.indentType ||
+    wrap !== baseline.wrap ||
     JSON.stringify(proxy) !== JSON.stringify(baseline.proxy);
 
   // 编辑即自动保存（spec: 脚本的编辑与保存）：改动停止后落库。
@@ -266,13 +266,13 @@ export function SettingsPanel({
     mode,
     hosts,
     formatDetection,
-    indentWidth,
     appTimeout,
     limits,
     fontFamily,
     fontSize,
     indentCount,
     indentType,
+    wrap,
     proxy,
     baseline,
   ]);
@@ -293,10 +293,10 @@ export function SettingsPanel({
 
   return (
     <div className="stack" data-testid="settings-panel">
-      {/* 编辑器外观（spec: code-editors「编辑器外观可配置」）：字体与字号作用于所有等宽
-          表面（三处编辑面 + 纯文本降级 / Hex / 二进制 / cURL 文本域），缩进数与缩进类型只
-          作用于代码编辑面。与「响应」一节里的「格式化缩进宽度」是两个独立设置，因此这一节
-          不解释两者的关系，各自只写自己的口径。 */}
+      {/* 编辑器外观（spec: code-editors「等宽面的外观与缩进」）：字体与字号作用于所有等宽
+          表面（三处编辑面 + 纯文本降级 / Hex / 二进制 / cURL 文本域）；缩进数与缩进类型是
+          全应用唯一的缩进设置——同时驱动代码编辑面与 JSON / XML 的格式化输出，因此「响应」
+          一节不再有第二处缩进项。 */}
       <section className="settings-section" data-testid="editor-appearance">
         <h4>编辑器</h4>
 
@@ -361,6 +361,20 @@ export function SettingsPanel({
             onChange={(value) => setIndentType(value === 'tab' ? 'tab' : 'space')}
           />
         </div>
+
+        {/* 折行的应用级缺省（spec: ui-layout「折行」）：布尔项以开关呈现，请求级可覆盖它 */}
+        <label className="settings-row">
+          <span className="settings-name">换行</span>
+          <input
+            className="switch"
+            type="checkbox"
+            role="switch"
+            aria-label="换行"
+            data-testid="editor-wrap"
+            checked={wrap}
+            onChange={(event) => setWrap(event.target.checked)}
+          />
+        </label>
       </section>
 
       {/* 请求类偏好（spec: ui-layout「设置模态的请求配置」）：改动后立即作用于之后的请求。
@@ -438,23 +452,6 @@ export function SettingsPanel({
           />
         </div>
 
-        <div className="settings-row">
-          <span className="settings-name">格式化缩进宽度</span>
-          <Dropdown
-            label="格式化缩进宽度"
-            testId="indent-width"
-            align="right"
-            value={String(indentWidth)}
-            options={INDENT_WIDTHS.map((width) => ({
-              value: String(width),
-              label: `${width} 空格`,
-            }))}
-            onChange={(value) => {
-              const width = INDENT_WIDTHS.find((candidate) => String(candidate) === value);
-              if (width) setIndentWidth(width);
-            }}
-          />
-        </div>
       </section>
 
       {/* 全局代理（三级代理的最低层）：环境级代理落在环境自身的编辑面、请求级沿用请求

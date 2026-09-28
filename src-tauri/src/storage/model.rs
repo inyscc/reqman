@@ -560,6 +560,27 @@ impl Default for ResponseFormatOverride {
     }
 }
 
+/// 折行的请求级覆盖（spec: ui-layout「折行」）。
+///
+/// 与 [`ResponseFormatOverride`] 同款：只是「选中了哪一档」这一个选择，生效值的解析与
+/// 折行的呈现都在前端做，后端不理解也不使用它——它随请求往返，仅此而已。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WrapLinesOverride {
+    /// 跟随应用级「换行」缺省（缺省）。
+    Inherit,
+    /// 该请求强制折行。
+    On,
+    /// 该请求强制不折行。
+    Off,
+}
+
+impl Default for WrapLinesOverride {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
 /// 超时取值（spec: http-engine「请求级网络设置」）。
 ///
 /// 三态取代了原先的 `Option<u64>`：一个 `None` 同时承担着「跟随全局」与「没填」，
@@ -663,6 +684,8 @@ pub struct RequestSettings {
     pub proxy: Option<ProxyConfig>,
     /// 响应呈现格式的请求级覆盖；缺省 = 跟随全局。
     pub response_format: ResponseFormatOverride,
+    /// 折行的请求级覆盖；缺省 = 跟随应用级缺省。
+    pub wrap_lines: WrapLinesOverride,
 }
 
 impl Default for RequestSettings {
@@ -675,6 +698,7 @@ impl Default for RequestSettings {
             encoding: None,
             proxy: None,
             response_format: ResponseFormatOverride::Inherit,
+            wrap_lines: WrapLinesOverride::Inherit,
         }
     }
 }

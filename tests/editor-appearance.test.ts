@@ -8,11 +8,14 @@ import {
   DEFAULT_FONT_FAMILY,
   applyEditorAppearance,
   currentEditorAppearance,
+  indentUnit,
   parseFontFamily,
   parseFontSize,
   parseIndentCount,
   parseIndentType,
+  parseWrap,
   readEditorAppearance,
+  resolveWrapLines,
   subscribeEditorAppearance,
   writeEditorAppearance,
 } from '../src/lib/editorAppearance';
@@ -55,6 +58,7 @@ describe('编辑器外观的读写', () => {
       fontSize: 14,
       indentCount: 8,
       indentType: 'tab' as const,
+      wrap: false,
     };
     await writeEditorAppearance(commands, appearance);
 
@@ -62,7 +66,35 @@ describe('编辑器外观的读写', () => {
     expect(store.get('editor_appearance:font_size')).toBe('14');
     expect(store.get('editor_appearance:indent_count')).toBe('8');
     expect(store.get('editor_appearance:indent_type')).toBe('tab');
+    expect(store.get('editor_appearance:wrap')).toBe('false');
     expect(await readEditorAppearance(commands)).toEqual(appearance);
+  });
+
+  it('折行缺省开启，只有明确的 false 才关', async () => {
+    const { commands, store } = fakeCommands();
+    expect(DEFAULT_EDITOR_APPEARANCE.wrap).toBe(true);
+    expect((await readEditorAppearance(commands)).wrap).toBe(true);
+
+    // 读不懂、缺失、空一律回缺省；布尔值与 'false' 才表示关
+    expect(parseWrap('true')).toBe(true);
+    expect(parseWrap('false')).toBe(false);
+    expect(parseWrap(false)).toBe(false);
+    expect(parseWrap('weird')).toBe(true);
+    expect(parseWrap('')).toBe(true);
+    expect(parseWrap(null)).toBe(true);
+
+    await writeEditorAppearance(commands, { ...DEFAULT_EDITOR_APPEARANCE, wrap: false });
+    expect(store.get('editor_appearance:wrap')).toBe('false');
+    expect((await readEditorAppearance(commands)).wrap).toBe(false);
+  });
+
+  it('折行的生效值：请求级覆盖应用级缺省', () => {
+    expect(resolveWrapLines(true, 'inherit')).toBe(true);
+    expect(resolveWrapLines(true, undefined)).toBe(true);
+    expect(resolveWrapLines(true, 'off')).toBe(false);
+    expect(resolveWrapLines(false, 'on')).toBe(true);
+    expect(resolveWrapLines(false, 'inherit')).toBe(false);
+    expect(resolveWrapLines(false, undefined)).toBe(false);
   });
 
   it('读不懂的值、越界值与空字体栈各自回落缺省，不抛错', () => {
@@ -99,6 +131,27 @@ describe('编辑器外观的读写', () => {
     await expect(
       writeEditorAppearance(commands, DEFAULT_EDITOR_APPEARANCE),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('缩进单元：缩进数 + 缩进类型 → 格式化输出的缩进', () => {
+  it('空格档给出对应数量的空格', () => {
+    expect(indentUnit({ indentCount: 2, indentType: 'space' })).toBe('  ');
+    expect(indentUnit({ indentCount: 4, indentType: 'space' })).toBe('    ');
+  });
+
+  it('Tab 档只给一个制表符，显示宽度交给编辑面的 tabSize', () => {
+    expect(indentUnit({ indentCount: 4, indentType: 'tab' })).toBe('\t');
+    expect(indentUnit({ indentCount: 1, indentType: 'tab' })).toBe('\t');
+  });
+
+  it('缩进数区间的两端（1 与 8）都成立', () => {
+    expect(indentUnit({ indentCount: 1, indentType: 'space' })).toBe(' ');
+    expect(indentUnit({ indentCount: 8, indentType: 'space' })).toBe('        ');
+  });
+
+  it('缺省外观对应 4 个空格——响应格式化的缺省缩进由此而来', () => {
+    expect(indentUnit(DEFAULT_EDITOR_APPEARANCE)).toBe('    ');
   });
 });
 

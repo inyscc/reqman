@@ -1,5 +1,6 @@
 import { Fragment, useRef, useState, type FocusEvent, type ReactNode, type RefObject } from 'react';
 import { formatRawBody, type RawFormatMode } from '../lib/editing';
+import { currentEditorAppearance, indentUnit } from '../lib/editorAppearance';
 import { isEmptyFormField, isEmptyKeyValue } from '../lib/rows';
 import { withParams, withUrl } from '../lib/url';
 import { Dropdown } from './Dropdown';
@@ -52,6 +53,17 @@ export interface RequestEditorProps {
   tab: Tab;
   onTab: (tab: Tab) => void;
   onChange: (next: SavedRequest) => void;
+  /**
+   * 折行的**生效值**（应用级缺省 + 本请求的覆盖）与把它落为显式值的出口
+   * （spec: ui-layout「折行」）。它与请求 Settings 标签页的「折行」行是同一份取值。
+   */
+  wrapLines?: boolean;
+  onWrapLinesChange?: (next: boolean) => void;
+  /**
+   * 本请求是否正在发送（spec: ui-layout「折行」：发送进行中开关不响应）。
+   * 与 `RequestBand` 的 `sending` 同源——刻意不用 `busy`（它还含保存与改名）。
+   */
+  sending?: boolean;
   /** 生成当前请求的 curl 快照（spec: cURL 快照标签）。 */
   onCurl: () => Promise<CurlCommand>;
   /**
@@ -462,7 +474,17 @@ export function RequestBand(props: RequestBandProps) {
  * 请求区的列内容：内层标签与正文。请求带（身份与地址栏）已抬到主区顶部，
  * 不再属于这里——本组件只负责分栏以下的那一列。
  */
-export function RequestEditor({ draft, tab, onTab, onChange, onCurl, onPickFile }: RequestEditorProps) {
+export function RequestEditor({
+  draft,
+  tab,
+  onTab,
+  onChange,
+  onCurl,
+  onPickFile,
+  wrapLines = true,
+  onWrapLinesChange,
+  sending = false,
+}: RequestEditorProps) {
   const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
 
   /** binary 的文件选取：取消对话框时无副作用（spec: 请求体文件的选取）。 */
@@ -493,7 +515,10 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl, onPickFile 
 
   const applyFormat = (mode: RawFormatMode) => {
     try {
-      patch({ body: { ...draft.body, raw: formatRawBody(draft.body.raw ?? '', mode) } });
+      // 缩进取应用级的「缩进数 + 缩进类型」——与响应的格式化输出同一份值，不再固定 2 空格
+      // （spec「raw 正文的格式化动作」；`currentEditorAppearance` 是那份值的唯一来源）
+      const indent = indentUnit(currentEditorAppearance());
+      patch({ body: { ...draft.body, raw: formatRawBody(draft.body.raw ?? '', mode, indent) } });
       setFormatError(null);
     } catch (caught) {
       setFormatError(caught instanceof Error ? caught.message : '正文不是合法的 JSON');
@@ -596,26 +621,42 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl, onPickFile 
                 </Fragment>
               ))}
 
-              {/* 只有 JSON 有解析器，其它语言下这两个入口不存在（不是禁用态） */}
-              {isRawJson && (
+              {/* 动作区（spec: ui-layout「请求体类型的选择行」）：折行开关对任意 raw 语言都
+                  出现；`Minify` / `Beautify` 只在 JSON 语言下存在——其它语言没有可用的解析器，
+                  因此是入口不存在而不是禁用态。发送进行中开关不响应（改动它不产生任何效果）。 */}
+              {draft.body.kind === 'raw' && (
                 <span className="body-format-actions">
+                  {isRawJson && (
+                    <>
+                      <button
+                        type="button"
+                        className="text-action"
+                        data-testid="body-minify"
+                        disabled={rawEmpty}
+                        onClick={() => applyFormat('minify')}
+                      >
+                        Minify
+                      </button>
+                      <button
+                        type="button"
+                        className="text-action"
+                        data-testid="body-beautify"
+                        disabled={rawEmpty}
+                        onClick={() => applyFormat('beautify')}
+                      >
+                        Beautify
+                      </button>
+                    </>
+                  )}
                   <button
                     type="button"
                     className="text-action"
-                    data-testid="body-minify"
-                    disabled={rawEmpty}
-                    onClick={() => applyFormat('minify')}
+                    aria-pressed={wrapLines}
+                    data-testid="body-wrap"
+                    disabled={sending}
+                    onClick={() => onWrapLinesChange?.(!wrapLines)}
                   >
-                    Minify
-                  </button>
-                  <button
-                    type="button"
-                    className="text-action"
-                    data-testid="body-beautify"
-                    disabled={rawEmpty}
-                    onClick={() => applyFormat('beautify')}
-                  >
-                    Beautify
+                    折行
                   </button>
                 </span>
               )}
@@ -634,6 +675,7 @@ export function RequestEditor({ draft, tab, onTab, onChange, onCurl, onPickFile 
                 language={monacoLanguage(draft.body.raw_language ?? 'json')}
                 value={draft.body.raw ?? ''}
                 fill
+                wrap={wrapLines}
                 onChange={(next) => {
                   setFormatError(null);
                   patch({ body: { ...draft.body, raw: next } });
@@ -1308,6 +1350,28 @@ function SettingsEditor({
             onChange({
               ...settings,
               response_format: value === 'json' ? 'json' : value === 'auto' ? 'auto' : 'inherit',
+            })
+          }
+        />
+      </div>
+
+      {/* 折行的请求级覆盖（spec: ui-layout「折行」）：与「响应格式」同款三态，
+          「跟随全局」是缺省；改动随请求保存并计入未保存守卫。 */}
+      <div className="settings-row">
+        <span className="settings-name">折行</span>
+        <Dropdown
+          label="折行"
+          testId="request-wrap-lines"
+          value={settings.wrap_lines ?? 'inherit'}
+          options={[
+            { value: 'inherit', label: '跟随全局' },
+            { value: 'on', label: '开' },
+            { value: 'off', label: '关' },
+          ]}
+          onChange={(value) =>
+            onChange({
+              ...settings,
+              wrap_lines: value === 'on' ? 'on' : value === 'off' ? 'off' : 'inherit',
             })
           }
         />

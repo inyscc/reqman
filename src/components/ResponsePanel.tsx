@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  DEFAULT_INDENT_UNIT,
   FORMAT_LABELS,
   HEX_MAX_BYTES,
   bodyBytes,
@@ -22,6 +23,7 @@ import {
 import { Dropdown, type DropdownOption } from './Dropdown';
 import { ScriptReport } from './ScriptReport';
 import { CodeSurface } from './CodeSurface';
+import { WrapIcon } from './icons';
 import { CODE_SURFACE_MAX_BYTES } from '../lib/codeSurface';
 import type { ConsoleEntry, TestAssertion } from '../lib/scriptRuntime';
 import type { ResponsePayload } from '../lib/types';
@@ -31,9 +33,24 @@ type Tab = 'body' | 'headers' | 'script';
 /** 格式下拉的选项顺序：跟随检测在前，Hex 收在末尾（低频、诊断用）。 */
 const FORMAT_ORDER: ResponseFormat[] = ['auto', 'raw', 'json', 'xml', 'html', 'hex'];
 
+/**
+ * 发送进行中的遮罩 + 进度线（spec: ui-layout「发送中的响应区反馈」）。
+ *
+ * 两种情形共用这一个浮层：响应区尚无内容时它铺满正文区，已有响应时它压在那份响应之上
+ * （旧响应只是被压暗，SHALL NOT 被清空）。
+ *
+ * **不摆占位行**：占位条压在旧响应的文字上会读成一层删除线——比不遮挡更难看，而且它与
+ * "下面那份东西还在"这件事自相矛盾。遮罩本身说明了"这一块在等响应"，顶边那条进度线
+ * （跑马灯）提供进度感，零动画时则由响应头的「发送中」标识承担（spec 的 reduced-motion 一条）。
+ *
+ * 纯呈现——语义由那个标识承担，因此对辅助技术隐藏。
+ */
+function SendingOverlay() {
+  return <div className="response-loading" data-testid="response-loading" aria-hidden="true" />;
+}
+
 export interface ResponsePanelProps {
   response: ResponsePayload | null;
-  busy: boolean;
   error: string | null;
   onSaveFull: () => void;
   /** 脚本 console 输出；为空时「脚本」标签页不出现（任务 6.4）。 */
@@ -42,10 +59,27 @@ export interface ResponsePanelProps {
   scriptError?: string | null;
   /** 可视化结果（已渲染的 HTML）；由 sandbox="" 的 iframe 隔离承载（任务 4.6）。 */
   visualizerHtml?: string | null;
-  /** 应用级呈现配置；缺省与改动前行为一致（跟随检测、缩进 2）。 */
+  /** 应用级呈现配置（响应格式检测）。 */
   presentation?: ResponsePresentation;
+  /**
+   * 格式化输出的缩进单元（空格串 / 单个制表符），由编辑器外观的「缩进数 + 缩进类型」
+   * 换算后下发（spec: code-editors「等宽面的外观与缩进」）。缺省只作兜底——应用内一律由
+   * App 传入；旧的「格式化缩进宽度」键已退场。
+   */
+  indent?: string;
   /** 请求级的响应格式覆盖（spec: ui-layout「请求级响应格式覆盖」）。 */
   requestFormat?: RequestResponseFormat;
+  /**
+   * 折行的**生效值**（应用级缺省 + 该请求的覆盖）与把它落为显式值的出口
+   * （spec: ui-layout「折行」）。工具条上那枚开关写的是请求级取值，因此与请求侧更同源。
+   */
+  wrapLines?: boolean;
+  onWrapLinesChange?: (next: boolean) => void;
+  /**
+   * 该请求是否正在发送（spec: ui-layout「发送中的响应区反馈」）。它与 `busy` 分开：
+   * `busy` 还被保存请求、脚本与改名共用，而遮罩与「发送中」标识只随发送态出现。
+   */
+  sending?: boolean;
 }
 
 /**
@@ -106,7 +140,7 @@ function formatOptions(
 
 export function ResponsePanel({
   response,
-  busy,
+  sending = false,
   error,
   onSaveFull,
   scriptConsole,
@@ -114,7 +148,10 @@ export function ResponsePanel({
   scriptError,
   visualizerHtml,
   presentation = DEFAULT_PRESENTATION,
+  indent = DEFAULT_INDENT_UNIT,
   requestFormat,
+  wrapLines = true,
+  onWrapLinesChange,
 }: ResponsePanelProps) {
   const [tab, setTab] = useState<Tab>('body');
   const [preview, setPreview] = useState(true);
@@ -168,7 +205,7 @@ export function ResponsePanel({
 
   const rendered =
     response && tab === 'body'
-      ? renderBody(effectiveFormat, detected, response.body_text ?? '', presentation.indentWidth)
+      ? renderBody(effectiveFormat, detected, response.body_text ?? '', indent)
       : null;
 
   // 预览是**开关**而不是独裁者（design D5）：可预览响应默认照旧预览，用户关掉开关
@@ -181,6 +218,9 @@ export function ResponsePanel({
 
   const hexBytes =
     rendered?.view === 'hex' ? bodyBytes(response?.body_text, response?.body_base64) : null;
+
+  /** 纯文本降级面是否退出折行（Hex 例外：它靠空格对齐三列，永远不折）。 */
+  const bodyWrapClass = wrapLines ? '' : ' nowrap-body';
 
   if (error) {
     return (
@@ -201,7 +241,13 @@ export function ResponsePanel({
     <div className="pane">
       <div className="pane-header">
         <strong>响应</strong>
-        {busy && <span className="badge">发送中…</span>}
+        {/* 只随**发送态**出现：它还挂着响应区的遮罩，两者必须是同一个触发条件
+            （spec: ui-layout「发送中的响应区反馈」）。`busy` 含保存与改名，不能用。 */}
+        {sending && (
+          <span className="badge" data-testid="response-sending">
+            发送中…
+          </span>
+        )}
         {response && (
           <>
             <span
@@ -261,7 +307,16 @@ export function ResponsePanel({
       </div>
 
       <div className="pane-body stack">
-        {!response && !hasScript && <div className="muted">尚未发送请求。</div>}
+        {/* 首次发送进行中时由遮罩承担这段呈现，空态文案让位 */}
+        {!response && !hasScript && !sending && <div className="muted">尚未发送请求。</div>}
+
+        {/* 还没有任何响应、但发送已经在途：正文区照常立起来，好让遮罩铺满它
+            （spec: ui-layout「发送中的响应区反馈」的第一种形态）。 */}
+        {!response && sending && tab === 'body' && (
+          <div className="response-body-area">
+            <SendingOverlay />
+          </div>
+        )}
 
         {/* 脚本输出不依赖响应：请求失败时前置脚本的输出同样要能看见 */}
         {tab === 'script' && (
@@ -327,6 +382,7 @@ export function ResponsePanel({
                 value={format}
                 options={formatOptions(detected, response.pretty_available)}
                 onChange={setFormat}
+                disabled={sending}
               />
               <span className="grow" />
               {plan?.kind === 'iframe' && (
@@ -334,6 +390,7 @@ export function ResponsePanel({
                   className="ghost"
                   aria-pressed={preview}
                   data-testid="preview-toggle"
+                  disabled={sending}
                   onClick={() => setPreview((current) => !current)}
                 >
                   预览
@@ -342,9 +399,31 @@ export function ResponsePanel({
               <span className="muted mono response-content-type">
                 {response.content_type ?? '未知内容类型'}
               </span>
+
+              {/* 响应区的折行开关（spec: ui-layout「折行」）：停在正文工具条的**最右端**，
+                  排在内容类型之后——它不压在正文上，因此不遮挡任何一行的阅读，也不与
+                  正文的滚动条抢指针。图标呈现，开 / 关读在 pressed 态上；显隐由 CSS
+                  悬停驱动（design D6），因此显形前不接收指针事件。 */}
+              <button
+                type="button"
+                className="wrap-toggle"
+                aria-pressed={wrapLines}
+                aria-label="折行"
+                title="折行"
+                data-testid="response-wrap"
+                disabled={sending}
+                onClick={() => onWrapLinesChange?.(!wrapLines)}
+              >
+                <WrapIcon aria-hidden="true" />
+              </button>
             </div>
 
-            {showPreview && <SandboxedPreview html={response.body_text ?? ''} />}
+            {/* 正文区自己是一层定位容器：发送遮罩铺在这一层里。折行开关留在工具条上
+                （这一层之外），因此遮罩压下来时它照常可见、只是不可用。 */}
+            <div className="response-body-area">
+              {sending && <SendingOverlay />}
+
+              {showPreview && <SandboxedPreview html={response.body_text ?? ''} />}
 
             {!showPreview && rendered?.view === 'hex' && (
               <>
@@ -362,7 +441,7 @@ export function ResponsePanel({
             {!showPreview &&
               rendered?.view !== 'hex' &&
               (binaryFallback ? (
-                <pre className="body" data-testid="response-body">
+                <pre className={`body${bodyWrapClass}`} data-testid="response-body">
                   {response.body_base64
                     ? `（二进制内容，base64）\n${response.body_base64.slice(0, 2000)}`
                     : '（二进制内容）'}
@@ -373,7 +452,7 @@ export function ResponsePanel({
                   <div className="notice info" role="status" data-testid="body-size-notice">
                     正文过大，高亮已禁用。
                   </div>
-                  <pre className="body" data-testid="response-body">
+                  <pre className={`body${bodyWrapClass}`} data-testid="response-body">
                     {rendered?.view === 'text' ? rendered.text : ''}
                   </pre>
                 </>
@@ -385,8 +464,10 @@ export function ResponsePanel({
                   value={rendered?.view === 'text' ? rendered.text : ''}
                   readOnly
                   fill
+                  wrap={wrapLines}
                 />
               ))}
+            </div>
           </>
         )}
       </div>
