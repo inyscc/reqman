@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { RequestBand, RequestEditor, type Tab } from '../src/components/RequestEditor';
 import {
+  CURL_MULTILINE_SEPARATOR,
   defaultSettings,
   emptyAuth,
   emptyBody,
@@ -61,9 +62,11 @@ function harness(
     const generateCurl = async (): Promise<CurlCommand> => {
       curlCalls += 1;
       if (curlResult === 'reject') throw { code: 'io', message: '生成失败' };
+      const parts = [`curl -X ${value.method}`, `'${value.url}'`];
       return (
         curlResult ?? {
           command: `curl -X ${value.method} '${value.url}'`,
+          parts,
           contains_secret: false,
           warnings: [],
         }
@@ -849,8 +852,10 @@ describe('地址栏的发送态（spec: 地址栏）', () => {
 });
 
 describe('cURL 快照标签（spec: cURL 快照标签）', () => {
-  const command = "curl -X GET 'https://api.test/users'";
-  const plain = { command, contains_secret: false, warnings: [] };
+  // 文本块按生效布局从分段拼出来；缺省布局是多行，因此这里的 command 就是多行拼接结果
+  const parts = ["curl -X GET", "'https://api.test/users'"];
+  const command = parts.join(CURL_MULTILINE_SEPARATOR);
+  const plain = { command, parts, contains_secret: false, warnings: [] as string[] };
 
   it('切换到标签即生成可编辑的命令，切到别的标签后不再显示', async () => {
     harness(draft(), 'params', plain);
@@ -924,7 +929,7 @@ describe('cURL 快照标签（spec: cURL 快照标签）', () => {
 
     await waitFor(() =>
       expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe(
-        "curl -X GET 'https://api.test/other'",
+        ["curl -X GET", "'https://api.test/other'"].join(CURL_MULTILINE_SEPARATOR),
       ),
     );
   });
@@ -948,6 +953,11 @@ describe('cURL 快照标签（spec: cURL 快照标签）', () => {
   it('生成结果给出的不可执行原因会显示出来', async () => {
     harness(draft(), 'params', {
       command: "curl -X POST 'https://api.test/users' --data-binary @<需自行替换为本地文件路径>",
+      parts: [
+        'curl -X POST',
+        "'https://api.test/users'",
+        '--data-binary @<需自行替换为本地文件路径>',
+      ],
       contains_secret: false,
       warnings: ['请求体为二进制文件，命令中的文件位置是占位符'],
     });
@@ -967,5 +977,58 @@ describe('cURL 快照标签（spec: cURL 快照标签）', () => {
     fireEvent.click(screen.getByText('cURL'));
 
     expect((await screen.findByTestId('curl-error')).textContent).toContain('生成失败');
+  });
+
+  it('动作行只有「重新生成」与「复制」：布局与压缩都不在命令旁', async () => {
+    const parts = ['curl -X GET', "'https://api.test/users'"];
+    harness(draft(), 'curl', {
+      command: parts.join(CURL_MULTILINE_SEPARATOR),
+      parts,
+      contains_secret: false,
+      warnings: [],
+    });
+
+    const actions = document.querySelector('.curl-actions') as HTMLElement;
+    expect(within(actions).getByTestId('curl-regenerate')).toBeTruthy();
+    expect(within(actions).getByTestId('curl-copy')).toBeTruthy();
+    expect(within(actions).queryByTestId('curl-layout')).toBeNull();
+    expect(within(actions).queryByTestId('curl-compress')).toBeNull();
+  });
+
+  it('初值按生效布局呈现：请求级设为单行时命令为单行（spec: cURL 命令布局）', async () => {
+    const parts = ['curl -X GET', "'https://api.test/users'", "-H 'A: 1'"];
+    const settings = { ...defaultSettings(), curl_line_layout: 'single' as const };
+    harness({ ...draft(), settings }, 'curl', {
+      command: parts.join(CURL_MULTILINE_SEPARATOR),
+      parts,
+      contains_secret: false,
+      warnings: [],
+    });
+
+    await waitFor(() =>
+      expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe(
+        parts.join(' '),
+      ),
+    );
+  });
+
+  it('Settings 的「cURL 命令布局」与「cURL 正文压缩」都是三态并写回请求', () => {
+    const { latest } = harness(draft(), 'settings');
+
+    const layout = screen.getByTestId('request-curl-line-layout');
+    expect(layout.getAttribute('data-value')).toBe('inherit');
+    fireEvent.click(layout);
+    fireEvent.click(screen.getByRole('option', { name: '单行' }));
+    expect(latest().settings.curl_line_layout).toBe('single');
+
+    fireEvent.click(screen.getByTestId('request-curl-line-layout'));
+    fireEvent.click(screen.getByRole('option', { name: '多行' }));
+    expect(latest().settings.curl_line_layout).toBe('multi');
+
+    const compress = screen.getByTestId('request-curl-body-compress');
+    expect(compress.getAttribute('data-value')).toBe('inherit');
+    fireEvent.click(compress);
+    fireEvent.click(screen.getByRole('option', { name: '不压缩' }));
+    expect(latest().settings.curl_body_compress).toBe('raw');
   });
 });

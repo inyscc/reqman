@@ -19,16 +19,20 @@ import {
 } from '../lib/editorAppearance';
 import {
   DEFAULT_APP_TIMEOUT,
+  DEFAULT_CURL_BODY_COMPRESS,
+  DEFAULT_CURL_LINE_LAYOUT,
   DEFAULT_REQUEST_LIMITS,
   THRESHOLD_CHOICES_MB,
   appTimeoutFromMs,
+  applyCurlBodyCompress,
+  applyCurlLineLayout,
   readRequestPreferences,
   timeoutMsOf,
   writeRequestPreferences,
   type AppTimeout,
   type RequestLimits,
 } from '../lib/requestPreferences';
-import type { ProxyConfig } from '../lib/types';
+import type { CurlLayout, ProxyConfig } from '../lib/types';
 import { Dropdown } from './Dropdown';
 import { ProxyConfigRows } from './ProxyConfigRows';
 import {
@@ -128,6 +132,10 @@ export function SettingsPanel({
   const [indentType, setIndentType] = useState<IndentType>(DEFAULT_EDITOR_APPEARANCE.indentType);
   /** 折行的应用级缺省（spec: ui-layout「折行」）；请求级可覆盖它。 */
   const [wrap, setWrap] = useState(DEFAULT_EDITOR_APPEARANCE.wrap);
+  /** cURL 正文压缩的应用级缺省（spec: ui-layout「cURL 正文压缩」）；请求级可覆盖它。 */
+  const [curlBodyCompress, setCurlBodyCompress] = useState(DEFAULT_CURL_BODY_COMPRESS);
+  /** cURL 命令布局的应用级缺省（spec: ui-layout「cURL 命令布局」）；请求级可覆盖它。 */
+  const [curlLineLayout, setCurlLineLayout] = useState<CurlLayout>(DEFAULT_CURL_LINE_LAYOUT);
   /** 读回来的基线：未保存守卫据此判断草稿有没有偏离已配置的值。 */
   const [baseline, setBaseline] = useState({
     mode: 'allow' as 'allow' | 'deny',
@@ -140,6 +148,8 @@ export function SettingsPanel({
     indentCount: DEFAULT_EDITOR_APPEARANCE.indentCount,
     indentType: DEFAULT_EDITOR_APPEARANCE.indentType,
     wrap: DEFAULT_EDITOR_APPEARANCE.wrap,
+    curlBodyCompress: DEFAULT_CURL_BODY_COMPRESS,
+    curlLineLayout: DEFAULT_CURL_LINE_LAYOUT as CurlLayout,
     proxy: null as ProxyConfig | null,
   });
 
@@ -183,6 +193,8 @@ export function SettingsPanel({
       setIndentCount(storedAppearance.indentCount);
       setIndentType(storedAppearance.indentType);
       setWrap(storedAppearance.wrap);
+      setCurlBodyCompress(preferences.curlBodyCompress);
+      setCurlLineLayout(preferences.curlLineLayout);
       setBaseline({
         mode: nextMode,
         hosts: nextHosts,
@@ -194,6 +206,8 @@ export function SettingsPanel({
         indentCount: storedAppearance.indentCount,
         indentType: storedAppearance.indentType,
         wrap: storedAppearance.wrap,
+        curlBodyCompress: preferences.curlBodyCompress,
+        curlLineLayout: preferences.curlLineLayout,
         proxy: storedProxy,
       });
       // 读回来的值即应用当前生效的值，同步给 App
@@ -222,7 +236,12 @@ export function SettingsPanel({
       const nextPresentation = { formatDetection };
       await writePresentation(client, nextPresentation);
       // 请求类偏好与全局代理也立即落库并作用于之后的请求；代理凭据的加密在命令层完成
-      await writeRequestPreferences(client, { timeout: appTimeout, limits });
+      await writeRequestPreferences(client, {
+        timeout: appTimeout,
+        limits,
+        curlBodyCompress,
+        curlLineLayout,
+      });
       await client.globalProxySet(proxy);
       // 外观五项一起落库；写库之外还要把值推给**当前已打开**的编辑面与等宽 CSS 面
       const nextAppearance = { fontFamily, fontSize, indentCount, indentType, wrap };
@@ -230,6 +249,9 @@ export function SettingsPanel({
       // 改动立即作用于之后的响应呈现，不需要重启（spec: ui-layout 配置生效）
       onPresentationChange?.(nextPresentation);
       applyEditorAppearance(nextAppearance);
+      // 两项 cURL 缺省也推给已挂出的消费方（cURL 标签与请求 Settings 行的显示）
+      applyCurlBodyCompress(curlBodyCompress);
+      applyCurlLineLayout(curlLineLayout);
       await load();
       return true;
     } catch (caught) {
@@ -250,6 +272,8 @@ export function SettingsPanel({
     indentCount !== baseline.indentCount ||
     indentType !== baseline.indentType ||
     wrap !== baseline.wrap ||
+    curlBodyCompress !== baseline.curlBodyCompress ||
+    curlLineLayout !== baseline.curlLineLayout ||
     JSON.stringify(proxy) !== JSON.stringify(baseline.proxy);
 
   // 编辑即自动保存（spec: 脚本的编辑与保存）：改动停止后落库。
@@ -273,6 +297,8 @@ export function SettingsPanel({
     indentCount,
     indentType,
     wrap,
+    curlBodyCompress,
+    curlLineLayout,
     proxy,
     baseline,
   ]);
@@ -430,6 +456,36 @@ export function SettingsPanel({
             }
           />
         </div>
+
+        {/* cURL 正文压缩的应用级缺省（spec: ui-layout「cURL 正文压缩」）：独立于「编辑器与
+            折行配置」那一节——它描述的是生成的命令，不是编辑面的观感；请求级可覆盖它。 */}
+        <label className="settings-row">
+          <span className="settings-name">cURL 正文压缩</span>
+          <input
+            className="switch"
+            type="checkbox"
+            role="switch"
+            aria-label="cURL 正文压缩"
+            data-testid="curl-body-compress"
+            checked={curlBodyCompress}
+            onChange={(event) => setCurlBodyCompress(event.target.checked)}
+          />
+        </label>
+
+        {/* cURL 命令布局的应用级缺省（spec: ui-layout「cURL 命令布局」）：开＝单行，
+            关＝缺省的多行；请求级可覆盖它。 */}
+        <label className="settings-row">
+          <span className="settings-name">cURL 单行</span>
+          <input
+            className="switch"
+            type="checkbox"
+            role="switch"
+            aria-label="cURL 单行"
+            data-testid="curl-line-layout"
+            checked={curlLineLayout === 'single'}
+            onChange={(event) => setCurlLineLayout(event.target.checked ? 'single' : 'multi')}
+          />
+        </label>
       </section>
 
       {/* 响应呈现配置（spec: ui-layout「设置模态的响应呈现配置」）：应用级偏好，

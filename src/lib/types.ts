@@ -102,10 +102,27 @@ export interface RequestSettings {
    * （见 design D8）。
    */
   wrap_lines?: WrapLinesOverride;
+  /**
+   * cURL 正文压缩的请求级覆盖（spec: ui-layout「cURL 正文压缩」）。缺省 / `inherit` =
+   * 跟随应用级缺省；与 `response_format` 同款：可选、不迁移。Rust 侧 `RequestSettings`
+   * 必须同步该字段，否则保存时会被丢弃。
+   */
+  curl_body_compress?: CurlBodyCompress;
+  /**
+   * cURL 命令布局的请求级覆盖（spec: ui-layout「cURL 命令布局」）。缺省 / `inherit` =
+   * 跟随应用级缺省；与 `response_format` 同款：可选、不迁移。
+   */
+  curl_line_layout?: CurlLineLayout;
 }
 
 /** 折行的请求级取值：跟全局走，或显式开 / 关。 */
 export type WrapLinesOverride = 'inherit' | 'on' | 'off';
+
+/** cURL 正文压缩的请求级取值：跟全局走，或显式压缩 / 不压缩。 */
+export type CurlBodyCompress = 'inherit' | 'compress' | 'raw';
+
+/** cURL 命令布局的请求级取值：跟全局走，或显式单行 / 多行。 */
+export type CurlLineLayout = 'inherit' | 'single' | 'multi';
 
 export interface SavedRequest {
   id: string;
@@ -336,9 +353,32 @@ export interface ImportSourceArgs {
 }
 
 export interface CurlCommand {
+  /** 多行布局的完整命令（段间以续行符连接）。 */
   command: string;
+  /**
+   * 命令分段（逐段已 shell-quote）。段间分隔由**生效布局**决定：多行
+   * `CURL_MULTILINE_SEPARATOR`、单行 `' '`——两处入口（cURL 标签与导入 / 导出模态）
+   * 都用 `joinCurlParts` 按同一份布局拼接（design D3）。
+   */
+  parts: string[];
   contains_secret: boolean;
   warnings: string[];
+}
+
+/** cURL 命令的两种呈现布局。 */
+export type CurlLayout = 'single' | 'multi';
+
+/** 多行布局的段间分隔符；与 Rust 侧 `interchange::curl::MULTILINE_SEPARATOR` 必须一致。 */
+export const CURL_MULTILINE_SEPARATOR = ' \\\n  ';
+
+/**
+ * 按布局把命令分段拼成完整命令。
+ *
+ * 两种布局共享同一份分段，因此参数与取值不会漂移；这是「单行 / 多行」唯一的实现处，
+ * cURL 标签与导入 / 导出模态都走它。
+ */
+export function joinCurlParts(parts: string[], layout: CurlLayout): string {
+  return parts.join(layout === 'multi' ? CURL_MULTILINE_SEPARATOR : ' ');
 }
 
 export interface SendRequestInput {

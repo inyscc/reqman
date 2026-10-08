@@ -2766,12 +2766,17 @@ iframe.preview {
   min-height: 0;
 }
 
+/* 命令文本块**始终软折行**（spec: cURL 快照标签）：它不跟随应用级的「折行」设置，也没有
+ * 自己的折行开关。`overflow-wrap: anywhere` 是必需的——单行布局下整条命令常常是一个没有
+ * 空格的超长 token（URL 里全是 `?a=1&b=2`），只靠 `pre-wrap` 它照样会横向溢出。
+ * 折行只改呈现：文本内容与「复制」得到的字符串不受影响。 */
 .curl-block .curl-command {
   flex: 1;
   width: 100%;
   min-height: 160px;
   overflow: auto;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* cURL 的动作行在正文上方、两个动作右对齐（spec: cURL 快照标签） */

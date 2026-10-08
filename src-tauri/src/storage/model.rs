@@ -581,6 +581,48 @@ impl Default for WrapLinesOverride {
     }
 }
 
+/// cURL 正文压缩的请求级覆盖（spec: ui-layout「cURL 正文压缩」）。
+///
+/// 与 [`WrapLinesOverride`] 同款：只是「选中了哪一档」。生效值（应用级缺省 + 本覆盖）
+/// 在生成 curl 命令时解析（见 `interchange::curl::resolve_compress`），后端只在那一刻用它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CurlBodyCompress {
+    /// 跟随应用级「cURL 正文压缩」缺省（缺省）。
+    Inherit,
+    /// 该请求压缩内嵌的 raw JSON 正文。
+    Compress,
+    /// 该请求不压缩内嵌正文。
+    Raw,
+}
+
+impl Default for CurlBodyCompress {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
+/// cURL 命令布局的请求级覆盖（spec: ui-layout「cURL 命令布局」）。
+///
+/// 与 [`WrapLinesOverride`] 同款：只是「选中了哪一档」。生效值的解析与呈现都在前端做，
+/// 后端只负责把它随请求存回来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CurlLineLayout {
+    /// 跟随应用级缺省（缺省）。
+    Inherit,
+    /// 单行：段与段之间以单个空格连接。
+    Single,
+    /// 多行：每段独立一行、以续行符连接。
+    Multi,
+}
+
+impl Default for CurlLineLayout {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
 /// 超时取值（spec: http-engine「请求级网络设置」）。
 ///
 /// 三态取代了原先的 `Option<u64>`：一个 `None` 同时承担着「跟随全局」与「没填」，
@@ -686,6 +728,10 @@ pub struct RequestSettings {
     pub response_format: ResponseFormatOverride,
     /// 折行的请求级覆盖；缺省 = 跟随应用级缺省。
     pub wrap_lines: WrapLinesOverride,
+    /// cURL 正文压缩的请求级覆盖；缺省 = 跟随应用级缺省（spec: ui-layout「cURL 正文压缩」）。
+    pub curl_body_compress: CurlBodyCompress,
+    /// cURL 命令布局的请求级覆盖；缺省 = 跟随应用级缺省（spec: ui-layout「cURL 命令布局」）。
+    pub curl_line_layout: CurlLineLayout,
 }
 
 impl Default for RequestSettings {
@@ -699,6 +745,8 @@ impl Default for RequestSettings {
             proxy: None,
             response_format: ResponseFormatOverride::Inherit,
             wrap_lines: WrapLinesOverride::Inherit,
+            curl_body_compress: CurlBodyCompress::Inherit,
+            curl_line_layout: CurlLineLayout::Inherit,
         }
     }
 }
@@ -765,11 +813,45 @@ pub mod setting_keys {
     pub const RESPONSE_SIZE_LIMIT: &str = "response_size_limit_bytes";
     /// 超过该体积不再提供结构化解析视图（字节）。
     pub const PRETTY_PRINT_THRESHOLD: &str = "pretty_print_threshold_bytes";
+    /// 应用级「cURL 正文压缩」缺省（`"true"` / `"false"`；缺省开）。
+    pub const CURL_BODY_COMPRESS: &str = "curl_body_compress";
+    /// 应用级「cURL 单行」缺省（`"true"` / `"false"`；缺省关，即多行）。
+    ///
+    /// 这一项 Rust 侧不读（布局由前端解析与呈现），键仍落在这里与「压缩」并列——
+    /// 两条 cURL 配置的作用域与命名因此一致。
+    pub const CURL_LINE_LAYOUT: &str = "curl_line_layout";
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_settings_without_curl_body_compress_fall_back_to_inherit() {
+        // 旧数据没有这个字段：`#[serde(default)]` 必须把它读成「跟随全局」，
+        // 否则升级后老请求会拿到一个错误的显式值（spec: ui-layout「cURL 正文压缩」）。
+        let mut value = serde_json::to_value(RequestSettings::default()).expect("序列化请求设置");
+        value
+            .as_object_mut()
+            .expect("请求设置是对象")
+            .remove("curl_body_compress");
+
+        let settings: RequestSettings = serde_json::from_value(value).expect("反序列化请求设置");
+        assert_eq!(settings.curl_body_compress, CurlBodyCompress::Inherit);
+    }
+
+    #[test]
+    fn request_settings_without_curl_line_layout_fall_back_to_inherit() {
+        // 同款：旧数据没有布局这一项时读成「跟随全局」，而不是某个错误的显式布局
+        let mut value = serde_json::to_value(RequestSettings::default()).expect("序列化请求设置");
+        value
+            .as_object_mut()
+            .expect("请求设置是对象")
+            .remove("curl_line_layout");
+
+        let settings: RequestSettings = serde_json::from_value(value).expect("反序列化请求设置");
+        assert_eq!(settings.curl_line_layout, CurlLineLayout::Inherit);
+    }
 
     #[test]
     fn scope_priority_matches_spec_order() {

@@ -362,8 +362,8 @@ pub fn request_ids(db: &Db, collection_id: &str) -> AppResult<Vec<Id>> {
 mod tests {
     use super::*;
     use crate::storage::model::{
-        ApiKeyLocation, BodyKind, KeyValue, RawLanguage, RequestBody, ResponseFormatOverride,
-        TimeoutSetting, WrapLinesOverride,
+        ApiKeyLocation, BodyKind, CurlBodyCompress, CurlLineLayout, KeyValue, RawLanguage,
+        RequestBody, ResponseFormatOverride, TimeoutSetting, WrapLinesOverride,
     };
     use crate::error::ErrorCode;
     use crate::storage::{variables, workspace, Db};
@@ -415,6 +415,10 @@ mod tests {
                 // 折行的请求级覆盖同样：它住在 settings 里，Rust 侧漏掉就会被静默丢弃
                 // （spec: ui-layout「折行」；design D8）
                 wrap_lines: WrapLinesOverride::Off,
+                // cURL 正文压缩的请求级覆盖同理（spec: ui-layout「cURL 正文压缩」）
+                curl_body_compress: CurlBodyCompress::Raw,
+                // cURL 命令布局的请求级覆盖同理（spec: ui-layout「cURL 命令布局」）
+                curl_line_layout: CurlLineLayout::Single,
                 ..RequestSettings::default()
             };
             request.pre_request_script = Some("console.log('pre')".into());
@@ -457,6 +461,16 @@ mod tests {
             restored.settings.wrap_lines,
             WrapLinesOverride::Off,
             "请求级折行必须经保存-读回仍在（否则用户设的值会静默回到跟随全局）"
+        );
+        assert_eq!(
+            restored.settings.curl_body_compress,
+            CurlBodyCompress::Raw,
+            "请求级压缩必须经保存-读回仍在（否则用户设的「不压缩」会静默回到跟随全局）"
+        );
+        assert_eq!(
+            restored.settings.curl_line_layout,
+            CurlLineLayout::Single,
+            "请求级布局必须经保存-读回仍在（否则用户设的「单行」会静默回到跟随全局）"
         );
         assert_eq!(restored.pre_request_script.as_deref(), Some("console.log('pre')"));
         assert_eq!(

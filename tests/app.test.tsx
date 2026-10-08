@@ -5,6 +5,7 @@ import { filterTrees, WorkspaceTree } from '../src/components/WorkspaceTree';
 import type { Commands } from '../src/lib/commands';
 import { applyTreeMove } from '../src/lib/treeMoves';
 import {
+  CURL_MULTILINE_SEPARATOR,
   defaultSettings,
   emptyAuth,
   emptyBody,
@@ -148,6 +149,7 @@ function importOutcome(overrides: Partial<ImportOutcome> = {}): ImportOutcome {
 function curlCommand(overrides: Partial<CurlCommand> = {}): CurlCommand {
   return {
     command: "curl -X GET 'https://api.test/users'",
+    parts: ["curl -X GET", "'https://api.test/users'"],
     contains_secret: false,
     warnings: [],
     ...overrides,
@@ -6034,5 +6036,284 @@ describe('复制目录与未保存改动的阻挡', () => {
     expect(duplicate).not.toHaveBeenCalled();
     const dialog = await screen.findByRole('dialog', { name: '无法复制' });
     expect(within(dialog).getByText('我的请求')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 并发发送：发送态按标签隔离（change: rework-curl-output-and-send-state）
+// spec: 地址栏 / http-engine「请求取消」/ ui-layout「请求级错误提示」「底部状态条」
+//       / pm-script-runtime「脚本来源的可执行性门禁」
+// ---------------------------------------------------------------------------
+
+describe('并发发送：发送态按标签隔离', () => {
+  const other = makeRequest({ id: 'r2', name: '另一个请求', url: 'https://api.test/other' });
+
+  /**
+   * 逐条挂起的假发送：第 n 次调用不落定，由测试决定何时兑现或失败——只有这样才有机会在
+   * 两条请求同时在飞时观察界面。
+   */
+  function deferredSends() {
+    const pending: {
+      resolve: (value: ResponsePayload) => void;
+      reject: (reason: unknown) => void;
+      attemptId: string | undefined;
+    }[] = [];
+    const sendRequest = vi.fn(
+      async (input: { attempt_id?: string | null }) =>
+        new Promise<ResponsePayload>((resolve, reject) => {
+          pending.push({ resolve, reject, attemptId: input.attempt_id ?? undefined });
+        }),
+    );
+    return { sendRequest, pending };
+  }
+
+  const urlField = () => (screen.getByLabelText('请求地址') as HTMLInputElement).value;
+
+  /** 打开树里的第二条请求。 */
+  async function openOther() {
+    fireEvent.click(tree().getByText('另一个请求'));
+    await waitFor(() => expect(urlField()).toBe('https://api.test/other'));
+  }
+
+  /** 回到第一条请求。 */
+  async function openFirst() {
+    fireEvent.click(tree().getByText('我的请求'));
+    await waitFor(() => expect(urlField()).toBe('https://api.test/users'));
+  }
+
+  it('A 在飞时切到 B：B 的地址栏仍是「发送」，响应区没有遮罩（spec: 地址栏）', async () => {
+    const { client } = harness({ extraRequest: other });
+    const { sendRequest, pending } = deferredSends();
+    client.sendRequest = sendRequest as never;
+
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('cancel-send');
+
+    await openOther();
+
+    expect(screen.getByText('发送')).toBeTruthy();
+    expect(screen.queryByTestId('cancel-send')).toBeNull();
+    expect(screen.queryByTestId('response-sending')).toBeNull();
+    expect(screen.queryByTestId('response-loading')).toBeNull();
+
+    await act(async () => pending[0].resolve(response()));
+  });
+
+  it('两条请求可同时在飞，各写回自己的响应（spec: 请求取消）', async () => {
+    const { client } = harness({ extraRequest: other });
+    const { sendRequest, pending } = deferredSends();
+    client.sendRequest = sendRequest as never;
+
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('cancel-send');
+
+    await openOther();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('cancel-send');
+    expect(sendRequest).toHaveBeenCalledTimes(2);
+
+    // 兑现 A：响应落在 A 自己的标签上；B 仍在飞
+    await act(async () => pending[0].resolve(response({ status: 201, status_text: 'Created' })));
+
+    await openFirst();
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toContain('Created'));
+
+    await openOther();
+    expect(screen.getByTestId('cancel-send')).toBeTruthy();
+
+    await act(async () => pending[1].resolve(response()));
+  });
+
+  it('取消只作用于那一条：后开的 B 不夺走 A 的取消能力（spec: 请求取消）', async () => {
+    const { client } = harness({ extraRequest: other });
+    const { sendRequest, pending } = deferredSends();
+    // 真实后端会让被撤销的那条以 cancelled 结束，否则界面永远停在「发送中」
+    const cancelSend = vi.fn(async () => {
+      pending[0]?.reject({ code: 'cancelled', message: '请求已被取消' });
+      return 1;
+    });
+    client.sendRequest = sendRequest as never;
+    client.cancelSend = cancelSend as never;
+
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('cancel-send');
+
+    await openOther();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('cancel-send');
+
+    // 回到 A 取消它：撤销的是 A 的会话，而不是「最后一次发送」
+    await openFirst();
+    await screen.findByTestId('cancel-send');
+    fireEvent.click(screen.getByTestId('cancel-send'));
+
+    await waitFor(() => expect(cancelSend).toHaveBeenCalledTimes(1));
+    expect(cancelSend.mock.calls[0][0]).toBe(pending[0].attemptId);
+
+    // A 回到空闲且不弹错误；B 仍在飞
+    await waitFor(() => expect(screen.getByText('发送')).toBeTruthy());
+    expect(screen.queryByTestId('app-error')).toBeNull();
+
+    await openOther();
+    expect(await screen.findByTestId('cancel-send')).toBeTruthy();
+  });
+
+  it('发送错误按标签归属：别处看不到，切回来仍在（spec: 请求级错误提示）', async () => {
+    const { client } = harness({ extraRequest: other });
+    client.sendRequest = vi.fn(async () => {
+      throw { code: 'dns_failure', message: 'failed to lookup address' };
+    }) as never;
+
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    expect((await screen.findByTestId('app-error')).textContent).toContain(
+      'failed to lookup address',
+    );
+
+    await openOther();
+    expect(screen.queryByTestId('app-error')).toBeNull();
+
+    await openFirst();
+    expect((await screen.findByTestId('app-error')).textContent).toContain(
+      'failed to lookup address',
+    );
+  });
+
+  it('门禁按标签归属：两条各自确认，「允许执行并继续」只继续触发它的那条', async () => {
+    const { client } = harness({ extraRequest: other, scriptGateAllowed: false });
+    client.sendRequest = vi.fn(async () => response()) as never;
+
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('script-gate');
+
+    // 切到 B：A 的门禁不在这里出现
+    await openOther();
+    expect(screen.queryByTestId('script-gate')).toBeNull();
+
+    // B 自己也请求确认
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('script-gate');
+
+    fireEvent.click(screen.getByText('允许执行（记住此集合）'));
+    await waitFor(() => expect(client.sendRequest).toHaveBeenCalledTimes(1));
+
+    // A 的门禁仍待用户选择
+    await openFirst();
+    expect(await screen.findByTestId('script-gate')).toBeTruthy();
+  });
+
+  it('关闭在发的标签会撤销该次发送（spec: 请求取消 / design D8）', async () => {
+    const { client } = harness({ extraRequest: other });
+    const { sendRequest, pending } = deferredSends();
+    const cancelSend = vi.fn(async () => {
+      pending[0]?.reject({ code: 'cancelled', message: '请求已被取消' });
+      return 1;
+    });
+    client.sendRequest = sendRequest as never;
+    client.cancelSend = cancelSend as never;
+
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('cancel-send');
+
+    fireEvent.click(screen.getByLabelText('关闭标签'));
+
+    await waitFor(() => expect(cancelSend).toHaveBeenCalledTimes(1));
+    expect(cancelSend.mock.calls[0][0]).toBe(pending[0].attemptId);
+
+    // 标签被移除，且不进入错误态
+    await waitFor(() => expect(screen.queryByLabelText('请求地址')).toBeNull());
+    expect(screen.queryByTestId('app-error')).toBeNull();
+  });
+});
+
+describe('cURL 命令布局的生效值（spec: ui-layout「cURL 命令布局」）', () => {
+  it('请求级设为单行时，cURL 标签与导入 / 导出模态里的命令都是单行且内容一致', async () => {
+    const parts = ["curl -X GET", "'https://api.test/users'", "-H 'A: 1'"];
+    const single = parts.join(' ');
+    const { client } = harness({
+      request: makeRequest({
+        settings: { ...defaultSettings(), curl_line_layout: 'single' },
+      }),
+      curlResult: {
+        command: parts.join(CURL_MULTILINE_SEPARATOR),
+        parts,
+        contains_secret: false,
+        warnings: [],
+      },
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    // 请求编辑器：cURL 标签按生效布局（单行）呈现
+    fireEvent.click(screen.getByText('cURL'));
+    await waitFor(() =>
+      expect((screen.getByLabelText('curl 命令') as HTMLTextAreaElement).value).toBe(single),
+    );
+
+    // 导入 / 导出模态：同一份输入、同一份生效布局，两处内容一致
+    fireEvent.click(await screen.findByText('导入/导出'));
+    fireEvent.click(screen.getByText('导出 curl'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('curl-output').querySelector('pre')?.textContent).toBe(single),
+    );
+  });
+});
+
+describe('底部状态条：忙碌文案只随在飞发送（spec: 底部状态条）', () => {
+  it('保存挂住时状态条不显示「发送中」', async () => {
+    const { client } = harness();
+    vi.spyOn(client, 'requestSave').mockReturnValue(new Promise<SavedRequest>(() => {}));
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/edited' },
+    });
+    await screen.findByText('未保存');
+    saveWithKeyboard();
+
+    await waitFor(() => expect(client.requestSave).toHaveBeenCalled());
+    expect(screen.getByTestId('status-bar').textContent).not.toContain('发送中');
+  });
+
+  it('有发送在飞时显示「发送中」，两条都结束后回到就绪', async () => {
+    const other = makeRequest({ id: 'r2', name: '另一个请求', url: 'https://api.test/other' });
+    const { client } = harness({ extraRequest: other });
+    const pending: { resolve: (value: ResponsePayload) => void }[] = [];
+    client.sendRequest = vi.fn(
+      async () => new Promise<ResponsePayload>((resolve) => pending.push({ resolve })),
+    ) as never;
+
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('cancel-send');
+    expect(screen.getByTestId('status-bar').textContent).toContain('发送中');
+
+    fireEvent.click(tree().getByText('另一个请求'));
+    await waitFor(() => expect(screen.getByText('发送')).toBeTruthy());
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('cancel-send');
+    expect(screen.getByTestId('status-bar').textContent).toContain('发送中');
+
+    await act(async () => {
+      pending[0].resolve(response());
+      pending[1].resolve(response());
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId('status-bar').textContent).not.toContain('发送中'),
+    );
   });
 });

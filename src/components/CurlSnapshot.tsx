@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { describeError } from '../lib/commands';
-import type { CurlCommand } from '../lib/types';
+import { joinCurlParts, type CurlCommand, type CurlLayout } from '../lib/types';
 
 export interface CurlSnapshotState {
   command: string;
@@ -33,11 +33,17 @@ const EMPTY: CurlSnapshotState = {
  * `requestKey` 也要参与触发：内层标签不会因为换了请求而复位（从树里打开另一条请求时
  * `innerTab` 仍停在 cURL），只盯"标签切换"会把上一条请求的命令留在屏幕上。因此生成
  * 的触发条件是「是否停在该标签」**且**「当前请求的身份」。
+ *
+ * 布局是**配置**（应用级缺省 + 请求级三态，见 requestPreferences 的 `resolveCurlLineLayout`），
+ * 由宿主解析后经 `layout` 传入：本钩子只负责按它把后端给的**同一份分段**拼出来，命令旁
+ * 不再有任何开关（spec: ui-layout「cURL 命令布局」）。
  */
 export function useCurlSnapshot(
   onGenerate: () => Promise<CurlCommand>,
   active: boolean,
   requestKey: string,
+  /** 命令布局的生效值。改动它只重排既有分段，不重新请求后端。 */
+  layout: CurlLayout,
 ): CurlSnapshot {
   const [state, setState] = useState<CurlSnapshotState>(EMPTY);
   const copiedTimer = useRef<number | null>(null);
@@ -46,6 +52,14 @@ export function useCurlSnapshot(
   generate.current = onGenerate;
   /** 作废在途生成：离开标签或换了请求后，旧结果不许再写回。 */
   const sequence = useRef(0);
+  /**
+   * 命令的**分段**（后端已 shell-quote）。两种布局都从它拼出来，因此布局改动不会让取值
+   * 发生任何漂移（design D3）。
+   */
+  const parts = useRef<string[]>([]);
+  /** 生效布局经 ref 读取：`load` 不因它改身份（否则改布局会触发一次重新生成）。 */
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
 
   const load = useCallback(async () => {
     const current = ++sequence.current;
@@ -53,8 +67,9 @@ export function useCurlSnapshot(
     try {
       const result = await generate.current();
       if (current !== sequence.current) return;
+      parts.current = result.parts;
       setState({
-        command: result.command,
+        command: joinCurlParts(result.parts, layoutRef.current),
         warnings: result.warnings,
         error: null,
         busy: false,
@@ -63,6 +78,7 @@ export function useCurlSnapshot(
     } catch (caught) {
       // 生成失败要说出来：静默失败会让人以为这段命令本来就是空的
       if (current !== sequence.current) return;
+      parts.current = [];
       setState({ ...EMPTY, error: describeError(caught).message });
     }
   }, []);
@@ -71,11 +87,23 @@ export function useCurlSnapshot(
     if (!active) {
       // 离开标签即清空：下次进来是重新生成，上一次的编辑不保留
       sequence.current += 1;
+      parts.current = [];
       setState(EMPTY);
       return;
     }
     void load();
   }, [active, requestKey, load]);
+
+  /**
+   * 生效布局改动（用户在 Settings 里改了它）：按同一份分段重排，不重新生成。
+   *
+   * 这只是呈现方式的切换，因此**不会**把上一次的编辑内容带出去——改动布局的入口不在
+   * 命令旁边（没有一次性开关），用户改的是「以后都这样」的配置。
+   */
+  useEffect(() => {
+    if (!active || parts.current.length === 0) return;
+    setState((current) => ({ ...current, command: joinCurlParts(parts.current, layout) }));
+  }, [active, layout]);
 
   useEffect(
     () => () => {
@@ -119,9 +147,9 @@ export function CurlPanel(props: CurlSnapshot) {
         </div>
       )}
 
-      {/* 动作行在正文上方（spec: cURL 快照标签）：原先那句「可以就地修改这段命令」
-          的说明文案已删除——
-          每次进入即重新生成、编辑不写回请求，由行为本身表达就够了。 */}
+      {/* 动作行在正文上方（spec: cURL 快照标签）：只有「重新生成」「复制」两个动作。
+          布局与压缩都是**配置**，只有应用级 + 请求级两处入口——配置放成命令旁的一次性
+          开关，用户改过一次、下次进来又回到配置值，反而难以察觉。 */}
       <div className="row curl-actions">
         <span className="grow" />
         <button

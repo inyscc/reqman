@@ -1,4 +1,12 @@
-import { Fragment, useRef, useState, type FocusEvent, type ReactNode, type RefObject } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useRef,
+  useState,
+  type FocusEvent,
+  type ReactNode,
+  type RefObject,
+} from 'react';
 import { formatRawBody, type RawFormatMode } from '../lib/editing';
 import { currentEditorAppearance, indentUnit } from '../lib/editorAppearance';
 import { isEmptyFormField, isEmptyKeyValue } from '../lib/rows';
@@ -21,7 +29,12 @@ import type {
   RawLanguage,
   SavedRequest,
 } from '../lib/types';
-import { DEFAULT_TIMEOUT_MS } from '../lib/requestPreferences';
+import {
+  DEFAULT_TIMEOUT_MS,
+  currentCurlLineLayout,
+  resolveCurlLineLayout,
+  subscribeCurlLineLayout,
+} from '../lib/requestPreferences';
 import { ProxyConfigRows } from './ProxyConfigRows';
 
 /** 超时的三档选择；判别标签与 `TimeoutSetting` 一致，数值另由输入项承载。 */
@@ -496,10 +509,18 @@ export function RequestEditor({
   };
 
   /**
-   * cURL 快照（spec: cURL 快照标签）：停在该标签时按当前请求生成；离开标签即清空，
-   * 编辑不跨标签留存；换了请求同样重新生成（`draft.id` 参与触发）。
+   * 命令布局的**生效值**：应用级缺省（进程内当前值，随设置模态改动更新）+ 本请求的覆盖
+   * （spec: ui-layout「cURL 命令布局」）。解析规则只在 `resolveCurlLineLayout` 一处。
    */
-  const curl = useCurlSnapshot(onCurl, tab === 'curl', draft.id);
+  const [layoutDefault, setLayoutDefault] = useState(currentCurlLineLayout);
+  useEffect(() => subscribeCurlLineLayout(setLayoutDefault), []);
+  const curlLayout = resolveCurlLineLayout(layoutDefault, draft.settings.curl_line_layout);
+
+  /**
+   * cURL 快照（spec: cURL 快照标签）：停在该标签时按当前请求生成；离开标签即清空，
+   * 编辑不跨标签留存；换了请求同样重新生成（`draft.id` 参与触发）。布局取自配置。
+   */
+  const curl = useCurlSnapshot(onCurl, tab === 'curl', draft.id, curlLayout);
 
   /**
    * Minify / Beautify 的失败原因（spec: raw 正文的格式化动作）。
@@ -1372,6 +1393,53 @@ function SettingsEditor({
             onChange({
               ...settings,
               wrap_lines: value === 'on' ? 'on' : value === 'off' ? 'off' : 'inherit',
+            })
+          }
+        />
+      </div>
+
+      {/* cURL 正文压缩的请求级覆盖（spec: ui-layout「cURL 正文压缩」）：与「折行」同款三态，
+          「跟随全局」是缺省；改动随请求保存并计入未保存守卫。它与 cURL 标签动作行的快捷
+          开关是**同一份取值**（快捷开关把取值落成显式值，不另立一份）。 */}
+      <div className="settings-row">
+        <span className="settings-name">cURL 正文压缩</span>
+        <Dropdown
+          label="cURL 正文压缩"
+          testId="request-curl-body-compress"
+          value={settings.curl_body_compress ?? 'inherit'}
+          options={[
+            { value: 'inherit', label: '跟随全局' },
+            { value: 'compress', label: '压缩' },
+            { value: 'raw', label: '不压缩' },
+          ]}
+          onChange={(value) =>
+            onChange({
+              ...settings,
+              curl_body_compress:
+                value === 'compress' ? 'compress' : value === 'raw' ? 'raw' : 'inherit',
+            })
+          }
+        />
+      </div>
+
+      {/* cURL 命令布局的请求级覆盖（spec: ui-layout「cURL 命令布局」）：与「压缩」同款三态，
+          「跟随全局」是缺省；改动随请求保存并计入未保存守卫。 */}
+      <div className="settings-row">
+        <span className="settings-name">cURL 命令布局</span>
+        <Dropdown
+          label="cURL 命令布局"
+          testId="request-curl-line-layout"
+          value={settings.curl_line_layout ?? 'inherit'}
+          options={[
+            { value: 'inherit', label: '跟随全局' },
+            { value: 'single', label: '单行' },
+            { value: 'multi', label: '多行' },
+          ]}
+          onChange={(value) =>
+            onChange({
+              ...settings,
+              curl_line_layout:
+                value === 'single' ? 'single' : value === 'multi' ? 'multi' : 'inherit',
             })
           }
         />

@@ -43,6 +43,13 @@ import {
   type EditorAppearance,
 } from './lib/editorAppearance';
 import {
+  DEFAULT_CURL_BODY_COMPRESS,
+  DEFAULT_CURL_LINE_LAYOUT,
+  applyCurlBodyCompress,
+  applyCurlLineLayout,
+  readRequestPreferences,
+} from './lib/requestPreferences';
+import {
   DEFAULT_PRESENTATION,
   readPresentation,
   type ResponsePresentation,
@@ -148,6 +155,17 @@ interface EntitySessionTab {
 }
 
 type SessionTab = RequestSessionTab | EntitySessionTab;
+
+/**
+ * 一次**在飞**的发送会话（spec: http-engine「请求取消」）。
+ *
+ * 它自带取消出口与作废标志，不再挂在应用级单例上：多条请求可以同时在飞，每条都能被
+ * 单独取消，取消不会退化成「取消最后一次」。
+ */
+interface SendAttempt extends PhaseCancellation {
+  /** 立刻兑现前端的取消（脚本段据此收手）；后端撤销另发 `cancel_send`。 */
+  cancel: () => void;
+}
 
 const requestTabId = (requestId: string): string => `request:${requestId}`;
 const entityTabId = (kind: EntityKind, id: string): string => `entity:${kind}:${id}`;
@@ -379,18 +397,36 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [preview, setPreview] = useState<RequestPreview | null>(null);
   const [busy, setBusy] = useState(false);
   /**
-   * 正在发送的会话（spec: 地址栏）。它与 `busy` 分开：`busy` 还被保存请求、保存实体脚本
-   * 与改名共用，那些状态下该出现的是禁用的「发送」，不是「取消」。
+   * 在飞的发送会话，**按标签 key**（spec: 地址栏 / http-engine「请求取消」）。
+   *
+   * 多条请求可以同时在飞：每条会话自带取消出口与作废标志，取消因此精确到它自己，不会
+   * 退化成「取消最后一次」。它与 `busy` 分开：`busy` 还被保存请求、保存实体脚本与改名
+   * 共用，那些状态下该出现的是禁用的「发送」，不是「取消」。
    */
-  const [sending, setSending] = useState<{ key: string; attemptId: string } | null>(null);
-  /** 当前发送会话的取消出口；它负责把前端这条（脚本段）**立刻**兑现。 */
-  const cancelAttemptRef = useRef<(() => void) | null>(null);
-  const attemptCancelledRef = useRef(false);
+  const [sending, setSending] = useState<Record<string, SendAttempt>>({});
+  /**
+   * 发送相关的错误反馈，**按标签 key** 归属（spec: ui-layout「请求级错误提示」）。
+   *
+   * 与全局的 `error` 并存：后者承载保存失败、树操作失败等与某次发送无关的消息。
+   */
+  const [sendErrors, setSendErrors] = useState<Record<string, string>>({});
+  /** `sending` 的镜像：经 ref 触达的地方（关闭标签、快捷键）要读到最新的一份。 */
+  const sendingRef = useRef<Record<string, SendAttempt>>({});
+  sendingRef.current = sending;
+  /**
+   * 关闭标签时撤销它的在飞发送（spec: ui-layout「cURL 快照标签」无关；见 http-engine
+   * 「请求取消」与 design D8）。`removeTabsWhere` 的依赖刻意留空，因此出口经 ref 触达。
+   */
+  const cancelOnRemoveRef = useRef<(key: string) => void>(() => {});
   const [error, setError] = useState<string | null>(null);
-  /** 待确认的脚本门禁；非空时暂停发送，等用户在界面上做出选择（任务 9.3）。 */
-  const [scriptGate, setScriptGate] = useState<{ collectionId: string; name: string } | null>(
-    null,
-  );
+  /**
+   * 待确认的脚本门禁（任务 9.3），**按标签 key**：并发时两条发送各自的门禁互不覆盖，
+   * 「允许执行并继续」也重发那一条而不是当前激活的请求
+   * （spec: pm-script-runtime「脚本来源的可执行性门禁」）。
+   */
+  const [scriptGates, setScriptGates] = useState<
+    Record<string, { collectionId: string; name: string }>
+  >({});
   /** 集合/文件夹脚本自动保存的就地状态（spec: 脚本的编辑与保存）。 */
   const [entitySave, setEntitySave] = useState<({ key: string } & EntitySaveStatus) | null>(null);
   const [environments, setEnvironments] = useState<Environment[]>([]);
@@ -478,6 +514,15 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const tab: Tab = activeRequestTab?.innerTab ?? 'params';
   const response = activeRequestTab?.response ?? null;
   const scriptReport = activeRequestTab?.scriptReport ?? null;
+  /**
+   * 当前激活标签是否在发送（spec: 地址栏）。判定按标签 key——别的请求在飞 SHALL NOT 让
+   * 本请求的地址栏变成「取消」，也不该让它的响应区出现遮罩。
+   */
+  const activeSending = activeTabKey !== null && sending[activeTabKey] !== undefined;
+  /** 当前激活标签的发送错误（spec: ui-layout「请求级错误提示」）。 */
+  const activeSendError = activeTabKey !== null ? (sendErrors[activeTabKey] ?? null) : null;
+  /** 当前激活标签的门禁提示：只有触发它的那条请求在看着时才呈现。 */
+  const activeScriptGate = activeTabKey !== null ? (scriptGates[activeTabKey] ?? null) : null;
   const entityDraft = activeEntityTab?.entity ?? null;
   /** 树中选中的集合/文件夹（脚本编辑入口）；选中请求时为 null。 */
   const selectedEntity: EntitySelection | null = activeEntityTab
@@ -532,6 +577,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     const current = tabsRef.current;
     const kept = current.filter((item) => !predicate(item));
     if (kept.length === current.length) return;
+
+    // 被移除的标签若还在发送，撤销它那一次（结果丢弃）——否则会出现「界面已没有该请求、
+    // 后台仍在跑并写库」的悬挂（design D8）。
+    for (const item of current) {
+      if (predicate(item)) cancelOnRemoveRef.current(item.id);
+    }
 
     const removedActiveIndex = current.findIndex(
       (item) => predicate(item) && item.id === activeKeyRef.current,
@@ -895,6 +946,21 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   // 订阅这份外观：设置面保存时也会 `applyEditorAppearance`，因此不需要额外的回写通道，
   // 响应正文的缩进与折行缺省就会跟着变（不改这处的话，改设置要重开请求才生效）。
   useEffect(() => subscribeEditorAppearance(setEditorAppearance), []);
+
+  // 两项 cURL 缺省（正文压缩、命令布局）同样是应用级的（不随工作区走）：启动读一次即生效。
+  // cURL 标签与请求 Settings 行的显示都读这份进程内当前值，设置模态保存时会再 apply 一次
+  // （同 editorAppearance 的回写通道）。
+  useEffect(() => {
+    void readRequestPreferences(client)
+      .then((value) => {
+        applyCurlBodyCompress(value.curlBodyCompress);
+        applyCurlLineLayout(value.curlLineLayout);
+      })
+      .catch(() => {
+        applyCurlBodyCompress(DEFAULT_CURL_BODY_COMPRESS);
+        applyCurlLineLayout(DEFAULT_CURL_LINE_LAYOUT);
+      });
+  }, [client]);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -1414,46 +1480,50 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
    * 沙箱再等回调」：`disposeContext` 的注释记着同一个事实，uvm 终止 Worker 之后回调可能
    * 永不触发，那样发送态就卡在「发送中」了。
    *
-   * 标识带随机后缀，避免同一毫秒内的两次发送撞号；脚本内的请求按它归组。
+   * 标识带随机后缀，避免同一毫秒内的两次发送撞号；脚本内的请求按它归组。取消出口与作废
+   * 标志都落在这一个对象上，因此并发时各条互不影响。
    */
-  const openAttempt = (): PhaseCancellation => {
+  const openAttempt = (): SendAttempt => {
     let fire: () => void = () => {};
     const signal = new Promise<void>((resolve) => {
       fire = resolve;
     });
-
-    attemptCancelledRef.current = false;
-    cancelAttemptRef.current = () => {
-      attemptCancelledRef.current = true;
-      fire();
-    };
+    let cancelled = false;
 
     return {
       attemptId: `attempt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       signal,
-      isCancelled: () => attemptCancelledRef.current,
+      isCancelled: () => cancelled,
+      cancel: () => {
+        cancelled = true;
+        fire();
+      },
     };
   };
 
-  /** 一次发送的收尾：发送态与取消出口一起复位。正常结束与取消走同一条路。 */
-  const finishSend = () => {
-    cancelAttemptRef.current = null;
-    setSending(null);
-    setBusy(false);
+  /** 一次发送的收尾：只收这一条会话，别的在飞发送不受影响。正常结束与取消走同一条路。 */
+  const finishSend = (key: string) => {
+    setSending((previous) => {
+      if (!(key in previous)) return previous;
+      const next = { ...previous };
+      delete next[key];
+      return next;
+    });
   };
 
   /**
-   * 取消当前发送：后端撤销该会话下的全部在飞请求（含脚本内发出的那些），前端让脚本段
-   * 立刻兑现。
+   * 取消某条发送：后端撤销该会话下的全部在飞请求（含脚本内发出的那些），前端让脚本段
+   * 立刻兑现。它作用于**那一条**会话——并发时取消 A 不会碰到 B。
    *
    * 不抢答结果归属——本次发送由被撤销的请求自己以 `cancelled` 结束。撤销本身失败也不弹错：
    * 发送仍会以自己的结果收场，只是晚一点。
    */
-  const cancelSend = async () => {
-    const attempt = sending;
+  const cancelSend = async (key: string | null) => {
+    if (key === null) return;
+    const attempt = sendingRef.current[key];
     if (!attempt) return;
 
-    cancelAttemptRef.current?.();
+    attempt.cancel();
 
     try {
       await client.cancelSend(attempt.attemptId);
@@ -1462,15 +1532,51 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     }
   };
 
+  // 关闭标签走同一条撤销路径（`removeTabsWhere` 的依赖留空，因此出口经 ref 触达）
+  cancelOnRemoveRef.current = (key) => {
+    void cancelSend(key);
+  };
+
+  /** 清掉某条标签的门禁提示（门禁按标签存，别的标签的不受影响）。 */
+  const clearScriptGate = (key: string) => {
+    setScriptGates((current) => {
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+
+  /** 写入 / 清除某条标签的发送错误（spec: ui-layout「请求级错误提示」）。 */
+  const setSendError = (key: string, message: string | null) => {
+    setSendErrors((previous) => {
+      if (message === null) {
+        if (!(key in previous)) return previous;
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      }
+      return { ...previous, [key]: message };
+    });
+  };
+
   /**
    * `skipScripts` 为真时跳过全部脚本只发请求——门禁被拒绝后的「不执行脚本，仍发送」。
+   *
+   * `keyOverride` 让门禁的「允许执行并继续」重发**触发它的那一条**，而不是当前激活的请求；
+   * 缺省发当前激活的请求。
    */
-  const performSend = async (skipScripts: boolean) => {
-    // 发送永远作用于当前激活的请求标签；响应与脚本报告写回它自己的标签
-    const key = activeRequestTab?.id;
-    if (!key || !draft) return;
+  const performSend = async (skipScripts: boolean, keyOverride?: string | null) => {
+    const key = keyOverride ?? activeKeyRef.current;
+    const tab = key ? tabsRef.current.find((item) => item.id === key) : undefined;
+    if (!key || !tab || tab.kind !== 'request') return;
+    // 发送作用于**这一条**标签：草稿、脏状态、响应与脚本报告都写回它自己
+    const draft = tab.draft;
+    const dirty = tab.dirty;
     setError(null);
-    setScriptGate(null);
+    setSendError(key, null);
+    // 只清掉这一条自己的门禁；并发时别的发送的门禁不受影响
+    clearScriptGate(key);
 
     // 解析一次请求，供脚本构造 `pm.request` 与前置阶段的 Cookie 目标使用。
     //
@@ -1488,13 +1594,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     try {
       resolved = await client.variablesPreview(sendInput, true);
     } catch (caught) {
-      setError(describeError(caught).message);
+      setSendError(key, describeError(caught).message);
       return;
     }
 
     const attempt = openAttempt();
-    setBusy(true);
-    setSending({ key, attemptId: attempt.attemptId });
+    // 只登记这一条会话；`busy` 不再由发送置位（它留给保存与改名）
+    setSending((previous) => ({ ...previous, [key]: attempt }));
     patchRequestTab(key, (item) => ({ ...item, scriptReport: null }));
 
     // 三级脚本：集合 → 文件夹 → 请求（任务 2.4）。集合与文件夹的脚本挂在实体上，
@@ -1531,10 +1637,14 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       if (target && !skipScripts) {
         const collection = await client.collectionGet(draft.collection_id);
 
-        // 门禁：脚本可能来自导入的集合，执行前必须确认（任务 9.3 / design D6）
+        // 门禁：脚本可能来自导入的集合，执行前必须确认（任务 9.3 / design D6）。
+        // 门禁按标签存——并发时两条各自的门禁互不覆盖。
         if (!(await isScriptExecutionAllowed(client, draft.collection_id))) {
-          setScriptGate({ collectionId: draft.collection_id, name: collection.name });
-          finishSend();
+          setScriptGates((current) => ({
+            ...current,
+            [key]: { collectionId: draft.collection_id, name: collection.name },
+          }));
+          finishSend(key);
           return;
         }
 
@@ -1577,7 +1687,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         // 取消发生在脚本段：不再往后走，已经产生的输出照常写回
         if (attempt.isCancelled()) {
           writeScriptReport();
-          finishSend();
+          finishSend(key);
           return;
         }
       }
@@ -1625,24 +1735,25 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         if (described.code !== UNRESOLVED_CODE) {
           patchRequestTab(key, (item) => ({ ...item, response: null }));
         }
-        setError(described.message);
+        // 错误按标签归属：并发时不会串到别的请求的界面上
+        setSendError(key, described.message);
       }
 
       // 请求本身失败（离线、DNS、证书…）不该连带丢掉前置脚本已经产生的输出与断言：
       // console 的呈现要求没有「仅当请求成功」这一限定条件
       writeScriptReport();
-      finishSend();
+      finishSend(key);
       return;
     }
 
     writeScriptReport();
-    finishSend();
+    finishSend(key);
     // 脚本出错不阻断：请求已发出、响应已可查看，脚本的错误另行呈现
     // （spec: 脚本超时与错误处置）。
-    if (scriptError) setError(scriptError);
+    if (scriptError) setSendError(key, scriptError);
   };
 
-  const send = () => performSend(false);
+  const send = () => performSend(false, activeKeyRef.current);
 
   const newCollection = async () => {
     if (!workspaceId) return;
@@ -2361,39 +2472,57 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             <RequestBand
               draft={draft}
               busy={busy}
-              sending={sending !== null && sending.key === activeTabKey}
+              sending={activeSending}
               onChange={editDraft}
               onSend={() => void send()}
-              onCancel={() => void cancelSend()}
+              onCancel={() => void cancelSend(activeTabKey)}
               collectionName={crumbCollectionName}
               dirty={dirty}
               nameRef={requestNameRef}
             />
           )}
 
-          {error && (
+          {/* 错误条：全局 `error`（保存失败、树操作失败…）与**当前标签的**发送错误共用这一格。
+              发送错误按标签归属（spec: ui-layout「请求级错误提示」）：切到别的请求看不到它，
+              切回来仍在；并发时也不会被别条发送的结果冲掉。 */}
+          {(error ?? activeSendError) && (
             <div className="notice danger" role="alert" data-testid="app-error">
-              {error}
+              {error ?? activeSendError}
             </div>
           )}
-          {scriptGate && (
+          {activeScriptGate && (
             <div className="notice warn" role="alert" data-testid="script-gate">
               <p>
-                集合「{scriptGate.name}」带有脚本，而它可能来自导入。执行后可以读写变量、
+                集合「{activeScriptGate.name}」带有脚本，而它可能来自导入。执行后可以读写变量、
                 经 <code>pm.sendRequest</code> 发起网络请求（默认不限制目标地址）。
               </p>
               <div className="row">
                 <button
                   onClick={() => {
-                    void allowScriptExecution(client, scriptGate.collectionId).then(() =>
-                      performSend(false),
+                    // 「允许执行并继续」重发**触发门禁的那一条**。门禁按标签存、只有这一条
+                    // 在看着时才呈现，因此它就是当前激活的这条。
+                    const gateKey = activeTabKey;
+                    if (!gateKey) return;
+                    void allowScriptExecution(client, activeScriptGate.collectionId).then(() =>
+                      performSend(false, gateKey),
                     );
                   }}
                 >
                   允许执行（记住此集合）
                 </button>
-                <button onClick={() => void performSend(true)}>不执行脚本，仍发送</button>
-                <button className="ghost" onClick={() => setScriptGate(null)}>
+                <button
+                  onClick={() => {
+                    if (activeTabKey) void performSend(true, activeTabKey);
+                  }}
+                >
+                  不执行脚本，仍发送
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    if (activeTabKey) clearScriptGate(activeTabKey);
+                  }}
+                >
                   取消发送
                 </button>
               </div>
@@ -2495,7 +2624,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               onChange={editDraft}
               wrapLines={wrapLines}
               onWrapLinesChange={setWrapLines}
-              sending={sending !== null && sending.key === activeTabKey}
+              sending={activeSending}
               onPickFile={() => client.pickUploadFile()}
               onCurl={() => {
                 // 与发送共用同一份输入（未保存时走内联载荷），因此两处命令必然一致
@@ -2523,7 +2652,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 indent={indentUnit(editorAppearance)}
                 wrapLines={wrapLines}
                 onWrapLinesChange={setWrapLines}
-                sending={sending !== null && sending.key === activeTabKey}
+                sending={activeSending}
                 requestFormat={draft.settings.response_format}
                 scriptConsole={scriptReport?.console}
                 scriptAssertions={scriptReport?.assertions}
@@ -2538,7 +2667,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       </main>
 
       <BottomBar
-        busy={busy}
+        sending={Object.keys(sending).length > 0}
         error={error}
         optimisticErrors={optimisticErrors}
         onShowOptimisticErrors={() => {

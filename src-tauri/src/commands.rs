@@ -11,8 +11,8 @@ use crate::net::{self, ResponsePayload, SendRequestInput};
 use crate::secrets::StoredValue;
 use crate::state::AppState;
 use crate::storage::model::{
-    AuthConfig, Collection, Environment, Folder, ProxyConfig, SavedRequest, Scope, Variable,
-    Workspace,
+    setting_keys, AuthConfig, Collection, Environment, Folder, ProxyConfig, SavedRequest, Scope,
+    Variable, Workspace,
 };
 use crate::storage::workspace::{CollectionTree, NodeKind};
 use crate::storage::{
@@ -609,7 +609,16 @@ pub fn curl_for(
 ) -> AppResult<interchange::curl::CurlCommand> {
     let (_request, resolved) =
         net::resolve_for_export(&state.db, state.key_provider.as_ref(), input)?;
-    Ok(interchange::curl::curl_command(&resolved))
+
+    // 压缩的生效值在这里解析：请求编辑器与导入 / 导出模态共用本函数，因此两处的压缩
+    // 结果必然一致（design D1）。应用级缺省住在设置表里，请求级覆盖随请求一起传来。
+    let global_default = interchange::curl::parse_compress_default(
+        variables::get_setting(&state.db, "global", setting_keys::CURL_BODY_COMPRESS)?.as_deref(),
+    );
+    let compress =
+        interchange::curl::resolve_compress(global_default, resolved.settings.curl_body_compress);
+
+    Ok(interchange::curl::curl_command(&resolved, compress))
 }
 
 /// 从给定来源导入一份 Postman 文档到目标工作区。

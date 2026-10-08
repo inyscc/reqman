@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { describeError, type Commands } from '../lib/commands';
-import type { CurlCommand, ImportOutcome, SendRequestInput } from '../lib/types';
+import { currentCurlLineLayout, resolveCurlLineLayout } from '../lib/requestPreferences';
+import { joinCurlParts, type CurlCommand, type ImportOutcome, type SendRequestInput } from '../lib/types';
 
 const KIND_LABELS: Record<string, string> = {
   collection_v21: 'Postman 集合 v2.1',
@@ -75,6 +76,15 @@ export function ImportExportPanel(props: ImportExportPanelProps) {
     });
 
   const summary = outcome ? describeOutcome(outcome) : null;
+
+  /**
+   * 导出命令的**生效布局**：与请求编辑器的 cURL 标签同一套解析（请求级覆盖 + 应用级缺省），
+   * 因此两处的内容保持一致（spec: ui-layout「cURL 命令布局」）。
+   */
+  const curlLayout = resolveCurlLineLayout(
+    currentCurlLineLayout(),
+    sendInput?.inline?.settings?.curl_line_layout,
+  );
 
   return (
     <div className="stack" data-testid="import-export-panel">
@@ -185,7 +195,7 @@ export function ImportExportPanel(props: ImportExportPanelProps) {
               {curl.warnings.join('；')}
             </div>
           )}
-          <pre className="body mono">{curl.command}</pre>
+          <pre className="body mono">{joinCurlParts(curl.parts, curlLayout)}</pre>
         </div>
       )}
     </div>

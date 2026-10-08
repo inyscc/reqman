@@ -82,6 +82,40 @@ describe('设置模态的编辑器配置节', () => {
     });
   });
 
+  it('cURL 正文压缩是独立的应用级开关：缺省开启，改动即落库', async () => {
+    const { store } = await renderSection();
+
+    // 它不是「编辑器与折行配置」那一节的成员，因此不在那个 section 里
+    const toggle = screen.getByTestId('curl-body-compress');
+    expect(toggle.getAttribute('type')).toBe('checkbox');
+    expect(toggle.getAttribute('role')).toBe('switch');
+    expect((toggle as HTMLInputElement).checked).toBe(true);
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(store.get('global:curl_body_compress')).toBe('false'), {
+      timeout: 3_000,
+    });
+  });
+
+  it('cURL 单行也是应用级开关：缺省关（即多行），改动即落库', async () => {
+    const { store } = await renderSection();
+
+    const toggle = screen.getByTestId('curl-line-layout');
+    expect(toggle.getAttribute('type')).toBe('checkbox');
+    expect(toggle.getAttribute('role')).toBe('switch');
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(store.get('global:curl_line_layout')).toBe('single'), {
+      timeout: 3_000,
+    });
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(store.get('global:curl_line_layout')).toBe('multi'), {
+      timeout: 3_000,
+    });
+  });
+
   it('缩进类型下拉给出「空格 / Tab」两项', async () => {
     await renderSection();
 

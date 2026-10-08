@@ -66,6 +66,14 @@ window.__TAURI_INTERNALS__ = {
       case 'collection_get': return collection;
       case 'folder_get': return null;
       case 'request_get': return request;
+      case 'curl_export':
+        // 命令由用例注入（默认是一条短命令）：验证 cURL 文本块的呈现时用超长单行命令
+        return {
+          command: window.__curlCommand || "curl -X GET 'https://api.test/1'",
+          parts: window.__curlParts || ["curl -X GET", "'https://api.test/1'"],
+          contains_secret: false,
+          warnings: []
+        };
       case 'settings_get':
         // 门禁默认放行：与其它浏览器用例同一约定，否则发送会停在确认对话框上
         if (args.scope === 'script_gate') return 'allowed';
@@ -662,6 +670,46 @@ describe('折行（真实引擎）', () => {
       expect(await page.getByTestId('body-wrap').getAttribute('aria-pressed')).toBe('true');
       await requestTab(page, 'Settings').click();
       expect(await page.getByTestId('request-wrap-lines').getAttribute('data-value')).toBe('on');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('cURL 文本块始终软折行：超长单行命令不横向溢出，动作行不提供折行开关', async () => {
+    const page = await openApp([]);
+    try {
+      // 单行布局下整条命令常是一个不含空格的超长 token：只按词边界折行照样会横向溢出
+      const long = 'x'.repeat(600);
+      await page.evaluate((value) => {
+        const g = globalThis as never as { __curlParts: string[]; __curlCommand: string };
+        g.__curlParts = ['curl -X GET', `'https://api.test/${value}'`];
+        g.__curlCommand = g.__curlParts.join(' ');
+      }, long);
+
+      await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click({ timeout: 10_000 });
+      await page.locator('.request-editor').getByRole('button', { name: 'cURL', exact: true }).click();
+
+      const field = page.getByLabel('curl 命令');
+      await field.waitFor({ timeout: 10_000 });
+
+      const metrics = await field.evaluate((node) => {
+        const el = node as HTMLTextAreaElement;
+        return {
+          whiteSpace: getComputedStyle(el).whiteSpace,
+          overflowX: el.scrollWidth - el.clientWidth,
+        };
+      });
+      expect(metrics.whiteSpace).toBe('pre-wrap');
+      expect(metrics.overflowX, '超长命令应折行而不是横向滚动').toBeLessThanOrEqual(1);
+      // 折行只改呈现：文本内容一字不改
+      expect(await field.inputValue()).toContain(long);
+
+      // 动作行只有「重新生成 / 复制」，且文本块上不存在折行开关
+      const actions = page.locator('.curl-block .curl-actions');
+      expect(await actions.locator('button').count()).toBe(2);
+      expect(
+        await page.locator('.curl-block').getByRole('button', { name: '折行', exact: true }).count(),
+      ).toBe(0);
     } finally {
       await page.close();
     }
