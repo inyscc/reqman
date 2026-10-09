@@ -377,8 +377,11 @@ describe('响应呈现格式（真实引擎）', () => {
 
       const section = page.locator('.request-editor .settings-section');
       expect(await section.locator('input.switch').count()).toBe(2);
-      // 下拉：协议版本 / 响应格式 / 折行 / 代理（spec: 请求级折行覆盖起多出「折行」这一项）
-      expect(await section.locator('.dropdown').count()).toBe(5);
+      // 下拉共 7 项，逐项列出来：超时 / 协议版本 / 响应格式 / 折行 / cURL 正文压缩 /
+      // cURL 命令布局 / 代理模式。数字会随设置项增加而变，**加一项设置就要改这里**；
+      // 列清楚是为了对不上时一眼看出少的是哪一项——当初 cURL 那两项加进来时这里没同步，
+      // 断言停在 5 上红了一轮（本次核对时发现并补上）。
+      expect(await section.locator('.dropdown').count()).toBe(7);
       expect(await section.locator('select').count()).toBe(0);
     } finally {
       await page.close();

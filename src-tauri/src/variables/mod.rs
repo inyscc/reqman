@@ -235,6 +235,23 @@ pub enum ResolvedFormField {
     File { key: String, handle: String },
 }
 
+impl ResolvedBody {
+    /// 这个正文能不能**被重放**（换一跳再发一次，见 design D11）。
+    ///
+    /// 含文件的多段表单与带句柄的二进制正文在内部是**一次性句柄**（路径从不进入后端），
+    /// 已经写出去就没法再写一次。这类请求只尝试第一跳——假装它也能降级只会造出一个比
+    /// 失败更坏的错误。
+    pub fn is_replayable(&self) -> bool {
+        match self {
+            ResolvedBody::None | ResolvedBody::Raw { .. } | ResolvedBody::UrlEncoded { .. } => true,
+            ResolvedBody::FormData { fields } => fields
+                .iter()
+                .all(|field| matches!(field, ResolvedFormField::Text { .. })),
+            ResolvedBody::Binary { handle, .. } => handle.is_none(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResolvedAuth {
@@ -336,6 +353,8 @@ pub fn resolve_request(
     let proxy = request.settings.proxy.as_ref().map(|proxy| ProxyConfig {
         mode: proxy.mode,
         url: proxy.url.as_deref().map(&mut resolve_into),
+        // PAC 地址同样接受变量引用：它常指向内网的配置服务，换环境就要换地址
+        pac_url: proxy.pac_url.as_deref().map(&mut resolve_into),
         username: proxy.username.as_deref().map(&mut resolve_into),
         password: None,
         password_enc: proxy.password_enc.clone(),

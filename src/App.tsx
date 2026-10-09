@@ -15,7 +15,7 @@ import { CollectionIcon, FolderIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
 import { ProxyConfigRows } from './components/ProxyConfigRows';
-import type { ProxyConfig } from './lib/types';
+import type { ProxyConfig, ProxyDecisionView } from './lib/types';
 import { RequestBand, RequestEditor, type Tab } from './components/RequestEditor';
 import { ResizeStrips, isInteractiveSessionBarTarget } from './components/ResizeStrips';
 import { ResponsePanel } from './components/ResponsePanel';
@@ -410,6 +410,15 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
    * 与全局的 `error` 并存：后者承载保存失败、树操作失败等与某次发送无关的消息。
    */
   const [sendErrors, setSendErrors] = useState<Record<string, string>>({});
+  /**
+   * 发送**失败**时那一次代理决定的落地处，同样按标签 key 归属
+   * （spec: ui-layout「响应区的代理决定」）。
+   *
+   * 成功时的决定随响应一起回来（`response.proxy_decision`），不必在这里存一份；失败时
+   * 没有响应可依附，只能由这里接住。两处合起来，决定在两条路径上都归属于**产生它的那条
+   * 请求**——与「请求级错误提示」同一套归属。
+   */
+  const [sendDecisions, setSendDecisions] = useState<Record<string, ProxyDecisionView>>({});
   /** `sending` 的镜像：经 ref 触达的地方（关闭标签、快捷键）要读到最新的一份。 */
   const sendingRef = useRef<Record<string, SendAttempt>>({});
   sendingRef.current = sending;
@@ -521,6 +530,14 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const activeSending = activeTabKey !== null && sending[activeTabKey] !== undefined;
   /** 当前激活标签的发送错误（spec: ui-layout「请求级错误提示」）。 */
   const activeSendError = activeTabKey !== null ? (sendErrors[activeTabKey] ?? null) : null;
+  /**
+   * 当前激活标签的代理决定（spec: ui-layout「响应区的代理决定」）。
+   *
+   * 优先取响应里带回的那一份——它属于**这一次**；没响应的失败才看按标签存的那一份。
+   */
+  const activeProxyDecision =
+    response?.proxy_decision ??
+    (activeTabKey !== null ? (sendDecisions[activeTabKey] ?? null) : null);
   /** 当前激活标签的门禁提示：只有触发它的那条请求在看着时才呈现。 */
   const activeScriptGate = activeTabKey !== null ? (scriptGates[activeTabKey] ?? null) : null;
   const entityDraft = activeEntityTab?.entity ?? null;
@@ -1548,7 +1565,11 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   };
 
   /** 写入 / 清除某条标签的发送错误（spec: ui-layout「请求级错误提示」）。 */
-  const setSendError = (key: string, message: string | null) => {
+  const setSendError = (
+    key: string,
+    message: string | null,
+    decision?: ProxyDecisionView | null,
+  ) => {
     setSendErrors((previous) => {
       if (message === null) {
         if (!(key in previous)) return previous;
@@ -1557,6 +1578,18 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         return next;
       }
       return { ...previous, [key]: message };
+    });
+
+    // 错误与它的代理决定同进同出：错误被清掉时决定也一并清掉，否则会看到"上一条错误
+    // 的决定"挂在这一条上。
+    setSendDecisions((previous) => {
+      if (!decision) {
+        if (!(key in previous)) return previous;
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      }
+      return { ...previous, [key]: decision };
     });
   };
 
@@ -1735,8 +1768,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         if (described.code !== UNRESOLVED_CODE) {
           patchRequestTab(key, (item) => ({ ...item, response: null }));
         }
-        // 错误按标签归属：并发时不会串到别的请求的界面上
-        setSendError(key, described.message);
+        // 错误按标签归属：并发时不会串到别的请求的界面上。
+        // 决定一并带上——失败时响应区要有它（spec: ui-layout「响应区的代理决定」）。
+        setSendError(key, described.message, described.proxy_decision);
       }
 
       // 请求本身失败（离线、DNS、证书…）不该连带丢掉前置脚本已经产生的输出与断言：
@@ -2647,6 +2681,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               <ResponsePanel
                 response={response}
                 error={null}
+                // 失败时 `response` 为空，但决定仍要出现（spec: ui-layout「响应区的代理决定」）
+                proxyDecision={activeProxyDecision}
                 onSaveFull={() => void saveFullResponse()}
                 presentation={presentation}
                 indent={indentUnit(editorAppearance)}

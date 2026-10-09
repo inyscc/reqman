@@ -3,6 +3,12 @@
 export interface AppError {
   code: string;
   message: string;
+  /**
+   * 出错的这一次发送的代理决定（后端只在发送路径上填，其余错误不带）。
+   *
+   * 失败路径上没有响应元数据，这个字段是失败时仍能回答"这次走的是哪个代理"的唯一来源。
+   */
+  proxy_decision?: ProxyDecisionView | null;
 }
 
 export interface Workspace {
@@ -22,7 +28,43 @@ export type RawLanguage = 'json' | 'xml' | 'html' | 'text' | 'javascript';
 export type AuthKind = 'none' | 'inherit' | 'basic' | 'bearer' | 'api_key';
 export type ApiKeyLocation = 'header' | 'query';
 /** 代理模式：`inherit` = 未配置（顺位到更低层级），`none` = 不使用代理（直连）。 */
-export type ProxyMode = 'inherit' | 'none' | 'system' | 'manual';
+export type ProxyMode = 'inherit' | 'none' | 'system' | 'manual' | 'pac';
+
+/** 一次发送的代理决定里「生效的层级」。 */
+export type ProxyLayer = 'request' | 'environment' | 'global' | 'system';
+
+/** 代理决定里「怎么定下来的」。 */
+export type ProxyReason =
+  | 'unconfigured'
+  | 'declared_direct'
+  | 'whitelisted'
+  | 'manual'
+  | 'from_system'
+  | 'pac'
+  | 'pac_unavailable';
+
+/**
+ * 一次发送的**代理决定**：直连还是经代理、由哪一层定、为什么。**不含凭据**。
+ *
+ * 成功时随响应带回，失败时挂在错误上——两条路径上是同一次求解的产物。
+ */
+export interface ProxyDecisionView {
+  /** 生效的层级；各层都未配置时为 `null`。 */
+  layer: ProxyLayer | null;
+  mode: ProxyMode | null;
+  /** 结果：`null` 表示直连。 */
+  proxy_url: string | null;
+  reason: ProxyReason;
+  /** 走 PAC 时用到的地址。 */
+  pac_url: string | null;
+  /**
+   * 这次用的 PAC 是**上一次成功取回的旧副本**（这次没取到新的）。
+   *
+   * 降级与「用的是陈旧副本」都不静默（design D4）：改了 PAC 却还按老规则走时，
+   * 这个事实是唯一能解释「为什么不生效」的线索。
+   */
+  pac_stale?: boolean;
+}
 export type HttpVersion = 'auto' | 'http1' | 'http2';
 export type Scope = 'local' | 'data' | 'environment' | 'collection' | 'global';
 
@@ -55,6 +97,12 @@ export interface AuthConfig {
 export interface ProxyConfig {
   mode: ProxyMode;
   url?: string | null;
+  /**
+   * PAC 文件的地址（`mode: 'pac'` 时使用）。
+   *
+   * 与 `url` 分开：一个是「代理在哪」，一个是「去哪儿问该走哪个代理」。
+   */
+  pac_url?: string | null;
   username?: string | null;
   /**
    * 已保存凭据这一事实。后端只回传它，不回传凭据本身
@@ -282,6 +330,12 @@ export interface ResponsePayload {
   request_url: string;
   via_proxy: boolean;
   http_version: string;
+  /**
+   * 本次发送的代理决定。
+   *
+   * 可选：只为了不逼着每个响应桩都补上它（真实后端总会给）。
+   */
+  proxy_decision?: ProxyDecisionView;
   unresolved: string[];
 }
 

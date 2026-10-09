@@ -37,6 +37,12 @@ reqwest = { version = "0.12", default-features = false, features = [
     "cookies",
 ] }
 
+# --- PAC 求值（本变更 D2：纯 Rust JS 引擎）---
+# `default` 里含 `temporal`（拖入 temporal_rs）与 `float16`/`xsum`，三者对 PAC 都无用；
+# `intl` 虽不在 `default` 里，但显式关掉默认特性一并杜绝 `icu_*`。`js` 是 wasm 目标用的
+# 弱特性（见其定义：只挂 web-time / getrandom 的 wasm 变体），原生构建不需要。
+boa_engine = { version = "0.22", default-features = false }
+
 # --- cookie jar (add-pm-script-runtime D14: 成熟实现，不自行写匹配语义) ---
 reqwest_cookie_store = "0.8"
 cookie_store = "0.21"
@@ -67,6 +73,14 @@ keyring = { version = "3", default-features = false, features = [
 # --- logging (D6: single redaction chokepoint) ---
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# --- Windows 系统代理（本变更 D8）---
+# 自己读 `Internet Settings`：reqwest 的 `system-proxy` 特性只认 `ProxyServer`、
+# **从不看 `AutoConfigURL`**（PAC），而后者正是内网那台机器配代理的方式。
+# `winreg` 0.55 本来就在锁文件里（`tauri-winres` → `embed-resource` 带进来的），
+# 因此不新增任何 crate。
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [dev-dependencies]

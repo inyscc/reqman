@@ -4,6 +4,7 @@ use crate::error::AppResult;
 use crate::net::cancel::SendRegistry;
 use crate::net::cookies::CookieJar;
 use crate::net::limits::MAX_STORED_RESPONSES;
+use crate::net::pac::PacStore;
 use crate::net::response::ResponseStore;
 use crate::net::uploads::UploadRegistry;
 use crate::secrets::{KeyProvider, KeyringKeyProvider};
@@ -21,6 +22,10 @@ pub struct AppState {
     pub cookies: Arc<CookieJar>,
     /// 在飞请求的会话注册表（spec: http-engine「请求取消」）。
     pub sends: Arc<SendRegistry>,
+    /// PAC 的取用与缓存（design D4）。
+    ///
+    /// 放在运行态而不是每次新开：缓存与 TTL 只有在跨请求存活时才有意义。
+    pub pac: Arc<PacStore>,
 }
 
 impl AppState {
@@ -41,6 +46,7 @@ impl AppState {
             )),
             cookies: Arc::new(CookieJar::new()),
             sends: Arc::new(SendRegistry::new()),
+            pac: Arc::new(PacStore::new()),
         })
     }
 
@@ -56,6 +62,7 @@ impl AppState {
             )),
             cookies: Arc::new(CookieJar::new()),
             sends: Arc::new(SendRegistry::new()),
+            pac: Arc::new(PacStore::new()),
         }
     }
 }

@@ -413,6 +413,11 @@ pub enum ProxyMode {
     System,
     /// 手工填写。
     Manual,
+    /// PAC 文件（自动代理配置脚本）：去哪儿问"这次该走哪个代理"。
+    ///
+    /// 与「跟随系统」的区别只在**来源**：系统层读注册表里的 `AutoConfigURL`，这一档用
+    /// 用户自己填的地址，并且覆盖系统配置（design D10）。两者进的是同一个求值器。
+    Pac,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -420,6 +425,11 @@ pub struct ProxyConfig {
     pub mode: ProxyMode,
     /// 形如 `http://host:port` 或 `socks5://host:port`。
     pub url: Option<String>,
+    /// PAC 文件的地址（`ProxyMode::Pac` 时使用）。
+    ///
+    /// 与 `url` 分开：一个是"代理在哪"，一个是"去哪儿问该走哪个代理"。合成一个字段会让
+    /// "模式是 PAC 但填的是代理地址"这种自相矛盾的状态变得能表达。
+    pub pac_url: Option<String>,
     pub username: Option<String>,
     /// 提交的明文凭据。只在「写入这一跳」存在：`Some("")` 表示清除，缺字段表示不改写既有凭据。
     /// 它不落库、也不回传界面（见下面的 `Serialize` 实现）。
@@ -446,9 +456,10 @@ impl Serialize for ProxyConfig {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("ProxyConfig", 6)?;
+        let mut state = serializer.serialize_struct("ProxyConfig", 7)?;
         state.serialize_field("mode", &self.mode)?;
         state.serialize_field("url", &self.url)?;
+        state.serialize_field("pac_url", &self.pac_url)?;
         state.serialize_field("username", &self.username)?;
         state.serialize_field("has_password", &self.password_enc.is_some())?;
         state.serialize_field("password_readable", &self.password_readable)?;
@@ -462,6 +473,7 @@ impl Default for ProxyConfig {
         Self {
             mode: ProxyMode::Inherit,
             url: None,
+            pac_url: None,
             username: None,
             password: None,
             password_enc: None,
@@ -471,11 +483,25 @@ impl Default for ProxyConfig {
     }
 }
 
+/// 非空、且不是纯空白。
+fn has_text(value: Option<&str>) -> bool {
+    value.map(|text| !text.trim().is_empty()).unwrap_or(false)
+}
+
 impl ProxyConfig {
     pub fn manual(url: impl Into<String>) -> Self {
         Self {
             mode: ProxyMode::Manual,
             url: Some(url.into()),
+            ..Self::default()
+        }
+    }
+
+    /// 由 PAC 地址构造。
+    pub fn pac(url: impl Into<String>) -> Self {
+        Self {
+            mode: ProxyMode::Pac,
+            pac_url: Some(url.into()),
             ..Self::default()
         }
     }
@@ -505,30 +531,83 @@ impl ProxyConfig {
             ProxyMode::Inherit => false,
             ProxyMode::None => true,
             ProxyMode::System => true,
-            ProxyMode::Manual => self
-                .url
-                .as_deref()
-                .map(|url| !url.trim().is_empty())
-                .unwrap_or(false),
+            ProxyMode::Manual => has_text(self.url.as_deref()),
+            // 与「手工填写」同款：没填 PAC 地址就没有可执行的意图，按未配置顺位
+            ProxyMode::Pac => has_text(self.pac_url.as_deref()),
         }
     }
 
     /// 判断某主机是否命中 `no_proxy` 白名单。
+    ///
+    /// 匹配语义与系统代理的 `ProxyOverride` 共用一份实现（`url_util::host_matches_pattern`）：
+    /// 同一个概念在同一个应用里不该有两套规则。
     pub fn bypasses(&self, host: &str) -> bool {
-        let host = host.trim().to_ascii_lowercase();
-        let bare = host.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or(host.clone());
-        self.no_proxy.iter().any(|entry| {
-            let entry = entry.trim().to_ascii_lowercase();
-            if entry.is_empty() {
-                return false;
-            }
-            if entry == "*" {
-                return true;
-            }
-            let entry = entry.trim_start_matches('.');
-            bare == entry || bare.ends_with(&format!(".{}", entry))
-        })
+        self.no_proxy
+            .iter()
+            .any(|entry| crate::url_util::host_matches_pattern(host, entry))
     }
+}
+
+// ---------------------------------------------------------------------------
+// 代理决定（不落库：它是"这一次发送怎么出去的"，随返回值与错误回传）
+// ---------------------------------------------------------------------------
+
+/// 代理决定里「生效的层级」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyLayer {
+    Request,
+    Environment,
+    Global,
+    /// 操作系统设置——某一层选了「跟随系统」时的实际来源。
+    System,
+}
+
+/// 代理决定里「怎么定下来的」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyReason {
+    /// 各层都未配置，顺位到底仍无代理。
+    Unconfigured,
+    /// 停在了声明「不使用代理」的那一层。
+    DeclaredDirect,
+    /// 目标命中不走代理的白名单。
+    Whitelisted,
+    /// 生效的那一层手工填写了代理（是哪一层由 `layer` 说明）。
+    Manual,
+    /// 取自操作系统配置。
+    FromSystem,
+    /// 由 PAC 求值所得。
+    Pac,
+    /// PAC 没能求值（取不到 / 抛错 / 返回值解析不了），按直连继续。
+    PacUnavailable,
+}
+
+/// 一次发送的**代理决定**——可读，且**不含凭据**。
+///
+/// 与网络层的 `ProxyDecision` 分开是结构性的：后者在发送路径上带着明文凭据，而本类型
+/// 会出现在日志与界面回传里。用同一个类型就等于把"每个调用点都记得剔除凭据"当成纪律
+/// 来守；类型不同，这件事才是结构性的。
+///
+/// 放在 `model` 里是因为它同样是**跨层往返的形状**（像 `ResponseFormatOverride`），
+/// 而不是存储内容——错误类型要能带上它，若把它放在网络层，`error` 就会反向依赖 `net`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyDecisionView {
+    /// 生效的那一层。各层都未配置时为 `None`——那时没有"生效的层级"可言。
+    pub layer: Option<ProxyLayer>,
+    /// 生效那一层的模式。与 `layer` 同时为 `None`。
+    pub mode: Option<ProxyMode>,
+    /// 结果：`None` 表示直连。
+    pub proxy_url: Option<String>,
+    pub reason: ProxyReason,
+    /// 走 PAC 时用到的 PAC 地址。
+    pub pac_url: Option<String>,
+    /// 这次用的 PAC 是**上一次成功取回的旧副本**（这次没取到新的）。
+    ///
+    /// 降级与"用的是陈旧副本"都不静默（design D4）：用户改了 PAC 却还按老规则走时，
+    /// 这个事实是唯一能解释"为什么不生效"的线索。
+    #[serde(default)]
+    pub pac_stale: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

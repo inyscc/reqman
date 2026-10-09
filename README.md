@@ -72,6 +72,20 @@ npm run test:browser
 `tests-browser/browser.ts`）：装了 Chrome / Edge 就能直接跑，不必先下载；要复现与交付基线
 一致的环境再执行 `npx playwright install chromium`。
 
+每个 spec 文件都在 `beforeAll` 里自起一个 Vite dev server 再加一个浏览器，文件之间默认并行。
+文件多的时候开合 server + 浏览器会互相争用，症状是**整批文件一起红**（`Timeout terminating
+forks worker`、每个文件耗时数百秒），而它们单独跑都绿——`vitest.browser.config.ts` 的
+`hookTimeout` 注释里记着同一类现象，机器上还压着别的活（或上一轮有残留进程）时最容易撞上。
+
+**撞上时加 `--maxWorkers=1` 串行跑**，拿到的才是真实信号：
+
+```bash
+npm run test:browser -- --maxWorkers=1
+```
+
+（实测：本机默认并行通常 45 秒跑完 113 条；但曾在机器被压满时出现 15/15 文件一起超时，
+同一份代码串行跑只剩真实断言问题。）
+
 其他检查：
 
 ```bash
@@ -100,3 +114,7 @@ openspec validate add-postman-io --strict   # 规划产物一致性
 - **Linux（WebKitGTK）上的 CSP 兜底未经验证**：blob Worker 是否继承文档 CSP，已在 Chromium/Blink 侧证实为「继承」（`tests-browser/worker-csp.spec.ts`，Windows WebView2 同属 Blink 可沿用）。WebKitGTK 一侧未验——Playwright WebKit 需要额外系统库（`libgtk-4-1`、`libgstreamer-plugins-bad1.0-0`、`flite1`），本机只能经 `sudo apt-get` 安装。因此**在 Linux 上运行沙箱时**，「即使发生逃逸也发不出数据」这一层没有被证实，实际防线只有宿主桥的出口校验与脚本执行门禁。补验方式：在真实客户端里运行 `openspec/changes/archive/2026-09-17-add-pm-script-runtime/probes/worker-csp-probe.js`。
 - **curl 导出引用本地文件时不可直接执行**：多段表单的文件字段与二进制正文在内部只以一次性句柄表示，路径从不进入后端，因此命令里的文件位置是占位符，需用户自行替换。
 - **系统凭据库不可用时的功能边界**：secret 值与 Cookie 的**持久化**依赖操作系统凭据库（Windows 凭据管理器 / macOS Keychain / Linux Secret Service）。在无图形会话或缺少 DBus 会话总线的环境（例如纯 SSH 会话、容器）里，凭据库会不可用——此时这两项持久化被**拒绝**（绝不退化为明文落库），而请求发送、变量解析、脚本执行不受影响，Cookie 在本次运行内仍然有效（会话 Cookie 语义）。界面在这些操作上会给出明确的降级提示。
+- **PAC 的支持范围**：`FindProxyForURL` 在只带 PAC helper 的后端沙箱里求值，认 `DIRECT` / `PROXY` / `SOCKS` / `SOCKS4` / `SOCKS5` / `HTTPS`，分号分隔的链按序尝试（最多 3 跳）。三处该知道的上限：① **`dateRange` 没有实现**——它在规范里有多达十种参数形式、各实现语义并不一致，写一个"看起来对"的版本比不写更危险；用到它的 PAC 会在求值时抛错，于是**按直连降级**，响应区的代理决定会写明「PAC 未能取得，已按直连降级」并给出 PAC 地址。② **含文件的多段表单与二进制正文只尝试第一跳**：它们在内部是一次性句柄，已经写出去就没法重放，假装能降级只会造出比失败更坏的错误。③ PAC 取不到时**沿用上一次成功取回的副本**（最多 5 分钟），这个事实会写成「PAC 用的是上次成功取回的副本」——改了 PAC 却不生效时先看这一句。
+- **内网的真实 PAC 未纳入验收**：本变更的全部验收都在本机完成（本地 PAC 服务器 + 本地代理服务器），而用户实际遇到的 `http://<内网主机>/xxx.pac` 无法在这里访问。已知的差别只可能在 PAC 正文本身——它对内网地址的规则（`isInNet` 网段、`dnsResolve` 的结果）依赖真实内网拓扑。
+- **「不使用代理」现在是**真的**直连**（行为变更）：此前该选项在设置了 `HTTP_PROXY` / `HTTPS_PROXY` 的机器上仍会经该代理——因为 reqwest 的隐式系统代理默认开着，而"不使用代理"没有把它关掉。现在决定为直连时会显式禁用代理，因此**该选项在任何机器上都等于直连**。另外「跟随系统」读的是**操作系统当前的代理设置**：Windows 上包括静态代理（`ProxyServer`）与自动配置脚本（`AutoConfigURL`），不再只看环境变量。复现与自检步骤（本机可做）：① 在界面里把某一层代理设为「不使用代理」；② 启动应用的环境里设一个不存在的代理 `HTTP_PROXY=http://127.0.0.1:9`（PowerShell：`$env:HTTP_PROXY='http://127.0.0.1:9'; npm run tauri dev`）；③ 发送任意可达请求。预期：请求**成功**，且响应区的代理决定写「直连」——若它失败于那个不存在的代理，说明直连又落回了隐式代理。这条行为有回归用例守着：`src-tauri/src/net/tests.rs` 的 `an_explicit_direct_decision_ignores_an_environment_proxy`（摘掉 `build_client` 里的 `.no_proxy()` 它会红）。
+

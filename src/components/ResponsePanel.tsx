@@ -26,7 +26,8 @@ import { CodeSurface } from './CodeSurface';
 import { WrapIcon } from './icons';
 import { CODE_SURFACE_MAX_BYTES } from '../lib/codeSurface';
 import type { ConsoleEntry, TestAssertion } from '../lib/scriptRuntime';
-import type { ResponsePayload } from '../lib/types';
+import type { ProxyDecisionView, ResponsePayload } from '../lib/types';
+import { proxyDecisionLabel } from '../lib/proxyDecision';
 
 type Tab = 'body' | 'headers' | 'script';
 
@@ -52,6 +53,13 @@ function SendingOverlay() {
 export interface ResponsePanelProps {
   response: ResponsePayload | null;
   error: string | null;
+  /**
+   * 本次发送的**代理决定**（spec: ui-layout「响应区的代理决定」）。
+   *
+   * 与 `response` / `error` 并列传入，而不是从 `response` 里取：失败时没有响应，
+   * 而决定在那时同样要出现——失败恰恰是最需要看它的时候。
+   */
+  proxyDecision?: ProxyDecisionView | null;
   onSaveFull: () => void;
   /** 脚本 console 输出；为空时「脚本」标签页不出现（任务 6.4）。 */
   scriptConsole?: ConsoleEntry[];
@@ -142,6 +150,7 @@ export function ResponsePanel({
   response,
   sending = false,
   error,
+  proxyDecision = null,
   onSaveFull,
   scriptConsole,
   scriptAssertions,
@@ -155,6 +164,9 @@ export function ResponsePanel({
 }: ResponsePanelProps) {
   const [tab, setTab] = useState<Tab>('body');
   const [preview, setPreview] = useState(true);
+
+  /** 代理决定的可读文案；没有决定时为 `null`（如尚未发送过）。 */
+  const decisionLabel = proxyDecisionLabel(proxyDecision);
 
   /** 本次查看的格式（spec: http-engine「响应内容与格式化」）：临时覆盖，不持久。 */
   const initialFormat = resolveInitialFormat(presentation.formatDetection, requestFormat);
@@ -227,6 +239,13 @@ export function ResponsePanel({
       <div className="pane">
         <div className="pane-header">
           <strong>响应</strong>
+          {/* 失败时没有响应元数据，但**代理决定仍要出现**——失败恰恰是最需要看它的时候
+              （spec: ui-layout「响应区的代理决定」「失败时仍呈现决定」）。 */}
+          {decisionLabel && (
+            <span className="response-meta mono" data-testid="proxy-decision">
+              {decisionLabel}
+            </span>
+          )}
         </div>
         <div className="pane-body">
           <div className="notice danger" role="alert">
@@ -259,18 +278,25 @@ export function ResponsePanel({
               {response.status} {response.status_text}
             </span>
             {/* 元信息收成一段紧凑文本：原先 4–5 个并列徽章会把头部挤到折行，
-                折行又让头部高度不可预测（design D6）。 */}
+                折行又让头部高度不可预测（design D6）。
+                「经代理」不再挤在这里——它由下面那个决定元素说清，还带上是哪个代理。 */}
             <span className="response-meta mono" data-testid="response-meta">
               {[
                 `${response.elapsed_ms} ms`,
                 humanBytes(response.size_bytes),
                 response.http_version,
-                response.via_proxy ? '经代理' : null,
               ]
                 .filter((part): part is string => part !== null)
                 .join(' · ')}
             </span>
           </>
+        )}
+        {/* 代理决定：成功与失败都要出现（spec: ui-layout「响应区的代理决定」）。
+            **直连也写出来**——"这次没走代理"是一条结论，不是一个空值。 */}
+        {decisionLabel && (
+          <span className="response-meta mono" data-testid="proxy-decision">
+            {decisionLabel}
+          </span>
         )}
         <span className="grow" />
         {(response || hasScript) && (

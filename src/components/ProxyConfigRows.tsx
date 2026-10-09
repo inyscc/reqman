@@ -21,6 +21,7 @@ const MODE_LABELS: Record<ProxyMode, string> = {
   none: '不使用代理',
   system: '跟随系统',
   manual: '手工填写',
+  pac: 'PAC 文件',
 };
 
 /**
@@ -48,7 +49,12 @@ function passwordPlaceholder(proxy: ProxyConfig | null): string {
 }
 
 /**
- * 代理设置的行式列表：模式一行，手工填写时再出现地址、凭据与白名单。
+ * 代理设置的行式列表：模式一行；手工填写时再出现地址、凭据与白名单，PAC 文件时只出现
+ * 一个 PAC 地址。
+ *
+ * PAC 档**刻意不出现**凭据与白名单：凭据是"连代理时用什么身份"，而 PAC 档还没决定代理
+ * 是谁；白名单是"哪些不走代理"，而 PAC 档该不该走代理由那段脚本自己说了算。摆出来只会
+ * 让人以为它们生效（spec: 设置模态的代理配置）。
  *
  * 三个层级共用它——同一个交互在同一应用里只该有一种形态，而它们本来就是同一件事。
  */
@@ -70,13 +76,15 @@ export function ProxyConfigRows({
   }, [passwordDraft]);
 
   const modes: ProxyMode[] = allowInherit
-    ? ['inherit', 'none', 'system', 'manual']
-    : ['none', 'system', 'manual'];
+    ? ['inherit', 'none', 'system', 'manual', 'pac']
+    : ['none', 'system', 'manual', 'pac'];
 
   const patch = (next: Partial<ProxyConfig>) => {
     onChange({
-      mode: 'manual',
+      // 兜底是"保持当前档"，不是写死手工填写——否则在 PAC 档编辑地址会把它改回手工
+      mode: proxy?.mode ?? 'manual',
       url: null,
+      pac_url: null,
       username: null,
       no_proxy: [],
       ...proxy,
@@ -85,6 +93,7 @@ export function ProxyConfigRows({
   };
 
   const mode = proxy?.mode ?? (allowInherit ? 'inherit' : 'none');
+  const isPac = mode === 'pac';
 
   const changeMode = (next: ProxyMode) => {
     // 「未配置」在存储里就是 `null`：顺位的含义由缺失表达，不需要一个占位配置
@@ -97,6 +106,7 @@ export function ProxyConfigRows({
     onChange({
       mode: next,
       url: proxy?.url ?? null,
+      pac_url: proxy?.pac_url ?? null,
       username: proxy?.username ?? null,
       has_password: proxy?.has_password,
       password_readable: proxy?.password_readable,
@@ -120,21 +130,27 @@ export function ProxyConfigRows({
         />
       </div>
 
+      {(mode === 'manual' || isPac) && (
+        <div className="settings-row stacked">
+          <label className="settings-name" htmlFor={`${idPrefix}-proxy-url`}>
+            {isPac ? 'PAC 地址' : '代理地址'}
+          </label>
+          <input
+            id={`${idPrefix}-proxy-url`}
+            aria-label={isPac ? `${name}PAC 地址` : `${name}地址`}
+            placeholder={
+              isPac ? 'http://internal.example/proxy.pac' : 'http://127.0.0.1:8080'
+            }
+            value={(isPac ? proxy?.pac_url : proxy?.url) ?? ''}
+            onChange={(event) =>
+              patch(isPac ? { pac_url: event.target.value } : { url: event.target.value })
+            }
+          />
+        </div>
+      )}
+
       {mode === 'manual' && (
         <>
-          <div className="settings-row stacked">
-            <label className="settings-name" htmlFor={`${idPrefix}-proxy-url`}>
-              代理地址
-            </label>
-            <input
-              id={`${idPrefix}-proxy-url`}
-              aria-label={`${name}地址`}
-              placeholder="http://127.0.0.1:8080"
-              value={proxy?.url ?? ''}
-              onChange={(event) => patch({ url: event.target.value })}
-            />
-          </div>
-
           <div className="settings-row">
             <label className="settings-name" htmlFor={`${idPrefix}-proxy-username`}>
               认证用户名

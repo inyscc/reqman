@@ -39,6 +39,12 @@ pub enum ErrorCode {
     ProxyError,
     ConnectionRefused,
     ConnectionFailed,
+    /// 连接建立阶段超时：目标未应答（SYN 被静默丢弃），而不是主动拒绝。
+    ///
+    /// 与应用级 [`ErrorCode::Timeout`] 不是一回事：后者是我们在客户端上设的时限到了。
+    /// 两者混为一谈的话，"卡了很久然后失败"就看不出该往哪儿查——静默丢包恰恰是
+    /// "这里出网需要代理"最常见的签名。
+    ConnectionTimedOut,
     RequestBuild,
     Io,
 
@@ -75,6 +81,7 @@ impl ErrorCode {
             ErrorCode::ProxyError => "proxy_error",
             ErrorCode::ConnectionRefused => "connection_refused",
             ErrorCode::ConnectionFailed => "connection_failed",
+            ErrorCode::ConnectionTimedOut => "connection_timed_out",
             ErrorCode::RequestBuild => "request_build",
             ErrorCode::Io => "io",
             ErrorCode::Cancelled => "cancelled",
@@ -94,6 +101,15 @@ impl fmt::Display for ErrorCode {
 pub struct AppError {
     pub code: ErrorCode,
     pub message: String,
+    /// 出错的这一次发送的**代理决定**（不含凭据）。
+    ///
+    /// 只在网络层的发送路径上被填上：请求失败时，前端同样要能看到"这次走的是哪个代理"
+    /// （spec: http-engine「代理决定的可见性」）。其余错误保持 `None`。
+    ///
+    /// 代价是这个通用错误类型上挂着一个网络概念。换来的是不必改动既有的错误形状——
+    /// 前端 `describeError` 与各处错误处理都按 `{code, message}` 解析，把发送路径的错误
+    /// 换成结构体会在多处引出特判（design D6）。
+    pub proxy_decision: Option<crate::storage::model::ProxyDecisionView>,
 }
 
 impl AppError {
@@ -101,7 +117,17 @@ impl AppError {
         Self {
             code,
             message: message.into(),
+            proxy_decision: None,
         }
+    }
+
+    /// 挂上这一次发送的代理决定。
+    pub fn with_proxy_decision(
+        mut self,
+        view: crate::storage::model::ProxyDecisionView,
+    ) -> Self {
+        self.proxy_decision = Some(view);
+        self
     }
 
     pub fn invalid_input(message: impl Into<String>) -> Self {
@@ -137,13 +163,17 @@ impl fmt::Display for AppError {
 
 impl std::error::Error for AppError {}
 
-/// 序列化为 `{ "code": "...", "message": "..." }`，供前端读取分类码。
+/// 序列化为 `{ "code": "...", "message": "...", "proxy_decision": ... }`，供前端读取分类码。
+///
+/// `code` 与 `message` 的位置与含义不变——既有的错误处理一律照旧；`proxy_decision`
+/// 是附加项，只有发送路径会把它填上。
 impl Serialize for AppError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("AppError", 2)?;
+        let mut s = serializer.serialize_struct("AppError", 3)?;
         s.serialize_field("code", self.code.as_str())?;
         s.serialize_field("message", &self.message)?;
+        s.serialize_field("proxy_decision", &self.proxy_decision)?;
         s.end()
     }
 }
@@ -191,6 +221,12 @@ pub fn classify_net_failure(
 
     if is_dns_failure(&s, os_error) {
         return ErrorCode::DnsFailure;
+    }
+
+    // 连接建立阶段超时排在 TLS / 代理的**文案**判定之前：它靠错误码判定，而文案会随
+    // 系统界面语言变（见本模块顶部那段说明）。
+    if is_connect_timeout(os_error) {
+        return ErrorCode::ConnectionTimedOut;
     }
 
     // TLS 失败的判定：证书问题、握手失败，以及**握手位置读到的不是 TLS 记录**
@@ -263,6 +299,15 @@ fn is_dns_failure(lowercase_source: &str, os_error: Option<i32>) -> bool {
 /// 「本地化文案 (os error N)」，文案会翻译，N 不会。
 fn is_connection_refused(os_error: Option<i32>) -> bool {
     matches!(os_error, Some(111) | Some(10061))
+}
+
+/// 连接建立阶段超时：Windows 的 WSAETIMEDOUT(10060) 与 Linux 的 ETIMEDOUT(110)。
+///
+/// 与「连接被拒」的区别是**对端有没有回应**：被拒是对方回了 RST（说明路径通、只是
+/// 那里没服务），超时是连 SYN 都没人理——静默丢包。这条差异对排查很关键，所以判据
+/// 同样只看错误码，不看会翻译的文案。
+fn is_connect_timeout(os_error: Option<i32>) -> bool {
+    matches!(os_error, Some(10060) | Some(110))
 }
 
 /// 沿 `source()` 链找出最内层 `io::Error` 的原始错误码（最贴近根因的那一个）。
@@ -338,6 +383,22 @@ pub fn describe_net_error(err: &reqwest::Error) -> String {
     }
 }
 
+/// 在已描述好的失败文本之上，补上「本次未经代理」这一**事实**。
+///
+/// 纯函数，因此不必真的制造一次连接建立超时（那要等目标把 SYN 丢到系统放弃，二十秒
+/// 起步）就能断言这条行为。
+///
+/// 补充的条件是「分类为连接建立超时」且「本次决定为直连」：经代理时连的是代理而不是
+/// 目标，那时说"未经代理"就是错的。只说**事实**，SHALL NOT 断言代理是唯一成因——
+/// 我们只知道这次没走代理，不知道对端是不是本来就不通。
+pub fn describe_failure(code: ErrorCode, via_proxy: bool, described: &str) -> String {
+    if code == ErrorCode::ConnectionTimedOut && !via_proxy {
+        return format!("连接建立超时：目标一直没有应答。本次未经代理。原始错误：{described}");
+    }
+
+    described.to_string()
+}
+
 /// 沿 `source()` 链取最深层文本——最贴近根因的那一层。
 fn deepest_source(err: &dyn std::error::Error) -> String {
     let mut current: Option<&(dyn std::error::Error + 'static)> = err.source();
@@ -383,6 +444,7 @@ mod tests {
             ErrorCode::ProxyError,
             ErrorCode::ConnectionRefused,
             ErrorCode::ConnectionFailed,
+            ErrorCode::ConnectionTimedOut,
             ErrorCode::RequestBuild,
             ErrorCode::Io,
             ErrorCode::Cancelled,
@@ -521,6 +583,57 @@ mod tests {
             classify_net_failure(false, true, false, "本地化的连接重置文案", Some(10054)),
             ErrorCode::ConnectionFailed
         );
+    }
+
+    /// 连接建立超时是**自己一类**：它是静默丢包的签名，被压进笼统的连接失败就看不出
+    /// 该往哪儿查了（"这里出网要不要走代理"）。
+    #[test]
+    fn a_connect_phase_timeout_is_its_own_class() {
+        // Windows 的 WSAETIMEDOUT 与 Linux 的 ETIMEDOUT；两者的文案都可能被翻译
+        assert_eq!(
+            classify_net_failure(false, true, false, "本地化的超时文案", Some(10060)),
+            ErrorCode::ConnectionTimedOut
+        );
+        assert_eq!(
+            classify_net_failure(false, true, false, "本地化的超时文案", Some(110)),
+            ErrorCode::ConnectionTimedOut
+        );
+
+        // 与相邻的两类互不吞并
+        assert_eq!(
+            classify_net_failure(false, true, false, "本地化的拒绝文案", Some(10061)),
+            ErrorCode::ConnectionRefused,
+            "被拒是对方回了 RST，不是超时"
+        );
+        assert_eq!(
+            classify_net_failure(false, true, false, "不知道这样的主机。 (os error 11001)", Some(11001)),
+            ErrorCode::DnsFailure
+        );
+        assert_eq!(
+            classify_net_failure(false, true, false, "本地化的连接重置文案", Some(10054)),
+            ErrorCode::ConnectionFailed,
+            "重置既不是超时也不是被拒"
+        );
+    }
+
+    /// 直连时的连接建立超时要**陈述这一事实**，经代理时不陈述——并始终保留原始文本。
+    #[test]
+    fn a_direct_connect_timeout_says_it_went_direct() {
+        let raw = "由于连接方在一段时间后没有正确答复或连接的主机没有反应，连接尝试失败。 (os error 10060)";
+
+        let direct = describe_failure(ErrorCode::ConnectionTimedOut, false, raw);
+        assert!(direct.contains("本次未经代理"), "{direct}");
+        assert!(direct.contains("os error 10060"), "原始文本要保留：{direct}");
+
+        // 经代理时连的是代理而不是目标，说"未经代理"就是错的
+        let proxied = describe_failure(ErrorCode::ConnectionTimedOut, true, raw);
+        assert!(!proxied.contains("本次未经代理"), "经代理时不该这么说：{proxied}");
+        assert!(proxied.contains("os error 10060"), "原始文本照旧保留：{proxied}");
+
+        // 其它分类不受这条影响
+        let other = describe_failure(ErrorCode::ConnectionRefused, false, raw);
+        assert!(!other.contains("本次未经代理"), "{other}");
+        assert_eq!(other, raw, "其余失败保持原有呈现");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! 明文值做一次值级清洗作为兜底。请求与响应正文默认不写入日志——本模块**不提供**
 //! 任何记录正文的入口，这是把「正文不落日志」变成结构性事实而不是纪律要求。
 
+use crate::storage::model::ProxyDecisionView;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -191,6 +192,33 @@ impl Redactor {
             &format!(
                 "response summary status={} elapsed_ms={} size={}",
                 status, elapsed_ms, size
+            ),
+        );
+    }
+
+    /// 代理决定：这一次是从哪儿出去的，以及为什么。
+    ///
+    /// 投影类型本身就不含凭据（见 [`ProxyDecisionView`]），这里仍照旧过一遍值级清洗作兜底。
+    pub fn log_proxy_decision(&self, view: &ProxyDecisionView) {
+        let layer = view
+            .layer
+            .map(|layer| format!("{:?}", layer))
+            .unwrap_or_else(|| "-".to_string());
+        let mode = view
+            .mode
+            .map(|mode| format!("{:?}", mode))
+            .unwrap_or_else(|| "-".to_string());
+        let reason = format!("{:?}", view.reason);
+
+        self.log(
+            Level::Info,
+            &format!(
+                "proxy decision layer={} mode={} result={} reason={} pac={}",
+                layer,
+                mode,
+                view.proxy_url.as_deref().unwrap_or("direct"),
+                reason,
+                view.pac_url.as_deref().unwrap_or("-"),
             ),
         );
     }

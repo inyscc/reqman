@@ -730,13 +730,19 @@ describe('Settings 标签的三态超时（spec: ui-layout「请求级超时覆�
 });
 
 describe('请求级代理的四态（spec: http-engine「三级代理」）', () => {
-  it('可选值覆盖四种状态，缺省是「未配置」', () => {
+  it('可选值覆盖五种状态，缺省是「未配置」', () => {
     harness(draft(), 'settings');
 
     expect(screen.getByTestId('request-proxy-mode').getAttribute('data-value')).toBe('inherit');
 
     fireEvent.click(screen.getByTestId('request-proxy-mode'));
-    for (const label of ['未配置', '不使用代理', '跟随系统', '手工填写']) {
+    for (const label of [
+      '未配置',
+      '不使用代理',
+      '跟随系统',
+      '手工填写',
+      'PAC 文件',
+    ]) {
       expect(screen.getByRole('option', { name: label })).toBeTruthy();
     }
   });
@@ -764,6 +770,49 @@ describe('请求级代理的四态（spec: http-engine「三级代理」）', ()
     expect(screen.getByLabelText('请求级代理认证用户名')).toBeTruthy();
     expect(screen.getByLabelText('请求级代理认证密码')).toBeTruthy();
     expect(screen.getByLabelText('请求级代理不走代理的主机')).toBeTruthy();
+  });
+
+  it('PAC 文件档只出现 PAC 地址，不出现凭据与白名单', () => {
+    const { latest } = harness(draft(), 'settings');
+
+    fireEvent.click(screen.getByTestId('request-proxy-mode'));
+    fireEvent.click(screen.getByRole('option', { name: 'PAC 文件' }));
+
+    expect(screen.getByLabelText('请求级代理PAC 地址')).toBeTruthy();
+    expect(screen.queryByLabelText('请求级代理地址')).toBeNull();
+
+    // 凭据是"连代理时用什么身份"，而 PAC 档还没决定代理是谁；白名单是"哪些不走代理"，
+    // 而 PAC 档该不该走代理由那段脚本说了算。摆出来只会让人以为它们生效
+    // （spec: 设置模态的代理配置「PAC 文件模式不出现凭据项」）。
+    expect(screen.queryByLabelText('请求级代理认证用户名')).toBeNull();
+    expect(screen.queryByLabelText('请求级代理认证密码')).toBeNull();
+    expect(screen.queryByTestId('request-password-state')).toBeNull();
+    expect(screen.queryByLabelText('请求级代理不走代理的主机')).toBeNull();
+
+    // 填进去的是 pac_url，不是 url——两者是"去哪儿问"与"代理在哪"的区别
+    fireEvent.change(screen.getByLabelText('请求级代理PAC 地址'), {
+      target: { value: 'http://internal.example/proxy.pac' },
+    });
+    expect(latest().settings.proxy?.mode).toBe('pac');
+    expect(latest().settings.proxy?.pac_url).toBe('http://internal.example/proxy.pac');
+    expect(latest().settings.proxy?.url ?? null).toBeNull();
+  });
+
+  it('PAC 档编辑地址不会把模式改回手工填写', () => {
+    const saved = draft({
+      settings: {
+        ...defaultSettings(),
+        proxy: { mode: 'pac', pac_url: 'http://a/p.pac', no_proxy: [] },
+      },
+    });
+    const { latest } = harness(saved, 'settings');
+
+    fireEvent.change(screen.getByLabelText('请求级代理PAC 地址'), {
+      target: { value: 'http://b/p.pac' },
+    });
+
+    expect(latest().settings.proxy?.mode).toBe('pac');
+    expect(latest().settings.proxy?.pac_url).toBe('http://b/p.pac');
   });
 
   it('密码三态：留空不改写、填写是新值、清除是独立动作', () => {

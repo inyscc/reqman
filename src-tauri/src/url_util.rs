@@ -162,6 +162,39 @@ pub fn host_of(url: &str) -> Option<String> {
     Url::parse(url).ok()?.host_str().map(|h| h.to_string())
 }
 
+/// 主机名是否命中一条「不走代理」的条目。
+///
+/// 两个使用者共用它：系统代理的 `ProxyOverride`（Windows 注册表）与用户手填的白名单。
+/// 同一件事在同一个应用里只该有一套匹配语义，分成两份迟早会漂移。
+///
+/// 认得的书写形式：
+/// - `*`：命中一切；
+/// - 前导 `.` 或 `*.`：命中该域及其子域（`foo.test`、`x.foo.test`）；
+/// - 尾随 `*`：前缀匹配——Windows 的 `ProxyOverride` 就用这一族（`10.*`、`172.16.*`），
+///   不认它等于把注册表里的白名单读进来却一条都命中不了；
+/// - 其余：与主机名整体相等。
+pub fn host_matches_pattern(host: &str, entry: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    let bare = host
+        .rsplit_once(':')
+        .map(|(h, _)| h.to_string())
+        .unwrap_or(host);
+
+    let entry = entry.trim().to_ascii_lowercase();
+    if entry.is_empty() {
+        return false;
+    }
+    if entry == "*" {
+        return true;
+    }
+    if let Some(prefix) = entry.strip_suffix('*') {
+        return !prefix.is_empty() && bare.starts_with(prefix);
+    }
+
+    let entry = entry.trim_start_matches('.').trim_start_matches("*.");
+    bare == entry || bare.ends_with(&format!(".{}", entry))
+}
+
 /// 列出 URL 路径中出现的 `:name` 形式的路径变量名。
 pub fn path_variable_names(url: &str) -> Vec<String> {
     let Ok(parsed) = Url::parse(url) else {
@@ -211,6 +244,40 @@ mod tests {
         let url = compose_url("https://api.test/users?page=1&size=10", &params).expect("合成 URL");
         assert_eq!(url, "https://api.test/users?page=2&size=10");
         assert_eq!(url.matches("page=").count(), 1, "同键不应重复");
+    }
+
+    /// `no_proxy` 的两族书写形式都要认：域后缀与**尾随 `*` 的前缀**。
+    ///
+    /// 后者不是可有可无的：Windows 的 `ProxyOverride` 用的正是 `10.*` / `172.16.*`
+    /// 这一族，不认它等于把注册表里的白名单读进来却一条都命中不了。
+    #[test]
+    fn host_patterns_cover_both_the_domain_and_the_prefix_forms() {
+        // 域后缀
+        assert!(host_matches_pattern("foo.test", "foo.test"));
+        assert!(host_matches_pattern("x.foo.test", "foo.test"));
+        assert!(host_matches_pattern("x.foo.test", ".foo.test"));
+        assert!(host_matches_pattern("x.foo.test", "*.foo.test"));
+        assert!(
+            !host_matches_pattern("notfoo.test", "foo.test"),
+            "后缀匹配不该越界到只是尾巴相同的名字"
+        );
+
+        // 前缀——注册表那一族
+        assert!(host_matches_pattern("10.1.2.3", "10.*"));
+        assert!(host_matches_pattern("172.16.5.5", "172.16.*"));
+        assert!(host_matches_pattern("127.0.0.1", "127.*"));
+        assert!(
+            !host_matches_pattern("110.1.2.3", "10.*"),
+            "前缀匹配不该把 110.* 也算进去"
+        );
+
+        // 通配一切、端口剥离、大小写
+        assert!(host_matches_pattern("anything.test", "*"));
+        assert!(host_matches_pattern("Foo.Test:8080", "foo.test"));
+        assert!(
+            !host_matches_pattern("foo.test", ""),
+            "空条目若命中一切就是安全事故"
+        );
     }
 
     #[test]

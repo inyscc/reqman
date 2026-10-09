@@ -605,7 +605,16 @@ describe('cURL 快照标签（真实引擎）', () => {
       await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click();
       await page.getByLabel('请求地址').waitFor();
       await page.getByRole('button', { name: 'cURL', exact: true }).click();
-      await page.getByLabel('curl 命令').waitFor();
+      const field = page.getByLabel('curl 命令');
+      await field.waitFor();
+
+      // 先喂一段命令，再比款式：命令为空时「复制」是禁用的（`disabled = busy || command === ''`），
+      // 而禁用态按设计就是灰的（`.text-action:disabled` → `--muted`）。不先给命令，这条断言
+      // 比的就是「一个禁用按钮 vs 一个可用按钮」，注定不同——它曾经就这么红着（本次核对时发现）。
+      await field.fill("curl 'https://api.test/1'");
+      await page
+        .locator('[data-testid="curl-copy"]:not([disabled])')
+        .waitFor({ timeout: 15_000 });
 
       const curl = await page.evaluate(() => {
         const round = (value: number) => Math.round(value * 100) / 100;

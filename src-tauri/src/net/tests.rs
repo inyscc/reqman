@@ -3,12 +3,18 @@
 use super::*;
 use crate::secrets::MemoryKeyProvider;
 use crate::storage::model::{
-    setting_keys, ApiKeyLocation, FormField, FormFieldKind, ProxyConfig, RawLanguage, RequestBody,
-    Scope, TimeoutSetting,
+    setting_keys, ApiKeyLocation, FormField, FormFieldKind, ProxyConfig, ProxyLayer, ProxyMode,
+    ProxyReason, RawLanguage, RequestBody, Scope, TimeoutSetting,
 };
 use crate::storage::{requests, variables, workspace, Db};
 use crate::testutil::{closed_port_addr, HttpsTestServer, Reply, TempDir, TestServer};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// 一份"不论目标是什么都返回这个结果"的 PAC。
+fn pac_returning(result: &str) -> String {
+    format!("function FindProxyForURL(url, host) {{ return '{result}'; }}")
+}
 
 struct Harness {
     db: Arc<Db>,
@@ -17,6 +23,8 @@ struct Harness {
     responses: ResponseStore,
     cookies: cookies::CookieJar,
     sends: Arc<cancel::SendRegistry>,
+    /// PAC 的取用与缓存。测试里也可以预先塞一份，避免真的去取。
+    pac: pac::PacStore,
     workspace_id: String,
     collection_id: String,
     dir: TempDir,
@@ -39,6 +47,7 @@ impl Harness {
             responses,
             cookies: cookies::CookieJar::new(),
             sends: Arc::new(cancel::SendRegistry::new()),
+            pac: pac::PacStore::new(),
             workspace_id,
             collection_id,
             dir,
@@ -87,6 +96,7 @@ impl Harness {
             &self.responses,
             &self.cookies,
             &self.sends,
+            &self.pac,
             input,
         )
         .await
@@ -855,13 +865,11 @@ async fn failure_classes_are_distinguishable() {
         .expect_err("应超时");
     assert_eq!(err.code, ErrorCode::Timeout, "错误信息：{}", err.message);
 
-    // 域名解析失败
-    let saved = harness.save(&harness.request("R", "GET", "http://does-not-exist.invalid/x"));
-    let err = harness
-        .send(&SendRequestInput::saved(&saved.id))
-        .await
-        .expect_err("应解析失败");
-    assert_eq!(err.code, ErrorCode::DnsFailure, "错误信息：{}", err.message);
+    // 域名解析失败**不在这里**断言。"某个名字一定解析不出来"是与机器环境绑定的假设：
+    // 跑着 TUN + fake-IP 的机器（Mihomo 一类）会把任意域名解析成保留段里的假地址，
+    // NXDOMAIN 根本不会发生，这条断言在那类机器上必然失败。它守的东西并没有少测——
+    // 见 `dns_failure_is_reported_as_a_dns_failure`：注入一个必定失败的解析器，
+    // 让"解析失败"这件事由测试自己制造，而不是向环境借。
 
     // 连接被拒
     let addr = closed_port_addr();
@@ -875,6 +883,52 @@ async fn failure_classes_are_distinguishable() {
         ErrorCode::ConnectionRefused,
         "错误信息：{}",
         err.message
+    );
+}
+
+/// 域名解析失败被归为 `DnsFailure`。
+///
+/// **为什么注入解析器，而不是找一个"解析不出来"的名字**：后者是本机环境的假设。
+/// 跑着 TUN + fake-IP 的机器会把任意域名解析成 `198.18.0.0/15` 的假地址，NXDOMAIN
+/// 不会发生，于是把断言建立在一个真实域名能不能解析上，测试就会随机器而红。这里
+/// 注入一个一律失败的解析器，"解析失败"由测试自己制造，与机器环境无关。
+///
+/// 覆盖的是「真实的 `reqwest::Error` → 分类」这一跳：解析失败在 reqwest 里**同时**
+/// 是 connect 类错误，仍必须被识别成 `DnsFailure`，而不是被降级成笼统的连接失败
+/// （见 `error.rs` 的 `classify_net_failure`）。
+#[tokio::test]
+async fn dns_failure_is_reported_as_a_dns_failure() {
+    struct AlwaysFailsDns;
+
+    impl reqwest::dns::Resolve for AlwaysFailsDns {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(async {
+                // 与 getaddrinfo 失败同形的错误：带一个不随界面语言变化的解析失败错误码
+                Err(Box::new(std::io::Error::from_raw_os_error(11001))
+                    as Box<dyn std::error::Error + Send + Sync>)
+            })
+        }
+    }
+
+    // `.no_proxy()`：这条用例管的是「解析失败怎么归类」，不该受进程环境变量里有没有
+    // 代理影响——同一个进程里另有用例会临时设置 `HTTP_PROXY`。
+    let client = reqwest::Client::builder()
+        .dns_resolver(Arc::new(AlwaysFailsDns))
+        .no_proxy()
+        .build()
+        .expect("构造客户端");
+
+    let err = client
+        .get("http://lookup-must-fail.test/x")
+        .send()
+        .await
+        .expect_err("解析失败应使请求失败");
+
+    assert_eq!(
+        crate::error::classify_reqwest_error(&err),
+        ErrorCode::DnsFailure,
+        "错误信息：{}",
+        crate::error::describe_net_error(&err)
     );
 }
 
@@ -893,6 +947,535 @@ async fn an_unreachable_proxy_is_reported_as_a_proxy_error() {
         .await
         .expect_err("应失败");
     assert_eq!(err.code, ErrorCode::ProxyError, "错误信息：{}", err.message);
+}
+
+/// 进程级环境变量的锁。改环境变量的用例必须自己排队（当前只有两条会改：直连不理
+/// 环境变量代理那条，与跟随系统读操作系统配置那条）。
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 取锁，并从毒化中恢复。
+///
+/// 从毒化中恢复而不是连带失败：一条用例断言失败不该让另一条跟着报"锁中毒"——那样
+/// 真正的失败原因会被埋在第二条的 panic 里，排查时看到的是一堆同源噪音。
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 「不使用代理」必须**真的**直连：进程环境变量里配了代理也不算。
+///
+/// reqwest 的 `auto_sys_proxy` 默认开着（只有挂过显式代理才会被关掉），所以不显式禁用
+/// 的话，「不使用代理」的实际含义就变成"环境变量里有代理则走它"——用户在界面上选了
+/// 直连，请求却从代理出去了。
+///
+/// 判别方式：让「目标服务器」与「环境变量里那个代理」是两台不同的本地服务器，请求
+/// 落在哪一台，就说明了它到底是怎么出去的。
+#[tokio::test]
+async fn an_explicit_direct_decision_ignores_an_environment_proxy() {
+    let _guard = env_lock();
+
+    let proxy = TestServer::start(Reply::ok("{\"via\":\"proxy\"}"));
+    let target = TestServer::start(Reply::ok("{\"via\":\"direct\"}"));
+    let target_url = target.url("/x");
+
+    let previous = std::env::var("HTTP_PROXY").ok();
+    std::env::set_var("HTTP_PROXY", proxy.base_url());
+
+    let harness = Harness::new("net-direct-ignores-env-proxy");
+    let saved = harness.save(&harness.request("R", "GET", &target_url));
+    let sent = harness.send(&SendRequestInput::saved(&saved.id)).await;
+
+    // 先恢复环境变量再断言：断言失败也不能把这个进程级状态留下
+    match previous {
+        Some(value) => std::env::set_var("HTTP_PROXY", value),
+        None => std::env::remove_var("HTTP_PROXY"),
+    }
+
+    let payload = sent.expect("直连应成功");
+    assert_eq!(payload.status, 200);
+    assert_eq!(target.request_count(), 1, "请求应当直接落在目标上");
+    assert!(
+        !target.last_request().raw_first_line.contains("http://"),
+        "请求行应是直连形态，而不是代理形态：{}",
+        target.last_request().raw_first_line
+    );
+
+    // 按「有没有为**本目标**转发的请求」判定，而不是数这台代理收到的请求总数：
+    // 环境变量是进程级的，同一进程里别的用例的请求也可能被它送到这台代理上，
+    // 用总数会在并行执行时误报。
+    let forwarded = proxy
+        .requests()
+        .into_iter()
+        .filter(|request| request.raw_first_line.contains(&target_url))
+        .count();
+    assert_eq!(forwarded, 0, "环境变量里的代理不该收到本目标的请求");
+}
+
+/// 把进程里可能存在的代理环境变量清空，析构时还原。
+///
+/// 要断言的是"环境变量为空时仍能读到系统配置"，因此不能假设开发机的 shell 里没有
+/// `HTTP_PROXY`——在这类机器上它恰恰常常有。
+struct ProxyEnvCleared {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl ProxyEnvCleared {
+    fn take() -> Self {
+        const NAMES: [&str; 4] = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"];
+        let saved = NAMES
+            .iter()
+            .map(|name| {
+                let previous = std::env::var(name).ok();
+                std::env::remove_var(name);
+                (*name, previous)
+            })
+            .collect();
+        Self { saved }
+    }
+}
+
+impl Drop for ProxyEnvCleared {
+    fn drop(&mut self) {
+        for (name, value) in &self.saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
+/// 「跟随系统」读的是**操作系统配置**，不只是环境变量（spec: 三级代理）。
+///
+/// 注入一份"从注册表读到的"设置（静态代理指向第二个本地服务器），同时把进程里的
+/// 代理环境变量清空——「环境变量为空、系统配置有代理」正是内网那台机器的形状。
+/// 断言请求真的经那个代理发出：代理服务器看到的请求行是代理形态。
+#[tokio::test]
+async fn system_mode_uses_the_operating_system_proxy_not_only_the_environment() {
+    let _env_guard = env_lock();
+    let _cleared = ProxyEnvCleared::take();
+
+    let proxy_server = TestServer::start(Reply::ok("{\"via\":\"system-proxy\"}"));
+    let _platform = proxy::use_test_platform_proxy(proxy::PlatformProxySettings::from_raw(
+        Some(proxy_server.base_url()),
+        None,
+        None,
+    ));
+
+    let harness = Harness::new("net-system-proxy");
+    let mut request = harness.request("R", "GET", "http://example.test/x");
+    request.settings.proxy = Some(ProxyConfig::system());
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("经系统代理应成功");
+
+    assert_eq!(payload.status, 200);
+    assert!(payload.via_proxy, "响应元数据应标明经由代理");
+    assert_eq!(proxy_server.request_count(), 1, "请求应当经系统代理发出");
+    assert!(
+        proxy_server
+            .last_request()
+            .raw_first_line
+            .contains("http://example.test/x"),
+        "代理看到的应是代理形态的请求行：{}",
+        proxy_server.last_request().raw_first_line
+    );
+}
+
+/// 响应里的代理决定必须**与实走的路径一致**（spec: 代理决定的可见性）。
+#[tokio::test]
+async fn the_response_reports_the_decision_that_was_actually_used() {
+    let proxy = TestServer::start(Reply::ok("{\"via\":\"proxy\"}"));
+    let target = TestServer::start(Reply::ok("{\"via\":\"direct\"}"));
+    let proxy_url = proxy.base_url();
+    let harness = Harness::new("net-decision-visible");
+
+    // 经代理：层级、原因与地址都要对得上实走的那一份
+    let mut by_proxy = harness.request("R1", "GET", "http://example.test/x");
+    by_proxy.settings.proxy = Some(ProxyConfig::manual(proxy_url.clone()));
+    let saved = harness.save(&by_proxy);
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("应经代理成功");
+
+    assert!(payload.via_proxy);
+    assert_eq!(payload.proxy_decision.layer, Some(ProxyLayer::Request));
+    assert_eq!(payload.proxy_decision.reason, ProxyReason::Manual);
+    assert_eq!(
+        payload.proxy_decision.proxy_url.as_deref(),
+        Some(proxy_url.as_str())
+    );
+    assert_eq!(proxy.request_count(), 1, "决定说的与实际走的必须是同一件事");
+
+    // 命中白名单：结果是直连，原因是白名单——而不是"没配代理"
+    let mut by_direct = harness.request("R2", "GET", &target.url("/x"));
+    by_direct.settings.proxy = Some(ProxyConfig {
+        mode: ProxyMode::Manual,
+        url: Some(proxy_url.clone()),
+        no_proxy: vec!["127.*".into()],
+        ..ProxyConfig::default()
+    });
+    let saved = harness.save(&by_direct);
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("应直连成功");
+
+    assert!(!payload.via_proxy);
+    assert_eq!(payload.proxy_decision.reason, ProxyReason::Whitelisted);
+    assert_eq!(payload.proxy_decision.proxy_url, None);
+    assert_eq!(target.request_count(), 1, "白名单命中时应直接落在目标上");
+}
+
+/// 失败时同样要能看到这一次的代理决定，且**既有的错误形状不变**
+/// （spec: 代理决定的可见性）。
+#[tokio::test]
+async fn a_failed_send_still_reports_the_decision() {
+    let dead_proxy = format!("http://{}", closed_port_addr());
+    let harness = Harness::new("net-decision-on-failure");
+
+    let mut request = harness.request("R", "GET", "http://example.test/x");
+    request.settings.proxy = Some(ProxyConfig::manual(dead_proxy.clone()));
+    let saved = harness.save(&request);
+
+    let err = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect_err("代理不可达应失败");
+    assert_eq!(err.code, ErrorCode::ProxyError, "错误信息：{}", err.message);
+
+    let value = serde_json::to_value(&err).expect("可序列化");
+    assert_eq!(value["code"], "proxy_error", "code 的位置与含义不变");
+    assert!(value["message"].is_string(), "message 照旧是字符串");
+
+    let view = &value["proxy_decision"];
+    assert_eq!(
+        view["layer"], "request",
+        "失败时也要说清是哪一层定的：{value}"
+    );
+    assert_eq!(view["reason"], "manual");
+    assert_eq!(view["proxy_url"], dead_proxy.as_str());
+}
+
+// ---------------------------------------------------------------------------
+// PAC 接入（5.6 / 5.7 / 5.3）
+// ---------------------------------------------------------------------------
+
+/// PAC 给了降级链时，发送路径**逐跳**走：首选不通就换下一跳，且决定呈现的是实际走的
+/// 那一跳（design D11 / spec「降级链依序尝试」）。
+#[tokio::test]
+async fn a_pac_chain_is_walked_hop_by_hop() {
+    let harness = Harness::new("net-pac-chain");
+    let dead = closed_port_addr();
+    let good = TestServer::start(Reply::ok("{\"via\":\"second\"}"));
+
+    let good_authority = good.base_url().trim_start_matches("http://").to_string();
+    let pac_server = TestServer::start(Reply::with_content_type(
+        pac_returning(&format!("PROXY {dead}; PROXY {good_authority}")),
+        "application/x-ns-proxy-autoconfig",
+    ));
+    let pac_url = pac_server.url("/proxy.pac");
+    let expected_proxy = format!("http://{good_authority}");
+
+    let mut request = harness.request("R", "GET", "http://example.test/x");
+    request.settings.proxy = Some(ProxyConfig::pac(pac_url.clone()));
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("首选不通应换下一跳，而不是直接失败");
+
+    assert_eq!(payload.status, 200);
+    assert!(payload.via_proxy, "第二跳是代理，应标记为经由代理");
+    assert_eq!(good.request_count(), 1, "请求应当经第二跳发出");
+    assert_eq!(payload.proxy_decision.reason, ProxyReason::Pac);
+    assert_eq!(
+        payload.proxy_decision.proxy_url.as_deref(),
+        Some(expected_proxy.as_str()),
+        "决定要说的是**实际走的那一跳**"
+    );
+    assert_eq!(
+        payload.proxy_decision.pac_url.as_deref(),
+        Some(pac_url.as_str())
+    );
+}
+
+/// 显式填写的 PAC 覆盖系统配置里的自动代理（design D10）。
+#[tokio::test]
+async fn an_explicit_pac_overrides_the_system_one() {
+    let _env_guard = env_lock();
+    let _cleared = ProxyEnvCleared::take();
+    let harness = Harness::new("net-pac-explicit");
+
+    let target = TestServer::start(Reply::ok("{}"));
+    let system_pac = TestServer::start(Reply::with_content_type(
+        pac_returning("PROXY 127.0.0.1:1"),
+        "application/x-ns-proxy-autoconfig",
+    ));
+    let explicit_pac = TestServer::start(Reply::with_content_type(
+        pac_returning("DIRECT"),
+        "application/x-ns-proxy-autoconfig",
+    ));
+    let _platform = proxy::use_test_platform_proxy(proxy::PlatformProxySettings::from_raw(
+        None,
+        Some(system_pac.url("/p.pac")),
+        None,
+    ));
+
+    let mut request = harness.request("R", "GET", &target.url("/x"));
+    request.settings.proxy = Some(ProxyConfig::pac(explicit_pac.url("/p.pac")));
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("发送");
+
+    assert_eq!(explicit_pac.request_count(), 1, "显式 PAC 应被取用");
+    assert_eq!(
+        system_pac.request_count(),
+        0,
+        "系统配置里的 PAC 不该被取用"
+    );
+    assert!(!payload.via_proxy, "显式 PAC 说了 DIRECT");
+    assert_eq!(payload.proxy_decision.reason, ProxyReason::Pac);
+}
+
+/// 系统配置里是 PAC 时，「跟随系统」按它求值（spec「系统配置为 PAC 时按其求值」）。
+#[tokio::test]
+async fn the_system_pac_is_used_when_the_request_follows_the_system() {
+    let _env_guard = env_lock();
+    let _cleared = ProxyEnvCleared::take();
+    let harness = Harness::new("net-pac-system");
+
+    let target = TestServer::start(Reply::ok("{}"));
+    let pac_server = TestServer::start(Reply::with_content_type(
+        pac_returning("DIRECT"),
+        "application/x-ns-proxy-autoconfig",
+    ));
+    let _platform = proxy::use_test_platform_proxy(proxy::PlatformProxySettings::from_raw(
+        None,
+        Some(pac_server.url("/p.pac")),
+        None,
+    ));
+
+    let mut request = harness.request("R", "GET", &target.url("/x"));
+    request.settings.proxy = Some(ProxyConfig::system());
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("发送");
+
+    assert_eq!(pac_server.request_count(), 1, "应当取用系统配置里的 PAC");
+    assert_eq!(payload.proxy_decision.layer, Some(ProxyLayer::System));
+    assert_eq!(payload.proxy_decision.reason, ProxyReason::Pac);
+    assert_eq!(target.request_count(), 1);
+}
+
+/// TTL 之内不重复取 PAC（design D4）。
+#[tokio::test]
+async fn the_pac_is_fetched_once_within_its_ttl() {
+    let harness = Harness::new("net-pac-cache");
+    let target = TestServer::start(Reply::ok("{}"));
+    let pac_server = TestServer::start(Reply::with_content_type(
+        pac_returning("DIRECT"),
+        "application/x-ns-proxy-autoconfig",
+    ));
+
+    let mut request = harness.request("R", "GET", &target.url("/x"));
+    request.settings.proxy = Some(ProxyConfig::pac(pac_server.url("/p.pac")));
+    let saved = harness.save(&request);
+
+    harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("首次发送");
+    harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("再次发送");
+
+    assert_eq!(pac_server.request_count(), 1, "TTL 之内不该重复取 PAC");
+    assert_eq!(target.request_count(), 2);
+}
+
+/// PAC 取不到时按直连继续，且这个降级写进决定里（spec「PAC 拉取失败按直连继续」）。
+#[tokio::test]
+async fn an_unreachable_pac_continues_directly_and_says_so() {
+    let harness = Harness::new("net-pac-unreachable");
+    let target = TestServer::start(Reply::ok("{}"));
+    let pac_url = format!("http://{}/p.pac", closed_port_addr());
+
+    let mut request = harness.request("R", "GET", &target.url("/x"));
+    request.settings.proxy = Some(ProxyConfig::pac(pac_url.clone()));
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("PAC 取不到不该让请求失败");
+
+    assert_eq!(payload.status, 200);
+    assert!(!payload.via_proxy, "取不到 PAC 就直连");
+    assert_eq!(payload.proxy_decision.reason, ProxyReason::PacUnavailable);
+    assert_eq!(payload.proxy_decision.proxy_url, None);
+    assert_eq!(
+        payload.proxy_decision.pac_url.as_deref(),
+        Some(pac_url.as_str()),
+        "降级不静默：来源仍要写出来"
+    );
+    assert_eq!(target.request_count(), 1);
+}
+
+/// 取新失败时沿用上一次成功取回的副本，且这个事实写进决定（design D4）。
+#[tokio::test]
+async fn a_failed_refresh_keeps_using_the_last_good_copy() {
+    let mut harness = Harness::new("net-pac-stale");
+    // 零 TTL：每次发送都重取——正常 TTL 是五分钟，等不起，而"回落"这条路只有重取失败
+    // 才走得到。
+    harness.pac = pac::PacStore::with_ttl(Duration::ZERO);
+
+    let target = TestServer::start(Reply::ok("{}"));
+    let pac_server = TestServer::start(Reply::with_content_type(
+        pac_returning("DIRECT"),
+        "application/x-ns-proxy-autoconfig",
+    ));
+
+    let mut request = harness.request("R", "GET", &target.url("/x"));
+    request.settings.proxy = Some(ProxyConfig::pac(pac_server.url("/p.pac")));
+    let saved = harness.save(&request);
+
+    let first = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("首次发送");
+    assert_eq!(first.proxy_decision.reason, ProxyReason::Pac);
+    assert!(!first.proxy_decision.pac_stale, "首次是新鲜取到的");
+
+    // 让 PAC 服务器消失：这次取不到，应回落到上一次成功的那一份
+    drop(pac_server);
+
+    let second = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("回落到旧副本仍应发出");
+
+    assert_eq!(second.status, 200);
+    assert_eq!(second.proxy_decision.reason, ProxyReason::Pac);
+    assert!(
+        second.proxy_decision.pac_stale,
+        "用的是旧副本，这个事实要说出来"
+    );
+}
+
+/// 端到端：**系统配置注入的** PAC 指定了一个代理，请求就经它发出，决定也这么说（7.1）。
+///
+/// 与前面的两条例用分头覆盖了一半：`a_pac_chain_is_walked_hop_by_hop` 用显式 PAC 走多跳，
+/// `the_system_pac_is_used_when_the_request_follows_the_system` 用系统 PAC 但只说 DIRECT。
+/// 这一条把两端合起来——「跟随系统」读到的是 PAC，而 PAC 说走代理。
+#[tokio::test]
+async fn the_system_pac_can_send_the_request_through_a_proxy() {
+    let _env_guard = env_lock();
+    let _cleared = ProxyEnvCleared::take();
+    let harness = Harness::new("net-pac-system-proxy");
+
+    let proxy_server = TestServer::start(Reply::ok("{\"via\":\"pac-proxy\"}"));
+    let proxy_authority = proxy_server
+        .base_url()
+        .trim_start_matches("http://")
+        .to_string();
+    let expected_proxy = format!("http://{proxy_authority}");
+    let pac_server = TestServer::start(Reply::with_content_type(
+        pac_returning(&format!("PROXY {proxy_authority}")),
+        "application/x-ns-proxy-autoconfig",
+    ));
+    let pac_url = pac_server.url("/p.pac");
+    let _platform = proxy::use_test_platform_proxy(proxy::PlatformProxySettings::from_raw(
+        None,
+        Some(pac_url.clone()),
+        None,
+    ));
+
+    let mut request = harness.request("R", "GET", "http://example.test/x");
+    request.settings.proxy = Some(ProxyConfig::system());
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("应经 PAC 指定的代理发出");
+
+    assert_eq!(payload.status, 200);
+    assert!(payload.via_proxy);
+    assert_eq!(payload.proxy_decision.layer, Some(ProxyLayer::System));
+    assert_eq!(payload.proxy_decision.reason, ProxyReason::Pac);
+    assert_eq!(
+        payload.proxy_decision.proxy_url.as_deref(),
+        Some(expected_proxy.as_str()),
+        "决定给出的地址应当是实际走的那个"
+    );
+    assert_eq!(
+        payload.proxy_decision.pac_url.as_deref(),
+        Some(pac_url.as_str())
+    );
+
+    assert_eq!(proxy_server.request_count(), 1, "请求应当经该代理发出");
+    assert!(
+        proxy_server
+            .last_request()
+            .raw_first_line
+            .contains("http://example.test/x"),
+        "代理看到的应是代理形态的请求行：{}",
+        proxy_server.last_request().raw_first_line
+    );
+}
+
+/// PAC 的正文**不进日志**（spec: PAC 求值的边界）。
+///
+/// 把全局日志出口的下游换成内存捕获，跑一次完整的发送（取 PAC → 求值 → 发出），再看有没有
+/// 任何一行提到 PAC 的正文。模块里本就没有记录正文的入口，这条用例把那件事钉住：日后有人
+/// 顺手把正文打进日志，它会红。
+#[tokio::test]
+async fn the_pac_body_never_reaches_the_log() {
+    /// 正文里的哨兵：任何一行日志提到它，就说明正文漏出去了。
+    const SENTINEL: &str = "PAC_SENTINEL_9f3a";
+
+    let sink = logging::MemorySink::new();
+    logging::global().set_sink(sink.clone());
+
+    let harness = Harness::new("net-pac-no-log");
+    let target = TestServer::start(Reply::ok("{}"));
+    let pac_server = TestServer::start(Reply::with_content_type(
+        format!("// {SENTINEL}\n{}", pac_returning("DIRECT")),
+        "application/x-ns-proxy-autoconfig",
+    ));
+
+    let mut request = harness.request("R", "GET", &target.url("/x"));
+    request.settings.proxy = Some(ProxyConfig::pac(pac_server.url("/p.pac")));
+    let saved = harness.save(&request);
+
+    harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("发送");
+
+    // 还原全局出口，别把其它用例的日志也收进来
+    logging::global().set_sink(Arc::new(logging::TracingSink));
+
+    let text = sink.joined();
+    assert!(
+        text.contains("proxy decision"),
+        "决定本身应当被记下，否则这条用例什么都没测到：{text}"
+    );
+    assert!(!text.contains(SENTINEL), "PAC 的正文不该进日志：{text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1236,6 +1819,7 @@ async fn persisted_cookies_survive_restart_and_still_match() {
         &harness.responses,
         &reborn,
         &harness.sends,
+        &harness.pac,
         &SendRequestInput::saved(&saved.id),
     )
     .await
@@ -1299,6 +1883,7 @@ async fn unavailable_key_store_does_not_break_sending() {
         &harness.responses,
         &harness.cookies,
         &harness.sends,
+        &harness.pac,
         &SendRequestInput::saved(&saved.id),
     )
     .await
@@ -1320,6 +1905,7 @@ async fn unavailable_key_store_does_not_break_sending() {
         &harness.responses,
         &harness.cookies,
         &harness.sends,
+        &harness.pac,
         &SendRequestInput::saved(&saved.id),
     )
     .await

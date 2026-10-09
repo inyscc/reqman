@@ -9,6 +9,7 @@ pub mod cancel;
 pub mod cookies;
 pub mod headers;
 pub mod limits;
+pub mod pac;
 pub mod proxy;
 pub mod response;
 pub mod uploads;
@@ -16,10 +17,14 @@ pub mod uploads;
 #[cfg(test)]
 mod tests;
 
-use crate::error::{classify_reqwest_error, describe_net_error, AppError, AppResult, ErrorCode};
+use crate::error::{
+    classify_reqwest_error, describe_failure, describe_net_error, AppError, AppResult, ErrorCode,
+};
 use crate::logging;
 use crate::secrets::KeyProvider;
-use crate::storage::model::{AuthConfig, Environment, HttpVersion, KeyValue, SavedRequest};
+use crate::storage::model::{
+    AuthConfig, Environment, HttpVersion, KeyValue, ProxyDecisionView, SavedRequest,
+};
 use crate::storage::variables::ScopeLayers;
 use crate::storage::{variables, workspace, Db};
 use crate::url_util;
@@ -142,6 +147,10 @@ pub struct ResponsePayload {
     pub request_url: String,
     /// 本次请求是否经由代理发出。
     pub via_proxy: bool,
+    /// 本次发送的**代理决定**：直连还是经代理、由哪一层定、为什么。
+    ///
+    /// 与失败路径上挂的是同一次求解的产物，且**不含凭据**。
+    pub proxy_decision: ProxyDecisionView,
     /// 实际协商到的协议版本。
     pub http_version: String,
     /// 解析时未能解析的变量名。
@@ -345,6 +354,7 @@ pub async fn send_request(
     store: &ResponseStore,
     jar: &cookies::CookieJar,
     sends: &Arc<cancel::SendRegistry>,
+    pac_store: &pac::PacStore,
     input: &SendRequestInput,
 ) -> AppResult<ResponsePayload> {
     let request = resolve_request_source(db, input)?;
@@ -391,19 +401,39 @@ pub async fn send_request(
     }
 
     // 代理：请求 > 环境 > 全局，再结合系统设置与白名单
-    let system_proxy = proxy::SystemProxyEnv::from_env();
+    //
+    // 系统设置读的是**操作系统当前的代理配置**（Windows 上含静态代理与自动代理配置
+    // 脚本），不只是环境变量——见 `SystemProxyEnv::from_platform`。读的是"此刻"，不是
+    // 启动时固化。
+    let system_proxy = proxy::SystemProxyEnv::from_platform();
     let proxy_config = proxy::resolve_proxy_for_request(
         db,
         &resolved.settings,
         context.environment.as_ref().map(|env| env.id.as_str()),
         key_provider,
     )?;
-    let decision = proxy::decide(proxy_config.as_ref(), &resolved.url, &system_proxy);
+
+    // 代理决定在这里求解**一次**，然后同时挂到成功与失败两条路径上（design D6）。
+    // 求解两次就是两份真相——PAC 会随时间变，失败之后重算未必等于当时那一个。
+    let outcome = proxy::decide_with_pac(
+        proxy_config.as_ref().map(|resolved| &resolved.config),
+        &resolved.url,
+        &system_proxy,
+        pac_store,
+    )
+    .await;
+    let decision_view = outcome.view(proxy_config.as_ref());
+
+    // 失败路径上的错误由 `?` 直接抛出，所以先把决定备成一条可复用的包装。
+    //
+    // 它按**哪一跳**给视图：首选不通而落到后继项时，决定要说的是实际走的那一跳。
+    logging::global().log_proxy_decision(&decision_view);
+    let failure_with_hop = |index: usize, err: AppError| {
+        err.with_proxy_decision(outcome.hopping(index).view(proxy_config.as_ref()))
+    };
 
     // 超时：请求 > 应用级（spec: http-engine「请求级网络设置」）
     let timeout = limits::effective_timeout(db, &resolved.settings)?;
-
-    let client = build_client(&resolved, &decision, timeout, Some(jar.provider()))?;
 
     // 认证可能落在查询串上
     let auth_application = auth::apply(&resolved.auth)?;
@@ -413,65 +443,83 @@ pub async fn send_request(
         upsert_query(&resolved.url, &auth_application.query)?
     };
 
-    let method = reqwest::Method::from_bytes(resolved.method.as_bytes()).map_err(|_| {
-        AppError::new(
-            ErrorCode::RequestBuild,
-            format!("请求方法无法使用：{}", resolved.method),
-        )
-    })?;
-
-    let mut builder = client.request(method, &url);
-
-    let content_type_configured = resolved
-        .headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"));
-
-    for (name, value) in &resolved.headers {
-        headers::validate_header(name, value)?;
-        builder = builder.header(name.as_str(), value.as_str());
-    }
-    for (name, value) in &auth_application.headers {
-        headers::validate_header(name, value)?;
-        builder = builder.header(name.as_str(), value.as_str());
-    }
-
-    let built = body::build(&resolved.body, uploads, content_type_configured).await?;
-    builder = match built {
-        body::BuiltBody::None => builder,
-        body::BuiltBody::Bytes { data, content_type } => {
-            if let Some(content_type) = content_type {
-                builder = builder.header("Content-Type", content_type);
-            }
-            builder.body(data)
-        }
-        body::BuiltBody::Form(pairs) => builder.form(&pairs),
-        body::BuiltBody::Multipart(form) => builder.multipart(*form),
-        body::BuiltBody::Stream { body, content_type } => {
-            if let Some(content_type) = content_type {
-                builder = builder.header("Content-Type", content_type);
-            }
-            builder.body(body)
-        }
+    // 逐跳尝试（design D11）。
+    //
+    // `reqwest` 的客户端没有"按顺序尝试"这个能力，所以 PAC 的降级链只能在这里走。
+    // 只尝试一次是常态：非 PAC 的来源只有一跳，正文不可重放时也只给一次机会。
+    let attempts = if resolved.body.is_replayable() {
+        outcome.plan().len().min(MAX_PROXY_HOPS)
+    } else {
+        1
     };
 
     let started = Instant::now();
-    logging::global().log_request_start(
-        &resolved.method,
-        &url,
-        &resolved.header_names(),
-    );
+    logging::global().log_request_start(&resolved.method, &url, &resolved.header_names());
 
-    let via_proxy = matches!(decision, ProxyDecision::Use { .. });
+    let mut response = None;
+    let mut last_failure: Option<(usize, AppError)> = None;
+    let mut succeeded_index = 0usize;
 
-    if send.is_cancelled() {
-        return Err(send.cancelled_error());
+    for (index, hop) in outcome.plan().iter().take(attempts).enumerate() {
+        if send.is_cancelled() {
+            return Err(send.cancelled_error());
+        }
+
+        let via_hop = hop.uses_proxy();
+        let builder = build_attempt(
+            &resolved,
+            hop,
+            timeout,
+            Some(jar.provider()),
+            uploads,
+            &url,
+            &auth_application.headers,
+        )
+        .await
+        .map_err(|err| failure_with_hop(index, err))?;
+
+        let sent = tokio::select! {
+            result = builder.send() => result,
+            _ = cancel_token.cancelled() => return Err(send.cancelled_error()),
+        };
+
+        match sent {
+            Ok(value) => {
+                succeeded_index = index;
+                response = Some(value);
+                break;
+            }
+            Err(err) => {
+                let failure = map_net_error(err, via_hop);
+                let can_retry = index + 1 < attempts && hop_unavailable(failure.code);
+                last_failure = Some((index, failure));
+                if !can_retry {
+                    break;
+                }
+            }
+        }
     }
 
-    let mut response = tokio::select! {
-        result = builder.send() => result.map_err(|err| map_net_error(err, via_proxy))?,
-        _ = cancel_token.cancelled() => return Err(send.cancelled_error()),
+    let mut response = match response {
+        Some(response) => response,
+        None => {
+            let (index, failure) =
+                last_failure.unwrap_or_else(|| (0, AppError::internal("没有可尝试的代理跳")));
+            return Err(failure_with_hop(index, failure));
+        }
     };
+
+    // 实际走的是第几跳，决定就按第几跳呈现——否则决定会与实走的路径对不上
+    // （spec: 代理决定的可见性）。
+    let decision_view = if succeeded_index == 0 {
+        decision_view
+    } else {
+        let effective = outcome.hopping(succeeded_index).view(proxy_config.as_ref());
+        logging::global().log_proxy_decision(&effective);
+        effective
+    };
+    let via_proxy = outcome.hopping(succeeded_index).primary().uses_proxy();
+    let with_decision = |err: AppError| err.with_proxy_decision(decision_view.clone());
     let status = response.status();
     let negotiated_version = version_label(response.version());
     let final_url = response.url().to_string();
@@ -498,7 +546,9 @@ pub async fn send_request(
     // 落盘副本在登记进仓库之前由守卫负责清理：取消或中途失败都不留残余
     let mut spill = response::SpillGuard::new(spill_path.clone());
     let captured = tokio::select! {
-        result = response::read_body(&mut response, limit, &spill_path) => result?,
+        result = response::read_body(&mut response, limit, &spill_path) => {
+            result.map_err(|err| with_decision(err))?
+        }
         _ = cancel_token.cancelled() => return Err(send.cancelled_error()),
     };
 
@@ -537,18 +587,23 @@ pub async fn send_request(
         // 实际用于发送的目标（认证落在查询串上的部分已经并入），与 final_url 不同：
         // 后者可能已被重定向改写
         request_url: url.clone(),
-        via_proxy: matches!(decision, ProxyDecision::Use { .. }),
+        via_proxy,
         http_version: negotiated_version,
+        // 与失败路径上挂的是**同一份**决定（design D6）
+        proxy_decision: decision_view.clone(),
         unresolved: resolved.unresolved.clone(),
     };
 
     logging::global().log_response_summary(status.as_u16(), elapsed.as_millis(), total);
-    store.store(&id, captured)?;
+    store
+        .store(&id, captured)
+        .map_err(|err| with_decision(err))?;
     // 落盘文件的所有权已交给仓库，守卫不再负责清理
     spill.disarm();
 
     // 响应可能带来了 set-cookie（含过期删除指令）；此刻 jar 已是最新，落库
-    jar.sync_to_db(db, key_provider)?;
+    jar.sync_to_db(db, key_provider)
+        .map_err(|err| with_decision(err))?;
 
     Ok(payload)
 }
@@ -562,6 +617,87 @@ fn upsert_query(url: &str, pairs: &[(String, String)]) -> AppResult<String> {
         }
     }
     url_util::compose_url(&base, &params)
+}
+
+/// PAC 降级链最多尝试的跳数（design D11）。
+///
+/// 有界是必需的：一条长链逐跳串行尝试会把一次发送拖成多个连接超时相加，比直接失败更难用。
+const MAX_PROXY_HOPS: usize = 3;
+
+/// 这一跳"不可用"的判据：失败发生在**连接建立或解析**阶段。
+///
+/// 只在这一类失败上换跳。拿到响应就不再换——后端的 5xx 是服务的回答而不是代理不通，
+/// 换个代理重发同一个请求会改变语义。两条特别排除：`TlsError` 多半是对端的问题，换跳法
+/// 不会变好；`Timeout` 是应用级预算到期，预算本来就是**整次发送**的，已经花掉了。
+fn hop_unavailable(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::ConnectionFailed
+            | ErrorCode::ConnectionRefused
+            | ErrorCode::ConnectionTimedOut
+            | ErrorCode::ProxyError
+            | ErrorCode::DnsFailure
+    )
+}
+
+/// 组装**一次尝试**：客户端、请求头与正文。
+///
+/// 每跳一份——代理是挂在客户端上的，换一跳就得换一个客户端。正文也重新构造：可重放的
+/// 载体不碰一次性句柄，重建没有副作用；不可重放的载体根本走不到第二跳（见调用处）。
+#[allow(clippy::too_many_arguments)]
+async fn build_attempt<C: reqwest::cookie::CookieStore + 'static>(
+    resolved: &ResolvedRequest,
+    decision: &ProxyDecision,
+    timeout: Option<Duration>,
+    cookie_provider: Option<Arc<C>>,
+    uploads: &UploadRegistry,
+    url: &str,
+    auth_headers: &[(String, String)],
+) -> AppResult<reqwest::RequestBuilder> {
+    let client = build_client(resolved, decision, timeout, cookie_provider)?;
+
+    let method = reqwest::Method::from_bytes(resolved.method.as_bytes()).map_err(|_| {
+        AppError::new(
+            ErrorCode::RequestBuild,
+            format!("请求方法无法使用：{}", resolved.method),
+        )
+    })?;
+
+    let mut builder = client.request(method, url);
+
+    for (name, value) in &resolved.headers {
+        headers::validate_header(name, value)?;
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    for (name, value) in auth_headers {
+        headers::validate_header(name, value)?;
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+
+    let content_type_configured = resolved
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"));
+
+    let built = body::build(&resolved.body, uploads, content_type_configured).await?;
+
+    Ok(match built {
+        body::BuiltBody::None => builder,
+        body::BuiltBody::Bytes { data, content_type } => {
+            if let Some(content_type) = content_type {
+                builder = builder.header("Content-Type", content_type);
+            }
+            builder.body(data)
+        }
+        body::BuiltBody::Form(pairs) => builder.form(&pairs),
+        body::BuiltBody::Multipart(form) => builder.multipart(*form),
+        body::BuiltBody::Stream { body, content_type } => {
+            if let Some(content_type) = content_type {
+                builder = builder.header("Content-Type", content_type);
+            }
+            builder.body(body)
+        }
+    })
 }
 
 /// 组装请求客户端。
@@ -606,22 +742,32 @@ fn build_client<C: reqwest::cookie::CookieStore + 'static>(
         }
     }
 
-    if let ProxyDecision::Use {
-        url,
-        username,
-        password,
-    } = decision
-    {
-        let mut proxy = reqwest::Proxy::all(url.as_str()).map_err(|err| {
-            AppError::new(
-                ErrorCode::ProxyError,
-                format!("代理配置无效：{}", err),
-            )
-        })?;
-        if let Some(username) = username {
-            proxy = proxy.basic_auth(username, password.as_deref().unwrap_or(""));
+    match decision {
+        // 直连必须在客户端上**显式**落地。
+        //
+        // reqwest 的 `auto_sys_proxy` 默认是 `true`，只有挂过显式代理才会被关掉；不显式
+        // 关掉的话，「不使用代理」的实际含义就变成"环境变量里有代理则走它"，与 spec
+        // 「三级代理」要求的"直接发出请求"不是一回事。这个偏差在本次把系统代理接进来
+        // 之后更危险：直连会被隐式系统代理二次接管。
+        ProxyDecision::Direct => {
+            builder = builder.no_proxy();
         }
-        builder = builder.proxy(proxy);
+        ProxyDecision::Use {
+            url,
+            username,
+            password,
+        } => {
+            let mut proxy = reqwest::Proxy::all(url.as_str()).map_err(|err| {
+                AppError::new(
+                    ErrorCode::ProxyError,
+                    format!("代理配置无效：{}", err),
+                )
+            })?;
+            if let Some(username) = username {
+                proxy = proxy.basic_auth(username, password.as_deref().unwrap_or(""));
+            }
+            builder = builder.proxy(proxy);
+        }
     }
 
     builder.build().map_err(|err| {
@@ -634,15 +780,24 @@ fn build_client<C: reqwest::cookie::CookieStore + 'static>(
 
 /// 把网络错误映射为稳定分类，并在消息上过一遍脱敏出口。
 ///
-/// 配置了代理时，连接阶段的失败连的是代理而不是目标，因此归为代理错误；
-/// DNS 与 TLS 失败仍按各自类别报告——它们与是否使用代理无关。
+/// 配置了代理时，连接阶段的失败连的是代理而不是目标，因此归为代理错误（连接建立超时
+/// 同属这一类）；DNS 与 TLS 失败仍按各自类别报告——它们与是否使用代理无关。
 pub(crate) fn map_net_error(err: reqwest::Error, via_proxy: bool) -> AppError {
     let mut code = classify_reqwest_error(&err);
-    if via_proxy && matches!(code, ErrorCode::ConnectionRefused | ErrorCode::ConnectionFailed) {
+    if via_proxy
+        && matches!(
+            code,
+            ErrorCode::ConnectionRefused
+                | ErrorCode::ConnectionFailed
+                | ErrorCode::ConnectionTimedOut
+        )
+    {
         code = ErrorCode::ProxyError;
     }
-    let message = logging::global().redact_text(&describe_net_error(&err));
-    AppError::new(code, message)
+
+    // 先补上「本次未经代理」这一事实，再过脱敏出口——顺序保证兜底清洗是最后一道。
+    let described = describe_failure(code, via_proxy, &describe_net_error(&err));
+    AppError::new(code, logging::global().redact_text(&described))
 }
 
 /// 供命令层判断「哪些取值是 secret」，用于界面掩码。

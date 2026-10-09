@@ -491,6 +491,7 @@ pub async fn perform_send_request(
         &state.responses,
         &state.cookies,
         &state.sends,
+        &state.pac,
         &input,
     )
     .await
@@ -1341,6 +1342,7 @@ mod tests {
             responses: Arc::new(ResponseStore::new(4, dir.join("responses"))),
             cookies: Arc::new(crate::net::cookies::CookieJar::new()),
             sends: Arc::new(crate::net::cancel::SendRegistry::new()),
+            pac: Arc::new(crate::net::pac::PacStore::new()),
         };
         (dir, app)
     }
@@ -1489,6 +1491,7 @@ mod tests {
             responses: Arc::new(ResponseStore::new(2, dir.join("responses"))),
             cookies: Arc::new(crate::net::cookies::CookieJar::new()),
             sends: Arc::new(crate::net::cancel::SendRegistry::new()),
+            pac: Arc::new(crate::net::pac::PacStore::new()),
         };
         let workspace = list_workspaces(&app).unwrap().remove(0);
 
