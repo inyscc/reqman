@@ -23,6 +23,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v7
+        with:
+          # 生成变更清单要读「两个标签之间的提交」，浅克隆（默认 depth=1）取不到历史与标签
+          fetch-depth: 0
 
       # 标签即版本。tauri-action 用 tauri.conf.json 的版本去填 tagName，两处不一致会
       # 创建出一个和标签对不上的 Release，所以宁可在这一步就红掉。
@@ -42,6 +45,71 @@ jobs:
           if ($confVersion -ne $expected -or $cargoVersion -ne $expected -or $pkgVersion -ne $expected) {
             throw "标签 $tag 与版本号不一致（期望 $expected）。请把 tauri.conf.json / Cargo.toml / package.json 的 version 改成同一个值，删除标签后重新打。"
           }
+
+      # 变更清单取自**两个标签之间的提交**。
+      #
+      # 为什么不用 tauri-action 的 `generateReleaseNotes`（它确实有这个入参，默认 false）：
+      # 那个走 GitHub 的 Release Notes API，内容来自**合并的 PR**。本仓是直推 master、没有
+      # 合并提交，实测 v0.3.4 与 v0.4.0 两次都只生成一行 "**Full Changelog**: …"，等于没有
+      # 内容。逐条列出提交才是这里的"修改内容"来源。
+      #
+      # 这一步不设 `if`：手动触发的干跑（只构建、不创建 Release）也顺带把它跑一遍，
+      # 生成结果直接打在日志里，可以在打标签之前先看正文长什么样。它只读仓库历史。
+      - name: 生成变更清单
+        id: notes
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+
+          # 上一个标签：当前标签的父提交上最近的那个 v* 标签。
+          # 没有（首次发布）时不编造对比链接，改为列出该标签可达的全部提交。
+          $prev = git describe --tags --abbrev=0 --match 'v*' "$tag^" 2>$null
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($prev)) {
+            $prev = $null
+            $range = $tag
+            $compareLine = '**首次发布**，无对比链接。'
+          } else {
+            $range = "$prev..$tag"
+            $compareLine = "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$prev...$tag"
+          }
+
+          # 「版本号对齐到 x.y.z」是打标签前的机械动作，不进清单。
+          # 格式串用 %x09（制表符）而不是空格：参数里一旦有空格，PowerShell 5.1 传参会把
+          # 内层引号弄丢、把 %s 拆成独立参数（pwsh 7 不会）。不含空格就没有这个差异。
+          $commits = @(
+            git log --no-merges --pretty=format:%h%x09%s $range |
+              Where-Object { $_ -notmatch '^\S+\tchore: 版本号对齐到' } |
+              ForEach-Object {
+                $parts = $_ -split "`t", 2
+                "- $($parts[1]) ($($parts[0]))"
+              }
+          )
+
+          $lines = @('## 本次变更', '')
+          if ($commits.Count -gt 0) {
+            $lines += $commits
+          } else {
+            $lines += '（与上一个标签之间没有功能提交）'
+          }
+          $lines += @(
+            '',
+            $compareLine,
+            '',
+            '## 安装包',
+            '',
+            '- `*-setup.exe` — NSIS 安装包，普通用户下载这个',
+            '- `*.msi` — MSI，企业域部署用',
+            '',
+            '安装包未做代码签名，首次运行时 Windows 会提示「未知发布者」，选择「更多信息 → 仍要运行」即可。'
+          )
+
+          # 多行值走 GITHUB_OUTPUT 的定界符语法（不能直接用 "k=v" 那一行）
+          $delimiter = 'REQMAN_NOTES_EOF'
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "body<<$delimiter"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value ($lines -join "`n")
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $delimiter
+
+          "上一个标签=$prev  列入清单的提交数=$($commits.Count)"
 
       - name: 准备 Node
         uses: actions/setup-node@v7
@@ -70,14 +138,8 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'reqman v__VERSION__'
-          releaseBody: |
-            安装包见下方 Assets：
-
-            - `*-setup.exe` — NSIS 安装包，普通用户下载这个
-            - `*.msi` — MSI，企业域部署用
-
-            安装包未做代码签名，首次运行时 Windows 会提示「未知发布者」，
-            选择「更多信息 → 仍要运行」即可。
+          # 正文由「生成变更清单」那一步按两个标签之间的提交拼好（变更条目 + 对比链接 + 安装包说明）
+          releaseBody: ${{ steps.notes.outputs.body }}
           # 推标签即对外发布。改成 true 的话 Release 会先落成草稿，
           # 需要去 Releases 页面的 Drafts 区手动 Publish——草稿不出现在公开列表里。
           releaseDraft: false
