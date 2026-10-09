@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # 标签即版本。tauri-action 用 tauri.conf.json 的版本去填 tagName，两处不一致会
       # 创建出一个和标签对不上的 Release，所以宁可在这一步就红掉。
@@ -44,7 +44,7 @@ jobs:
           }
 
       - name: 准备 Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
