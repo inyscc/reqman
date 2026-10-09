@@ -14,14 +14,14 @@
 ## 3. 记录不可动项（D4）
 
 - [x] 3.1 README「已知限制」新增一条，列出 `@faker-js/faker`、`uuid`、`lodash.pick`、`glib` 四条与各自一句理由（漏洞够不着 / 上游无补丁版本 / 只在 dev 期 / 只在 Linux 构建图）— 验证：逐条对照 proposal 的「不做」，四处理由一致，且每条理由都能在仓库内查到依据
-- [ ] 3.2 **不**在 GitHub 上 dismiss 这四条 — 验证：推送后 `gh api repos/inyscc/reqman/dependabot/alerts?state=open` 仍列出这四条
+- [x] 3.2 **不**在 GitHub 上 dismiss 这四条 — 验证：推送后 `gh api repos/inyscc/reqman/dependabot/alerts?state=open` 仍列出这四条
 
 ## 4. 收尾
 
 - [x] 4.1 复查三处的实际解析版本（D5 的判据，不以 Dependabot 的重扫为准）— 验证：`npm ls dompurify` = 3.4.16、`npm ls source-map-js` = 1.2.2、`Cargo.lock` 的 rustls = 0.23.45
-- [ ] 4.2 推送后核对开放条目数 — 验证：`gh api ...dependabot/alerts?state=open` 计数为 4，且列表里不再出现 dompurify / source-map-js / rustls
-- [ ] 4.3 规划产物自校验 — 验证：`openspec validate upgrade-vulnerable-deps-round-2 --strict` 退出码 0
-- [ ] 4.4 提交本次改动（依赖版本 + README 条目 + 本 change 的规划产物）— 验证：`git log` 有对应提交，且 `git status --short` 干净
+- [x] 4.2 推送后核对开放条目数 — 验证：`gh api ...dependabot/alerts?state=open` 计数为 4，且列表里不再出现 dompurify / source-map-js / rustls
+- [x] 4.3 规划产物自校验 — 验证：`openspec validate upgrade-vulnerable-deps-round-2 --strict` 退出码 0
+- [x] 4.4 提交本次改动（依赖版本 + README 条目 + 本 change 的规划产物）— 验证：`git log` 有对应提交，且 `git status --short` 干净
 
 ## Workflow follow-up
 
