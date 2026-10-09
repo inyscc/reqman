@@ -50,6 +50,6 @@
     "xml2js": "^0.5.0"
   },
   "overrides": {
-    "dompurify": "^3.4.15"
+    "dompurify": "^3.4.16"
   }
 }
