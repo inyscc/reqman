@@ -8,9 +8,9 @@
 
 ## 2. 通过手动触发验证流水线
 
-- [ ] 2.1 提交改动并推送到 `master`（远端 `git@github.com:inyscc/reqman.git`），再触发手动构建：`gh workflow run release.yml`。验证：`gh run list --workflow=release.yml --limit 1` 中出现本次运行，状态为 queued / in_progress
-- [ ] 2.2 等待运行结束后检视结论：`gh run watch <run-id>`，或打开该次运行的 Annotations 面板。验证：运行结论为 success，且 Annotations 中不再出现任何 `Node.js 20` 相关条目——这正是本 change 要达成的可观测结果
-- [ ] 2.3 确认本次手动触发的行为符合 design D6（只构建、不发布）。验证：`gh run view <run-id>` 显示 `reqman-windows` artifact 已上传，且与触发前对比 `gh release list --limit 1` 没有新增 Release 条目
+- [x] 2.1 提交改动并推送到 `master`（远端 `git@github.com:inyscc/reqman.git`），再触发手动构建：`gh workflow run release.yml`。验证：`gh run list --workflow=release.yml --limit 1` 中出现本次运行，状态为 queued / in_progress
+- [x] 2.2 等待运行结束后检视结论：`gh run watch <run-id>`，或打开该次运行的 Annotations 面板。验证：运行结论为 success，且 Annotations 中不再出现任何 `Node.js 20` 相关条目——这正是本 change 要达成的可观测结果
+- [x] 2.3 确认本次手动触发的行为符合 design D6（只构建、不发布）。验证：`gh run view <run-id>` 显示 `reqman-windows` artifact 已上传，且与触发前对比 `gh release list --limit 1` 没有新增 Release 条目
 
 ## Workflow follow-up
 
