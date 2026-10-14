@@ -1040,6 +1040,57 @@ main.main {
   color: var(--accent);
 }
 
+/* 变量占位符的悬浮值提示（spec: 变量占位符的悬浮值提示）。
+   它是一个覆盖层：fixed 挂在 body 上，不参与任何布局，出现与消失都不动编辑面。
+   `pointer-events: none` 是必须的——提示若能接住指针，指针在移向它的路上就会命中它自己、
+   触发 mouseleave，提示会闪没；由此它内部的文字也不可选中、不可复制，secret 的明文
+   正需要这一点。
+   z 序高于变量浮层（30）与下拉/节点菜单（40）：它是瞬时信息，且不拦截任何指针，
+   被压在别的浮层下面才是错的。 */
+.variable-tip {
+  position: fixed;
+  z-index: 50;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  max-width: min(520px, 80vw);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  /* 与下拉菜单同一档阴影：它们是同类的小浮层 */
+  box-shadow: var(--shadow-2);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.variable-tip-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 取值可能很长（URL、token）：只截断显示，不改动它本身 */
+.variable-tip-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.variable-tip-scope {
+  flex: none;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.variable-tip-note {
+  color: var(--muted);
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1535,6 +1586,46 @@ tbody tr:focus-within .var-row-actions {
   overflow-clip-margin: 320px;
 }
 
+/* 环境编辑器的正文区（spec: ui-layout「变量表格的区域滚动」）：环境名行与代理配置区
+   不参与伸缩，变量表吃剩余高度。这一层**仍然可滚**——但当且仅当窗口矮到
+   「代理区 + 表格最小高度」都放不下时才溢出，作为极端高度的兜底（design D3）。
+   它不再出现占位型滚动条：原生条收成 0 宽，滚动指示交给悬浮细条——占位型滚动条
+   出现时行宽会变，行右端的图标按钮就会跟着左右跳。 */
+.pane-body.var-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  scrollbar-width: none;
+}
+
+.pane-body.var-editor::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 表格之上的固定内容保持自然高度，不随表格滚走（spec: 环境编辑器里上方内容
+   不随表格滚走） */
+.pane-body.var-editor > .settings-section {
+  flex: none;
+}
+
+/* 环境名行（面板头）同理：它不在滚动容器里，也不参与伸缩 */
+.pane.entity-pane > .pane-header {
+  flex: none;
+}
+
+/* 悬浮滚动条的定位上下文（OverlayScrollbar 按滚动容器的 offsetTop 定位，
+   这一层必须是它的 offsetParent） */
+.pane.entity-pane {
+  position: relative;
+}
+
+/* 变量表在环境编辑器里至少留住数行：窗口压得很矮时先由 .var-editor 的兜底滚动
+   接手，而不是把表格挤成几像素 */
+.pane-body.var-editor .table-scroll-wrap {
+  min-height: 240px;
+}
+
 /* 文件行的选取单元（spec: 请求体文件的选取）：文件名与「重新选择 / 清除」
    动作同行排布，动作是文字按钮（.text-action），不占单元格整行宽度。 */
 .file-cell {
@@ -1576,6 +1667,15 @@ tbody tr:focus-within .var-row-actions {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+}
+
+/* 变量表复用同一套容器（spec: ui-layout「变量表格的区域滚动」）：表格是
+   table-layout: fixed + 宽度 100%，没有横向溢出的余地，因此横向一并关掉——
+   免得子像素误差让容器多出一条横向滚动，行宽跟着变一次。
+   与键值表的差别只有一处：变量表**不挂 OverlayScrollbar**（design D1）——
+   它右缘不出现任何滚动指示，连悬停才显形的悬浮细条也不要。 */
+.table-scroll.variable-table-scroll {
+  overflow-x: hidden;
 }
 
 .stack {

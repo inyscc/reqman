@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { RequestBand, RequestEditor, type Tab } from '../src/components/RequestEditor';
+import { placeholderAtClientX, variableRanges } from '../src/lib/placeholders';
 import {
   CURL_MULTILINE_SEPARATOR,
   defaultSettings,
@@ -1079,5 +1080,126 @@ describe('cURL 快照标签（spec: cURL 快照标签）', () => {
     fireEvent.click(compress);
     fireEvent.click(screen.getByRole('option', { name: '不压缩' }));
     expect(latest().settings.curl_body_compress).toBe('raw');
+  });
+});
+
+/**
+ * 占位符的命中判定（change: show-variable-values-on-hover，任务 2.1）。
+ *
+ * happy-dom 没有排版：`getBoundingClientRect()` 全是 0、计算样式也给不出字号。因此这里注入
+ * 字宽测量、并把「文本起点」固定在 input 左缘——判定本身（区间切分、二分、`scrollLeft`
+ * 补偿）走的仍是真实代码路径，只有「一个字多宽」是喂进去的。
+ *
+ * 为什么不用 `fireEvent.mouseMove` 走组件：那需要组件先接上取值源，而命中判定的对错与
+ * 「查到了什么值」无关。组件侧的呈现由浏览器用例覆盖。
+ */
+describe('地址栏占位符的命中判定（任务 2.1）', () => {
+  const urlField = () => screen.getByLabelText('请求地址') as HTMLInputElement;
+  /** 每字符 8px 的假测量：真实字宽由浏览器给，这里需要的只是单调。 */
+  const measure = (text: string) => text.length * 8;
+  /** 文本 `https://{{host}}/users` 里 `{{host}}` 占下标 [8, 16)。 */
+  const withPlaceholder = () => harness(draft({ url: 'https://{{host}}/users' }));
+  /** 第 index 个字符中部的视口横坐标。 */
+  const at = (index: number) => index * 8 + 4;
+
+  it('指针落在 {{host}} 上即命中', () => {
+    withPlaceholder();
+
+    const hit = placeholderAtClientX(urlField(), at(10), { measure, textInset: 0 });
+
+    expect(hit?.name).toBe('host');
+    expect([hit?.start, hit?.end]).toEqual([8, 16]);
+  });
+
+  it('落在相邻的普通字符上不命中', () => {
+    withPlaceholder();
+    const input = urlField();
+
+    // `/`（下标 7）与末尾的 `s`（下标 20）都紧邻占位符，但不在它里面
+    expect(placeholderAtClientX(input, at(7), { measure, textInset: 0 })).toBeNull();
+    expect(placeholderAtClientX(input, at(20), { measure, textInset: 0 })).toBeNull();
+  });
+
+  it('地址栏横向滚动后仍能命中', () => {
+    withPlaceholder();
+    const input = urlField();
+    const x = 44;
+
+    // 没滚动时这个位置落在 `https:` 的 `:` 上（下标 5）——对照
+    expect(placeholderAtClientX(input, x, { measure, textInset: 0 })).toBeNull();
+
+    input.scrollLeft = 40;
+
+    // 滚过之后文本整体左移，同一个视口位置对应到下标 10（`{{host}}` 内）
+    expect(placeholderAtClientX(input, x, { measure, textInset: 0 })?.name).toBe('host');
+
+    input.scrollLeft = 0;
+  });
+
+  it('地址栏没有占位符时不给出任何命中', () => {
+    harness(draft());
+
+    expect(placeholderAtClientX(urlField(), at(5), { measure, textInset: 0 })).toBeNull();
+  });
+
+  it('可悬停的范围与着色出来的范围是同一份', () => {
+    withPlaceholder();
+
+    const overlay = document.querySelector('.url-overlay') as HTMLElement;
+    const painted = Array.from(overlay.querySelectorAll('.var')).map((node) => node.textContent);
+
+    expect(painted).toEqual(variableRanges(urlField().value).map((range) => `{{${range.name}}}`));
+  });
+});
+
+/**
+ * 参数表与请求头表的命中接入（任务 2.2）。
+ *
+ * 两张表复用同一个判定：命中只读 `event.currentTarget`，因此不必为每一行各建一个 hook
+ * （行数是用户可控的）。两条断言各命中一次；另有一条守住本变更的 Non-Goal——这两处
+ * **没有**顺带加上变量高亮。
+ */
+describe('参数表与请求头表的占位符命中（任务 2.2）', () => {
+  const measure = (text: string) => text.length * 8;
+  const hitAtStart = (input: HTMLInputElement) =>
+    placeholderAtClientX(input, 4, { measure, textInset: 0 });
+
+  const bothTables = () =>
+    harness(
+      draft({
+        params: [{ key: 'host', value: '{{host}}', enabled: true }],
+        headers: [{ key: 'X-Host', value: '{{host}}', enabled: true }],
+      }),
+    );
+
+  it('参数表的值输入框能命中', () => {
+    bothTables();
+
+    const input = screen.getByLabelText('参数值（可用 {{var}}） 0') as HTMLInputElement;
+
+    expect(hitAtStart(input)?.name).toBe('host');
+  });
+
+  it('请求头表的值输入框能命中', () => {
+    bothTables();
+    fireEvent.click(screen.getByText('Headers'));
+
+    const input = screen.getByLabelText('头值（可用 {{var}}） 0') as HTMLInputElement;
+
+    expect(hitAtStart(input)?.name).toBe('host');
+  });
+
+  it('两张表都没有新增变量高亮（本变更的 Non-Goal）', () => {
+    bothTables();
+
+    // 值里确实带着占位符，却没有任何着色节点——「能悬停」与「会着色」是两回事
+    expect(document.querySelectorAll('.table-scroll .var')).toHaveLength(0);
+
+    fireEvent.click(screen.getByText('Headers'));
+
+    expect((screen.getByLabelText('头值（可用 {{var}}） 0') as HTMLInputElement).value).toBe(
+      '{{host}}',
+    );
+    expect(document.querySelectorAll('.table-scroll .var')).toHaveLength(0);
   });
 });

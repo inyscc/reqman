@@ -14,6 +14,7 @@ import { applyEnvironmentOrder } from './lib/environmentMoves';
 import { CollectionIcon, FolderIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
+import { OverlayScrollbar } from './components/OverlayScrollbar';
 import { ProxyConfigRows } from './components/ProxyConfigRows';
 import type { ProxyConfig, ProxyDecisionView } from './lib/types';
 import { RequestBand, RequestEditor, type Tab } from './components/RequestEditor';
@@ -32,6 +33,7 @@ import {
 import { commands as defaultCommands, describeError, type Commands } from './lib/commands';
 import { createEditingRegistry, SURFACE_PRIORITY } from './lib/editing';
 import { applyTreeMove, type TreeMove } from './lib/treeMoves';
+import { folderSegments, loadRequestFolderChain } from './lib/folderChain';
 import { readSplitRatio, SPLIT_DEFAULT, writeSplitRatio } from './lib/layout';
 import {
   DEFAULT_EDITOR_APPEARANCE,
@@ -66,6 +68,7 @@ import {
 import type {
   ConsoleEntry,
   PhaseCancellation,
+  ScriptSegment,
   TestAssertion,
   VisualizerResult,
 } from './lib/scriptRuntime';
@@ -155,6 +158,15 @@ interface EntitySessionTab {
 }
 
 type SessionTab = RequestSessionTab | EntitySessionTab;
+
+/**
+ * 请求编辑器**首次**落在哪个内层页签（spec: ui-layout「请求编辑器的默认标签页」）。
+ *
+ * Body 是这个产品最高频的编辑面，把「展开请求 → 再点一次 Body」的日常摩擦交给默认值。
+ * 四条入口——新建、从集合树展开一个此前未打开的请求、复制、重启后恢复——共用这一个值；
+ * 它只回答首次落在哪一页，已打开标签自己记住的页签不受影响（切回来仍停在它自己的页签）。
+ */
+const DEFAULT_REQUEST_TAB: Tab = 'body';
 
 /**
  * 一次**在飞**的发送会话（spec: http-engine「请求取消」）。
@@ -486,6 +498,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [pendingRenameFocus, setPendingRenameFocus] = useState(false);
   const entityNameRef = useRef<HTMLInputElement>(null);
   const requestNameRef = useRef<HTMLInputElement>(null);
+  /** 环境编辑器正文区：窗口矮到放不下时才溢出，滚动指示由悬浮细条绘制。 */
+  const varEditorRef = useRef<HTMLDivElement>(null);
   /** 树里的就地改名入口：快捷键要触发它，而"哪一行可见"只由树内部知道（design D7）。 */
   const treeHandleRef = useRef<WorkspaceTreeHandle>(null);
   /**
@@ -520,7 +534,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const activeEntityTab = activeTab?.kind === 'entity' ? activeTab : null;
   const draft = activeRequestTab?.draft ?? null;
   const dirty = activeRequestTab?.dirty ?? false;
-  const tab: Tab = activeRequestTab?.innerTab ?? 'params';
+  const tab: Tab = activeRequestTab?.innerTab ?? DEFAULT_REQUEST_TAB;
   const response = activeRequestTab?.response ?? null;
   const scriptReport = activeRequestTab?.scriptReport ?? null;
   /**
@@ -638,7 +652,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         draft: alignUrlAndParams(withoutEmptyRows(loaded)),
         dirty: false,
         response: null,
-        innerTab: 'params',
+        innerTab: DEFAULT_REQUEST_TAB,
         scriptReport: null,
       };
       setTabs((previous) =>
@@ -849,7 +863,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               draft: alignUrlAndParams(withoutEmptyRows(request)),
               dirty: false,
               response: null,
-              innerTab: 'params',
+              innerTab: DEFAULT_REQUEST_TAB,
               scriptReport: null,
             });
             continue;
@@ -1636,14 +1650,14 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     setSending((previous) => ({ ...previous, [key]: attempt }));
     patchRequestTab(key, (item) => ({ ...item, scriptReport: null }));
 
-    // 三级脚本：集合 → 文件夹 → 请求（任务 2.4）。集合与文件夹的脚本挂在实体上，
-    // 树形接口不给，因此单独取回（任务 2.5）。
+    // 脚本层级：集合 → 目录链（递归祖先，由外到内）→ 请求（任务 2.4）。集合与目录的脚本
+    // 挂在实体上，树形接口不给，因此单独取回（任务 2.5）。
     const target = workspaceId
       ? { workspaceId, collectionId: draft.collection_id, environmentId }
       : null;
-    let phases: { pre: (string | null)[]; test: (string | null)[] } | null = null;
+    let phases: { pre: ScriptSegment[]; test: ScriptSegment[] } | null = null;
     let requestUrl: string | null = null;
-    // 喂给沙箱的请求形态：一个阶段里的三段脚本共用同一份快照（design D6）。
+    // 喂给沙箱的请求形态：一个阶段里的各段脚本共用同一份快照（design D6）。
     // 它带上的是解析后的取值，脚本因此读得出本次请求的目标与内容。
     const sandboxRequest = toSandboxRequest(resolved);
     let scriptError: string | null = null;
@@ -1681,18 +1695,28 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           return;
         }
 
-        const folder = draft.folder_id ? await client.folderGet(draft.folder_id) : null;
+        // 目录层取**请求当前的归属**并上溯成整条链，而不是用草稿里那份可能陈旧的
+        // `folder_id`：拖拽改变归属后草稿不会跟着变，旧代码因此连直接父级都取不到
+        // （design D1）。链在这里算一次，后置阶段复用同一份 `phases`——请求在飞行途中
+        // 可能被拖动，重算会让前置与后置跑在不同的链上（design D4）。
+        const chain = await loadRequestFolderChain(client, draft.id);
+        if (chain.error) {
+          // 链异常（成环或超深）说明本次编排少了若干层。它进 console 而不是 error：
+          // error 那个位置归脚本自己（首个未捕获错误），会被 pre.error 覆盖掉，
+          // 而这个异常与某一段脚本无关，埋掉就再也看不见了。
+          scriptConsole.push({ level: 'error', args: [chain.error], phase: 'prerequest' });
+        }
 
         phases = {
           pre: [
-            collection.pre_request_script ?? null,
-            folder?.pre_request_script ?? null,
-            draft.pre_request_script ?? null,
+            { label: '集合层', code: collection.pre_request_script ?? null },
+            ...folderSegments(chain.folders, (folder) => folder.pre_request_script),
+            { label: '请求层', code: draft.pre_request_script ?? null },
           ],
           test: [
-            collection.test_script ?? null,
-            folder?.test_script ?? null,
-            draft.test_script ?? null,
+            { label: '集合层', code: collection.test_script ?? null },
+            ...folderSegments(chain.folders, (folder) => folder.test_script),
+            { label: '请求层', code: draft.test_script ?? null },
           ],
         };
 
@@ -1820,7 +1844,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 draft: withoutEmptyRows(created),
                 dirty: false,
                 response: null,
-                innerTab: 'params' as const,
+                innerTab: DEFAULT_REQUEST_TAB,
                 scriptReport: null,
               },
             ],
@@ -1870,6 +1894,25 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
    * 加载回来（回滚）并提示原因。拖拽只改顺序与归属——不动选中、不动已打开的
    * 标签、不触发未保存守卫。
    */
+  /**
+   * 归属变更后把新的归属同步到界面持有的几份副本上（树那一份由 `applyTreeMove` 就地改掉）。
+   *
+   * 只改 `folder_id`，**不重载草稿**：未保存的改动、页签位置、响应都原样保留——拖拽不该
+   * 打断正在编辑的内容。留着旧归属会让脚本编排按旧目录算（design D3）。
+   */
+  const syncRequestFolder = (requestId: string, folderId: string | null) => {
+    setTabs((previous) =>
+      previous.map((item) =>
+        item.kind === 'request' && item.requestId === requestId
+          ? { ...item, draft: { ...item.draft, folder_id: folderId } }
+          : item,
+      ),
+    );
+
+    const known = requestStore.get(requestId) ?? requestStore.confirmed(requestId);
+    if (known) requestStore.seed([{ ...known, folder_id: folderId }]);
+  };
+
   const moveNode = async (move: TreeMove) => {
     const id = workspaceId;
     setTrees((previous) => applyTreeMove(previous, move));
@@ -1884,6 +1927,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         await client.folderMove(move.id, move.parentFolderId, move.index);
       } else {
         await client.requestMove(move.id, move.folderId, move.index);
+        syncRequestFolder(move.id, move.folderId);
       }
     } catch (caught) {
       setError(describeError(caught).message);
@@ -2041,7 +2085,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 draft: withoutEmptyRows(copy),
                 dirty: false,
                 response: null,
-                innerTab: 'params' as const,
+                innerTab: DEFAULT_REQUEST_TAB,
                 scriptReport: null,
               },
             ],
@@ -2240,15 +2284,6 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
   const newRequest = (collectionId: string, folderId: string | null) => {
     void createRequest(collectionId, folderId);
-  };
-
-  const saveFullResponse = async () => {
-    if (!response) return;
-    try {
-      await client.responseSaveFull(response.id);
-    } catch (caught) {
-      setError(describeError(caught).message);
-    }
   };
 
   /** 松手才落库：拖动过程中每一帧都写一次存储没有意义（design D7）。 */
@@ -2513,6 +2548,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               collectionName={crumbCollectionName}
               dirty={dirty}
               nameRef={requestNameRef}
+              /* 地址栏占位符悬停的接线，与请求区同源（作用域口径见 RequestEditor 那处） */
+              variableHover={
+                workspaceId
+                  ? { client, workspaceId, environmentId, collectionId: draft.collection_id }
+                  : null
+              }
             />
           )}
 
@@ -2587,7 +2628,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 <span className="grow" />
               </div>
 
-              <div className="pane-body var-editor">
+              <div className="pane-body var-editor" ref={varEditorRef}>
                 {/* 环境级代理（spec: 设置模态的代理配置）：三层不挤在同一屏，这一层落在
                     环境自身的编辑面。Globals 不是环境，没有这一层——它对应的是设置模态里
                     的全局代理。 */}
@@ -2616,6 +2657,10 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                   }}
                 />
               </div>
+
+              {/* 极端高度下的兜底滚动指示（design D3）：正文区不溢出时它不渲染
+                  任何东西，因此正常高度下用户看到的只有表格自己的那一条细指示。 */}
+              <OverlayScrollbar targetRef={varEditorRef} />
             </div>
           ) : activeEntityTab && entityDraft ? (
             <EntityScriptPanel
@@ -2659,6 +2704,18 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               wrapLines={wrapLines}
               onWrapLinesChange={setWrapLines}
               sending={activeSending}
+              /* 占位符悬停的接线（spec: 变量占位符的悬浮值提示）：作用域口径与发送一致
+                 ——当前工作区 + 激活环境（无则 Globals）+ 本请求所属集合。 */
+              variableHover={
+                workspaceId
+                  ? {
+                      client,
+                      workspaceId,
+                      environmentId,
+                      collectionId: draft.collection_id,
+                    }
+                  : null
+              }
               onPickFile={() => client.pickUploadFile()}
               onCurl={() => {
                 // 与发送共用同一份输入（未保存时走内联载荷），因此两处命令必然一致
@@ -2683,7 +2740,6 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 error={null}
                 // 失败时 `response` 为空，但决定仍要出现（spec: ui-layout「响应区的代理决定」）
                 proxyDecision={activeProxyDecision}
-                onSaveFull={() => void saveFullResponse()}
                 presentation={presentation}
                 indent={indentUnit(editorAppearance)}
                 wrapLines={wrapLines}

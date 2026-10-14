@@ -341,7 +341,12 @@ export function VariablesPanel({
   };
 
   return (
-    <div className="stack">
+    /* 满高滚动容器（spec: ui-layout「变量表格的区域滚动」）：表格由容器承载，
+       行多时在容器内滚动、表头吸顶；宿主只负责给出一条有界的高度链。
+       容器结构与键值表同款，但**这一处不挂任何滚动指示**（design D1）：原生条
+       收成 0 宽、悬浮细条也不挂——用户明确要求右缘不出现滚动条。滚动只由滚轮 /
+       键盘 / 触控板驱动，因此行右端那排图标按钮的位置与滚动状态无关。 */
+    <div className="stack fill">
       {!hideHeader && (
         <div className="row">
           <strong>
@@ -358,6 +363,8 @@ export function VariablesPanel({
         </div>
       )}
 
+      <div className="table-scroll-wrap">
+      <div className="table-scroll variable-table-scroll">
       <table
         className="variable-table"
         style={keyWidth === null ? undefined : ({ '--key-width': `${keyWidth}px` } as CSSProperties)}
@@ -646,6 +653,8 @@ export function VariablesPanel({
           </tr>
         </tbody>
       </table>
+      </div>
+      </div>
     </div>
   );
 }

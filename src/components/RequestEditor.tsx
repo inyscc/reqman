@@ -10,11 +10,19 @@ import {
 import { formatRawBody, type RawFormatMode } from '../lib/editing';
 import { currentEditorAppearance, indentUnit } from '../lib/editorAppearance';
 import { isEmptyFormField, isEmptyKeyValue } from '../lib/rows';
+import { variableRanges } from '../lib/placeholders';
+import {
+  usePlaceholderHover,
+  type PlaceholderHoverHandlers,
+} from '../lib/usePlaceholderHover';
+import { useVariableHoverSource } from '../lib/useVariableHoverSource';
 import { withParams, withUrl } from '../lib/url';
+import type { VariableHoverLookup, VariableHoverWiring } from '../lib/variableHover';
 import { Dropdown } from './Dropdown';
 import { CurlPanel, useCurlSnapshot } from './CurlSnapshot';
 import { OverlayScrollbar } from './OverlayScrollbar';
 import { TrashIcon } from './icons';
+import { VariableHoverTip } from './VariableHoverTip';
 import { ScriptPane } from './ScriptPane';
 import { CodeSurface } from './CodeSurface';
 import { monacoLanguage } from '../lib/codeSurface';
@@ -59,6 +67,8 @@ export interface RequestBandProps {
   dirty: boolean;
   /** 面板头里的请求名输入框：树菜单的「重命名」把焦点交给它。 */
   nameRef?: RefObject<HTMLInputElement | null>;
+  /** 地址栏占位符悬停的接线（spec: 变量占位符的悬浮值提示）；缺省时该能力整体不生效。 */
+  variableHover?: VariableHoverWiring | null;
 }
 
 export interface RequestEditorProps {
@@ -85,6 +95,8 @@ export interface RequestEditorProps {
    * `client.pickUploadFile()`，与 `onCurl` 同款注入模式），组件不直连命令层。
    */
   onPickFile?: () => Promise<PickedFile | null>;
+  /** 参数表、请求头表与 Body raw 的占位符悬停接线；缺省时该能力整体不生效。 */
+  variableHover?: VariableHoverWiring | null;
 }
 
 /** 请求标签的顺序与文案对齐 Postman（spec: 请求标签命名）；cURL 排在 Settings 右侧。 */
@@ -101,21 +113,22 @@ const TABS: { value: Tab; label: string }[] = [
 /**
  * URL 里的 `{{var}}` 着色片段。原生 input 无法局部着色，因此文本由
  * 同字体的叠层渲染、输入框自身文字透明（见 App.css `.url-field`）。
+ *
+ * 区间来自 `variableRanges`——**与悬停命中判定同一条正则**：两处若各写一条，
+ * 迟早会出现「着色了却悬停不出提示」的偏差（见 `lib/placeholders.ts` 顶部说明）。
  */
 function highlightUrl(url: string): ReactNode[] {
   const parts: ReactNode[] = [];
-  const pattern = /\{\{[^{}]*\}\}/g;
   let last = 0;
-  let match: RegExpExecArray | null;
 
-  while ((match = pattern.exec(url)) !== null) {
-    if (match.index > last) parts.push(url.slice(last, match.index));
+  for (const range of variableRanges(url)) {
+    if (range.start > last) parts.push(url.slice(last, range.start));
     parts.push(
-      <span className="var" key={`${match.index}-${match[0]}`}>
-        {match[0]}
+      <span className="var" key={`${range.start}-${range.name}`}>
+        {url.slice(range.start, range.end)}
       </span>,
     );
-    last = match.index + match[0].length;
+    last = range.end;
   }
 
   if (last < url.length) parts.push(url.slice(last));
@@ -154,11 +167,20 @@ function KeyValueTable({
   onChange,
   keyPlaceholder,
   valuePlaceholder,
+  hover,
 }: {
   rows: KeyValue[];
   onChange: (rows: KeyValue[]) => void;
   keyPlaceholder: string;
   valuePlaceholder: string;
+  /**
+   * 值输入框上的占位符悬停（spec: 变量占位符的悬浮值提示）。
+   *
+   * 由调用方给：命中判定只读 `event.currentTarget`，因此一处 hook 就能服务整张表
+   * （行数是用户可控的，在 `map` 里调 hook 会把调用顺序交给数据）；也由调用方决定
+   * 哪几张表接得上——四个编辑面是有定数的，不是「所有键值表都顺带拥有」。
+   */
+  hover?: PlaceholderHoverHandlers;
 }) {
   const [pending, setPending] = useState<KeyValue>(EMPTY_ROW);
   const [ownedIndex, setOwnedIndex] = useState<number | null>(null);
@@ -253,6 +275,7 @@ function KeyValueTable({
                     placeholder={valuePlaceholder}
                     aria-label={`${valuePlaceholder} ${index}`}
                     onChange={(event) => update(index, { value: event.target.value })}
+                    {...hover}
                   />
                 </td>
                 {/* 描述列：人类可读说明。它不参与「是否发出」（见 lib/rows.ts 的两档
@@ -305,7 +328,13 @@ function KeyValueTable({
                 placeholder={valuePlaceholder}
                 aria-label="新增行的值"
                 onChange={(event) => editGhost({ value: event.target.value })}
-                onBlur={leaveGhost}
+                {...hover}
+                /* 失焦有两个含义——幽灵行交还空态、提示收起。展开 `hover` 之后必须显式
+                   合并，否则后写的那个会把前一个覆盖掉。 */
+                onBlur={(event) => {
+                  hover?.onBlur();
+                  leaveGhost(event);
+                }}
                 onKeyDown={(event) => {
                   if (event.key !== 'Enter') return;
                   event.preventDefault();
@@ -359,6 +388,7 @@ function KeyValueTable({
                     ghostKeyRef.current?.focus();
                   }}
                   onChange={(event) => editGhost({ value: event.target.value })}
+                  {...hover}
                 />
               </td>
               <td>
@@ -391,9 +421,13 @@ function KeyValueTable({
  * cURL 落在请求编辑器的标签里（spec: cURL 快照标签），保存由 `Ctrl+S` 承担。
  */
 export function RequestBand(props: RequestBandProps) {
-  const { draft, busy, sending, onChange, onSend, onCancel, collectionName, dirty, nameRef } =
+  const { draft, busy, sending, onChange, onSend, onCancel, collectionName, dirty, nameRef, variableHover } =
     props;
   const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
+  // 地址栏的占位符悬停：判定挂在 input 自己的 mousemove 上——叠层 `pointer-events: none`
+  // 是不动的，它一旦吃到指针，光标定位与选取就废了（design D3）
+  const urlHover = usePlaceholderHover();
+  const hoverSource = useVariableHoverSource(variableHover);
 
   return (
     <div className="request-band">
@@ -463,6 +497,7 @@ export function RequestBand(props: RequestBandProps) {
             placeholder="https://api.example.com/users/:id"
             value={draft.url}
             onChange={(event) => onChange(withUrl(draft, event.target.value))}
+            {...urlHover.handlers}
           />
         </div>
 
@@ -479,6 +514,11 @@ export function RequestBand(props: RequestBandProps) {
           </button>
         )}
       </div>
+
+      {/* 提示是覆盖层：挂在 body 上，因此它与请求带的盒模型无关，出现与消失都不动布局 */}
+      {hoverSource && urlHover.hit && (
+        <VariableHoverTip source={hoverSource} hit={urlHover.hit} />
+      )}
     </div>
   );
 }
@@ -497,8 +537,17 @@ export function RequestEditor({
   wrapLines = true,
   onWrapLinesChange,
   sending = false,
+  variableHover,
 }: RequestEditorProps) {
   const patch = (next: Partial<SavedRequest>) => onChange({ ...draft, ...next });
+  // 参数表与请求头表共用一个命中判定实例：命中只读 `event.currentTarget`，而两张表在
+  // 同一时刻只渲染一张（各自的内层标签），因此一个实例足够、也不会串（任务 2.2）
+  const tableHover = usePlaceholderHover();
+  const hoverSource = useVariableHoverSource(variableHover);
+  // Monaco 的 provider 按模型 URI 取用取值源，拿不到组件实例，因此这里交出裸函数形态
+  const hoverLookup: VariableHoverLookup | null = hoverSource
+    ? (name) => hoverSource.resolve(name)
+    : null;
 
   /** binary 的文件选取：取消对话框时无副作用（spec: 请求体文件的选取）。 */
   const pickBinary = async () => {
@@ -592,6 +641,7 @@ export function RequestEditor({
             valuePlaceholder="参数值（可用 {{var}}）"
             /* 改参数表即把查询串写回地址栏，两者是同一份数据（spec: URL 与参数表保持同步） */
             onChange={(params) => onChange(withParams(draft, params))}
+            hover={tableHover.handlers}
           />
         )}
 
@@ -602,6 +652,7 @@ export function RequestEditor({
             keyPlaceholder="头名称"
             valuePlaceholder="头值（可用 {{var}}）"
             onChange={(headers) => patch({ headers })}
+            hover={tableHover.handlers}
           />
         )}
 
@@ -697,6 +748,7 @@ export function RequestEditor({
                 value={draft.body.raw ?? ''}
                 fill
                 wrap={wrapLines}
+                variableHover={hoverLookup}
                 onChange={(next) => {
                   setFormatError(null);
                   patch({ body: { ...draft.body, raw: next } });
@@ -792,6 +844,12 @@ export function RequestEditor({
 
         {tab === 'curl' && <CurlPanel {...curl} />}
       </div>
+
+      {/* 参数表 / 请求头表的提示。跟着内层标签一起收：切走标签时输入框被卸载，指针即使
+          没动，留在原处的提示也已经没有对应的编辑面了（spec: 指针移开或离开编辑面即消失） */}
+      {(tab === 'params' || tab === 'headers') && hoverSource && tableHover.hit && (
+        <VariableHoverTip source={hoverSource} hit={tableHover.hit} />
+      )}
     </div>
   );
 }

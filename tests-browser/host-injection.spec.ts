@@ -133,7 +133,8 @@ async function runScriptInPage(page: Page, script: string): Promise<SandboxOutco
           commands,
           { workspaceId: 'w1', collectionId: 'c1', environmentId: null },
           'prerequest',
-          [code],
+          // 段要带层级标签：运行时不再按位置猜层级（design D2）
+          [{ label: '请求层', code }],
         );
 
         return {

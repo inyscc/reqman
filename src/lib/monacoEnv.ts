@@ -18,7 +18,9 @@ import JsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
 import 'monaco-editor/esm/vs/language/typescript/monaco.contribution';
 import 'monaco-editor/esm/vs/language/json/monaco.contribution';
 import type * as Monaco from 'monaco-editor';
+import { rangeAtIndex } from './placeholders';
 import { PM_DTS } from './pmDts';
+import { describeHover, type VariableHoverLookup } from './variableHover';
 
 export const THEME_NAME = 'reqman-light';
 
@@ -99,6 +101,69 @@ function setupPmTypes(monaco: typeof Monaco): void {
   pmTypesReady = true;
 }
 
+/** 已登记的取值源：键是模型 URI。 */
+const hoverLookups = new Map<string, VariableHoverLookup>();
+
+/**
+ * 给一个模型登记取值源（Body raw 的占位符悬停）。
+ *
+ * provider 只能按**语言**静态注册一次（Monaco 没有「随某个组件挂载而生效」的 provider），
+ * 因此「这个模型该查哪个作用域的变量」只能反着传进来：编辑面按模型 URI 登记，回调再按
+ * 当前模型去找。没有登记的模型（脚本面、响应正文）自然返回 null，不影响它们原有的悬停。
+ */
+export function registerVariableHoverLookup(uri: string, lookup: VariableHoverLookup): void {
+  hoverLookups.set(uri, lookup);
+}
+
+/** 编辑面卸载时撤掉登记：留着会让关掉的请求继续响应悬停。 */
+export function releaseVariableHoverLookup(uri: string): void {
+  hoverLookups.delete(uri);
+}
+
+/** 当前已登记的模型（排查用）。 */
+export function registeredVariableHoverUris(): string[] {
+  return Array.from(hoverLookups.keys());
+}
+
+let variableHoverReady = false;
+
+/** 注册占位符悬停 provider（只做一次；语言名与编辑面实际用到的 mode 一致）。 */
+function setupVariableHover(monaco: typeof Monaco): void {
+  if (variableHoverReady) return;
+  variableHoverReady = true;
+
+  monaco.languages.registerHoverProvider(['json', 'xml', 'html', 'javascript', 'plaintext'], {
+    async provideHover(model, position) {
+      const lookup = hoverLookups.get(model.uri.toString());
+      if (!lookup) return null;
+
+      const text = model.getValue();
+      // 与地址栏、键值表用的是同一条正则（`rangeAtIndex`）：Body 上能悬停的范围与别处一致
+      const range = rangeAtIndex(text, model.getOffsetAt(position));
+      if (!range) return null;
+
+      const presented = describeHover(await lookup(range.name));
+      const start = model.getPositionAt(range.start);
+      const end = model.getPositionAt(range.end);
+
+      const lines =
+        presented.status === 'value'
+          ? [`取值：\`${presented.value}\``, `来源：${presented.scopeLabel}`]
+          : [presented.note ?? ''];
+
+      return {
+        range: {
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+        },
+        contents: [{ value: [`**\`${presented.name}\`**`, '', ...lines].join('\n') }],
+      };
+    },
+  });
+}
+
 let monacoPromise: Promise<typeof Monaco> | null = null;
 
 /** 动态加载 Monaco 并完成一次性装配（同进程内只加载一次）。 */
@@ -106,6 +171,7 @@ export function loadMonaco(): Promise<typeof Monaco> {
   monacoPromise ??= import('monaco-editor').then((monaco) => {
     defineTheme(monaco);
     setupPmTypes(monaco);
+    setupVariableHover(monaco);
     return monaco;
   });
   return monacoPromise;

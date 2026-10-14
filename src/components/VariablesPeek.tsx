@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { describeError } from '../lib/commands';
 import type { Commands } from '../lib/commands';
 import type { Variable } from '../lib/types';
-import { effectiveByName, isShadowed } from '../lib/variables';
+import { displayValue, effectiveByName, isShadowed } from '../lib/variables';
 
 export interface VariablesPeekProps {
   client: Commands;
@@ -17,11 +17,6 @@ export interface VariablesPeekProps {
   unresolved: string[];
   /** 进入主区环境编辑器的入口（改动量仍然落在那里）。 */
   onOpenEditor: () => void;
-}
-
-/** 界面呈现值：secret 的值本身就是后端给的掩码，这里不做任何揭示。 */
-function shownValue(variable: Variable): string {
-  return variable.current.state === 'value' ? variable.current.value : '不可读';
 }
 
 /**
@@ -151,7 +146,7 @@ export function VariablesPeek({
                         <span className="badge warn">未解析</span>
                       ) : (
                         <span className="peek-value mono">
-                          {variable ? shownValue(variable) : '—'}
+                          {variable ? displayValue(variable) : '—'}
                         </span>
                       )}
                     </li>
@@ -190,7 +185,7 @@ export function VariablesPeek({
                           被覆盖
                         </span>
                       ) : (
-                        <span className="peek-value mono">{shownValue(variable)}</span>
+                        <span className="peek-value mono">{displayValue(variable)}</span>
                       )}
                     </li>
                   );

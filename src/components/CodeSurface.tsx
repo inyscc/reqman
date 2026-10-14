@@ -5,6 +5,7 @@ import {
   subscribeEditorAppearance,
   type EditorAppearance,
 } from '../lib/editorAppearance';
+import type { VariableHoverLookup } from '../lib/variableHover';
 
 export interface CodeSurfaceProps {
   /** 模型 URI（`file://` 开头）：决定 TS/JSON worker 看到的文件名。同一编辑面保持稳定。 */
@@ -30,6 +31,13 @@ export interface CodeSurfaceProps {
    */
   wrap?: boolean;
   onChange?: (value: string) => void;
+  /**
+   * 占位符悬停的取值源（spec: 变量占位符的悬浮值提示）。
+   *
+   * 只给请求体 raw 这一个面：provider 是按语言静态注册的（见 `monacoEnv`），编辑面这边
+   * 做的是「按模型 URI 登记取值源」，没有登记的编辑面（脚本、响应正文）保持原有悬停行为。
+   */
+  variableHover?: VariableHoverLookup | null;
 }
 
 /**
@@ -108,11 +116,17 @@ export function CodeSurface(props: CodeSurfaceProps) {
   const liveRef = useRef({ language, readOnly, ariaLabel, placeholder, enableCompletion, wrap });
   liveRef.current = { language, readOnly, ariaLabel, placeholder, enableCompletion, wrap };
 
+  // 取值源同样走 ref：它每次渲染都可能是新对象（依赖环境/集合），但登记只该在建模型时做
+  // 一次；登记的是个转调函数，因此后续换源不需要重建编辑器
+  const hoverRef = useRef(props.variableHover);
+  hoverRef.current = props.variableHover;
+
   useEffect(() => {
     let cancelled = false;
     let editor: Monaco.editor.IStandaloneCodeEditor | null = null;
     let model: Monaco.editor.ITextModel | null = null;
     let sub: Monaco.IDisposable | null = null;
+    const cleanups: Array<() => void> = [];
 
     void import('../lib/monacoEnv').then(async (env) => {
       const monaco = await env.loadMonaco();
@@ -158,6 +172,14 @@ export function CodeSurface(props: CodeSurfaceProps) {
         if (model) onChangeRef.current?.(model.getValue());
       });
 
+      // 按模型 URI 登记取值源：provider 静态注册一次，靠这里登记的「这个模型查哪个作用域」
+      // 才能把提示接到具体请求上（切换请求 => 换模型 URI => 重新登记）
+      if (hoverRef.current) {
+        const uri = modelUri.toString();
+        env.registerVariableHoverLookup(uri, (name) => hoverRef.current!(name));
+        cleanups.push(() => env.releaseVariableHoverLookup(uri));
+      }
+
       if (
         liveRef.current.enableCompletion &&
         !liveRef.current.readOnly &&
@@ -169,6 +191,7 @@ export function CodeSurface(props: CodeSurfaceProps) {
 
     return () => {
       cancelled = true;
+      for (const cleanup of cleanups) cleanup();
       sub?.dispose();
       editor?.dispose();
       model?.dispose();

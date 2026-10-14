@@ -123,7 +123,8 @@ async function runInBrowser(browser: Browser, code: string): Promise<SandboxOutc
         commands,
         { workspaceId: 'w1', collectionId: 'c1', environmentId: null },
         'prerequest',
-        [script],
+        // 段要带层级标签：运行时不再按位置猜层级（design D2）
+        [{ label: '请求层', code: script }],
       );
       const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
       const raw = /ESCAPE-PROBE (\{.*\})/.exec(printed);

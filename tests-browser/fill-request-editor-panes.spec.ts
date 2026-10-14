@@ -169,7 +169,10 @@ describe('键值表满高容器（真实引擎）', () => {
       await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click();
       await page.getByLabel('请求地址').waitFor();
 
-      // Params 是默认标签；把表格撑到必须滚动
+      // 默认页签是 Body（spec: ui-layout「请求编辑器的默认标签页」）：参数表住在 Params 下
+      await page.getByRole('button', { name: 'Params', exact: true }).click();
+
+      // 把表格撑到必须滚动
       for (let index = 0; index < 16; index += 1) {
         const ghost = page.getByLabel('新增行的名称');
         await ghost.click();
@@ -216,6 +219,8 @@ describe('键值表满高容器（真实引擎）', () => {
     try {
       await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click();
       await page.getByLabel('请求地址').waitFor();
+      // 默认页签是 Body（spec: ui-layout「请求编辑器的默认标签页」）：参数表住在 Params 下
+      await page.getByRole('button', { name: 'Params', exact: true }).click();
 
       const geometry = await page.evaluate(() => {
         const round = (value: number) => Math.round(value * 100) / 100;
@@ -247,6 +252,8 @@ describe('键值表满高容器（真实引擎）', () => {
     try {
       await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click();
       await page.getByLabel('请求地址').waitFor();
+      // 默认页签是 Body（spec: ui-layout「请求编辑器的默认标签页」）：参数表住在 Params 下
+      await page.getByRole('button', { name: 'Params', exact: true }).click();
 
       for (let index = 0; index < 16; index += 1) {
         const ghost = page.getByLabel('新增行的名称');

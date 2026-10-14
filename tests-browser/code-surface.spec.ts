@@ -33,6 +33,28 @@ interface SurfaceApi {
   markOf(uri: string): Promise<number | null>;
   foldAll(uri: string): Promise<void>;
   viewLineCount(uri: string): Promise<number>;
+  mountHoverBody(request: string): void;
+  unmountHoverBody(): void;
+  hoverPointAt(uri: string, line: number, column: number): Promise<{ x: number; y: number } | null>;
+  hoverRegistry(): Promise<string[]>;
+}
+
+/** 请求体 raw 的模型 URI（与 harness 的 `hoverBodyUri` 同构）。 */
+const hoverBodyUri = (request: string) => `file:///reqman/harness/request/${request}/body`;
+
+/** 正文里 `{{host}}` 所在的位置：第 2 行第 14 列（`{{` 起于第 12 列）。 */
+const HOST_POSITION = { line: 2, column: 14 };
+
+/**
+ * 读回**可见**的提示浮层文字。
+ *
+ * 每个编辑面各有自己的浮层实例（隐藏的那几个也在 DOM 里），因此不能直接取第一个——
+ * `display: none` 的那个 `getClientRects()` 为空，据此挑出真正显示着的那一个。
+ */
+function visibleTip(): string {
+  const nodes = Array.from(document.querySelectorAll('.monaco-hover')) as HTMLElement[];
+  const shown = nodes.find((node) => node.getClientRects().length > 0);
+  return shown ? shown.innerText : '';
 }
 
 /** 缺省的等宽字体栈（与 `editorAppearance` 的 DEFAULT_EDITOR_APPEARANCE 一致）。 */
@@ -344,6 +366,131 @@ describe('CodeSurface 真身（Monaco in Blink）', () => {
       // 脚本编辑面不吃折行设置：它没拿到这个值，选项照旧
       const script = await invoke<{ wordWrap: string } | null>(page, 'optionsOf', JS_URI);
       expect(script?.wordWrap, '脚本面不该被折行设置影响').toBe('on');
+      await page.close();
+    });
+  });
+
+  // 占位符悬停（change: show-variable-values-on-hover，任务 2.3）：Body raw 走 Monaco 的
+  // hover provider——它按语言静态注册一次，靠「按模型 URI 登记的取值源」接到具体请求上。
+  describe('请求体 raw 的占位符悬停', () => {
+    /** 挂出请求体面并等它就绪（编辑面是懒加载的：坐标算得出来才算挂好）。 */
+    async function mountBody(page: Page, request: string): Promise<string> {
+      const uri = hoverBodyUri(request);
+      await invoke(page, 'mountHoverBody', request);
+
+      for (let attempt = 0; attempt < 80; attempt++) {
+        const point = await invoke<{ x: number; y: number } | null>(
+          page,
+          'hoverPointAt',
+          uri,
+          HOST_POSITION.line,
+          HOST_POSITION.column,
+        );
+        if (point) return uri;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+
+      throw new Error(`请求体编辑面没有挂出来：${request}`);
+    }
+
+    /**
+     * 把指针移出所有编辑面，并等提示收起。
+     *
+     * 悬停是「指针停在某个字上」的状态：换编辑面之后指针若恰好还落在同一处，新编辑面不会
+     * 收到一次移入，提示也就不会重新算。真实用户切请求时指针会先走到左侧树上、再回到编辑
+     * 面，这里把那一步显式做出来。
+     */
+    async function resetPointer(page: Page): Promise<void> {
+      await page.mouse.move(4, 4);
+      await page.waitForFunction(
+        () => {
+          const nodes = Array.from(document.querySelectorAll('.monaco-hover')) as HTMLElement[];
+          return nodes.every((node) => node.getClientRects().length === 0);
+        },
+        undefined,
+        { timeout: 5_000 },
+      );
+    }
+
+    /** 把鼠标停到 `{{host}}` 上，等提示里出现指定取值，返回浮层文字。 */
+    async function hoverHost(page: Page, uri: string, expected: string): Promise<string> {
+      await resetPointer(page);
+
+      const point = await invoke<{ x: number; y: number } | null>(
+        page,
+        'hoverPointAt',
+        uri,
+        HOST_POSITION.line,
+        HOST_POSITION.column,
+      );
+      expect(point, '应算得出占位符的页面坐标').not.toBeNull();
+
+      // 分两步移入：Monaco 的悬停要指针「停稳」才触发，一步跳到位置常常不触发
+      await page.mouse.move(point!.x - 40, point!.y);
+      await page.mouse.move(point!.x, point!.y);
+
+      await page.waitForFunction(
+        (text) => {
+          const nodes = Array.from(document.querySelectorAll('.monaco-hover')) as HTMLElement[];
+          const shown = nodes.find((node) => node.getClientRects().length > 0);
+          return Boolean(shown) && shown.innerText.includes(text);
+        },
+        expected,
+        { timeout: 15_000 },
+      );
+
+      return page.evaluate(visibleTip);
+    }
+
+    it('悬停在 {{host}} 上出现提示：名字、取值、来源一起给出', async () => {
+      const { page, errors } = await openHarness();
+      const uri = await mountBody(page, 'req-1');
+
+      const tip = await hoverHost(page, uri, 'one.test');
+
+      expect(tip).toContain('host');
+      expect(tip, `提示应给出取值，实际：${tip}`).toContain('one.test');
+      expect(tip, '提示应标明取值来自哪一层').toContain('环境');
+
+      // harness 页自身有一个 404 资源（与本次改动无关），只关心真正的脚本错误
+      const realErrors = errors.filter((message) => !message.includes('Failed to load resource'));
+      expect(realErrors, `页面报错：${realErrors.join(' | ')}`).toHaveLength(0);
+      await page.close();
+    });
+
+    it('切换请求后悬停仍有效：提示按新请求的作用域取值', async () => {
+      const { page } = await openHarness();
+      await mountBody(page, 'req-1');
+      expect(await hoverHost(page, hoverBodyUri('req-1'), 'one.test')).toContain('环境');
+
+      // 换请求 = 换模型 URI（编辑面被重建、取值源重新登记）
+      const uri = await mountBody(page, 'req-2');
+      const tip = await hoverHost(page, uri, 'two.test');
+
+      expect(tip).toContain('two.test');
+      expect(tip, '来源应换成新请求的作用域').toContain('集合');
+      expect(tip, '旧请求的取值不该还留在提示里').not.toContain('one.test');
+      await page.close();
+    });
+
+    it('反复挂载与切换请求后，provider 不重复注册（提示只有一份）', async () => {
+      const { page } = await openHarness();
+
+      // 三次挂载 + 两次卸载：provider 若随挂载反复注册，提示内容会叠加成多份
+      await mountBody(page, 'req-1');
+      await invoke(page, 'unmountHoverBody');
+      await mountBody(page, 'req-2');
+      await invoke(page, 'unmountHoverBody');
+      const uri = await mountBody(page, 'req-1');
+
+      // 登记表里只该有**当前挂着的那个模型**：反复挂载不累积，卸载的也不再留着
+      expect(await invoke<string[]>(page, 'hoverRegistry')).toEqual([uri]);
+
+      const tip = await hoverHost(page, uri, 'one.test');
+
+      const occurrences = tip.split('one.test').length - 1;
+      expect(occurrences, `取值在提示里出现了 ${occurrences} 次（provider 被重复注册）`).toBe(1);
+      expect(tip).not.toContain('two.test');
       await page.close();
     });
   });

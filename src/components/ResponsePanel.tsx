@@ -60,7 +60,6 @@ export interface ResponsePanelProps {
    * 而决定在那时同样要出现——失败恰恰是最需要看它的时候。
    */
   proxyDecision?: ProxyDecisionView | null;
-  onSaveFull: () => void;
   /** 脚本 console 输出；为空时「脚本」标签页不出现（任务 6.4）。 */
   scriptConsole?: ConsoleEntry[];
   scriptAssertions?: TestAssertion[];
@@ -151,7 +150,6 @@ export function ResponsePanel({
   sending = false,
   error,
   proxyDecision = null,
-  onSaveFull,
   scriptConsole,
   scriptAssertions,
   scriptError,
@@ -299,36 +297,35 @@ export function ResponsePanel({
           </span>
         )}
         <span className="grow" />
+        {/* 响应头只承载标签：除标签之外的常驻动作不属于这一行（spec: ui-layout
+            「发送中的响应区反馈」——原先挂在这里的「保存全文」已按本变更移除）。 */}
         {(response || hasScript) && (
-          <>
-            <span className="tabs">
-              {response && (
-                <>
-                  <button
-                    className={`tab ${tab === 'body' ? 'active' : ''}`}
-                    onClick={() => setTab('body')}
-                  >
-                    Body
-                  </button>
-                  <button
-                    className={`tab ${tab === 'headers' ? 'active' : ''}`}
-                    onClick={() => setTab('headers')}
-                  >
-                    Headers
-                  </button>
-                </>
-              )}
-              {hasScript && (
+          <span className="tabs">
+            {response && (
+              <>
                 <button
-                  className={`tab ${tab === 'script' ? 'active' : ''}`}
-                  onClick={() => setTab('script')}
+                  className={`tab ${tab === 'body' ? 'active' : ''}`}
+                  onClick={() => setTab('body')}
                 >
-                  脚本
+                  Body
                 </button>
-              )}
-            </span>
-            {response && <button onClick={onSaveFull}>保存全文</button>}
-          </>
+                <button
+                  className={`tab ${tab === 'headers' ? 'active' : ''}`}
+                  onClick={() => setTab('headers')}
+                >
+                  Headers
+                </button>
+              </>
+            )}
+            {hasScript && (
+              <button
+                className={`tab ${tab === 'script' ? 'active' : ''}`}
+                onClick={() => setTab('script')}
+              >
+                脚本
+              </button>
+            )}
+          </span>
         )}
       </div>
 
@@ -391,10 +388,12 @@ export function ResponsePanel({
 
         {response && tab === 'body' && (
           <>
+            {/* 只说事实：界面上不存在的东西不能被文案承诺（design D2）——
+                截断的事实照旧写明，取回入口已随本变更移除。 */}
             {response.truncated && (
               <div className="notice warn" role="status">
-                正文超过体积上限，界面只持有前 {humanBytes(Math.min(response.size_bytes, response.size_limit_bytes))}；
-                完整正文可用「保存全文」取回。
+                正文超过体积上限，界面只持有前{' '}
+                {humanBytes(Math.min(response.size_bytes, response.size_limit_bytes))}。
               </div>
             )}
 

@@ -1,15 +1,56 @@
 // 脚本执行编排的行为断言（任务 2.4）。
 //
-// 这里验的是顺序与合并语义：三级脚本按「集合 → 文件夹 → 请求」执行，前一段的写入对
-// 后一段可见，因此同名变量最终取请求层的值；没有任何脚本时不创建沙箱上下文；脚本抛错
+// 这里验的是顺序与合并语义：各段脚本按「集合 → 目录链（由外到内）→ 请求」执行，前一段的
+// 写入对后一段可见，因此同名变量最终取请求层的值；没有任何脚本时不创建沙箱上下文；脚本抛错
 // 时其后未执行的脚本不再执行，错误仍被报告。
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { runScriptPhase } from '../src/lib/scriptRuntime';
+import { runScriptPhase as runScriptPhaseRaw } from '../src/lib/scriptRuntime';
+import { folderSegments } from '../src/lib/folderChain';
 import type { Commands } from '../src/lib/commands';
 import type { ResponsePayload, SavedRequest, Variable } from '../src/lib/types';
+
+type RawPhaseArgs = Parameters<typeof runScriptPhaseRaw>;
+
+/**
+ * 层级标签由**调用方**给出——生产代码里它取自真实的目录链（见 `src/lib/folderChain.ts`）。
+ *
+ * 本文件关心的是顺序与合并语义，用三段来代表那条链，因此这里按位置配上「集合 / 文件夹 /
+ * 请求」的标签。运行时不再内置层级表：目录层是一条链，按位置猜标签必然对错号（design D2）。
+ */
+const PHASE_LABELS = ['集合层', '文件夹层', '请求层'];
+
+const segments = (codes: (string | null | undefined)[]) =>
+  codes.map((code, index) => ({
+    label: PHASE_LABELS[index] ?? `第 ${index + 1} 段`,
+    code: code ?? null,
+  }));
+
+/** 测试内便捷调用：把按位置的代码列表编成带标签的脚本段。 */
+const runScriptPhase = (
+  commands: RawPhaseArgs[0],
+  target: RawPhaseArgs[1],
+  listen: RawPhaseArgs[2],
+  codes: (string | null | undefined)[],
+  response?: RawPhaseArgs[4],
+  requestUrl?: RawPhaseArgs[5],
+  timeoutMs?: RawPhaseArgs[6],
+  cancellation?: RawPhaseArgs[7],
+  request?: RawPhaseArgs[8],
+) =>
+  runScriptPhaseRaw(
+    commands,
+    target,
+    listen,
+    segments(codes),
+    response,
+    requestUrl,
+    timeoutMs,
+    cancellation,
+    request,
+  );
 
 function variable(name: string, value: string): Variable {
   return {
@@ -765,6 +806,78 @@ describe('脚本超时与错误处置', () => {
     expect(result.error).toContain('前置脚本');
     expect(result.error).toContain('文件夹层');
     expect(result.error).toContain('第 4 行');
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// 目录链的编排（change: run-ancestor-folder-scripts）
+//
+// 层级标签由调用方给出，所以这里直接用真函数传带标签的段：链上的每一层都是**独立的一段**，
+// 顺序为由外到内，报错要能指认到是哪一个目录。
+// ---------------------------------------------------------------------------
+
+describe('目录链编排（run-ancestor-folder-scripts）', () => {
+  it('链上的每一层都执行，顺序为由外到内（集合 + 三层目录 + 请求）', async () => {
+    const { commands } = fakeCommands();
+    const step = (name: string) => `console.log('${name}');`;
+
+    const result = await runScriptPhaseRaw(commands, target, 'prerequest', [
+      { label: '集合层', code: step('C') },
+      { label: '目录第 1 层「最外层」', code: step('1') },
+      { label: '目录第 2 层「中间层」', code: step('2') },
+      { label: '目录第 3 层「最内层」', code: step('3') },
+      { label: '请求层', code: step('R') },
+    ]);
+
+    expect(result.error).toBeNull();
+    expect(result.console.map((entry) => entry.args[0])).toEqual(['C', '1', '2', '3', 'R']);
+  }, 30_000);
+
+  it('未归属目录时不编排目录层：只有集合与请求两段', async () => {
+    const { commands } = fakeCommands();
+    const segments = [
+      { label: '集合层', code: "console.log('C');" },
+      ...folderSegments([], (folder) => folder.pre_request_script),
+      { label: '请求层', code: "console.log('R');" },
+    ];
+
+    const result = await runScriptPhaseRaw(commands, target, 'prerequest', segments);
+
+    expect(segments).toHaveLength(2);
+    expect(result.error).toBeNull();
+    expect(result.console.map((entry) => entry.args[0])).toEqual(['C', 'R']);
+  }, 30_000);
+
+  it('链长到五段时，报错指明是哪一个目录（2.1）', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhaseRaw(commands, target, 'prerequest', [
+      { label: '集合层', code: "console.log('C');" },
+      { label: '目录第 1 层「最外层」', code: "console.log('1');" },
+      { label: '目录第 2 层「中间层」', code: 'throw new Error("中间层炸了");' },
+      { label: '目录第 3 层「最内层」', code: "console.log('3');" },
+      { label: '请求层', code: "console.log('R');" },
+    ]);
+
+    expect(result.error).toContain('前置脚本');
+    expect(result.error).toContain('目录第 2 层「中间层」');
+    // 抛错之后不再往下执行：这一层之后的目录层与请求层都不该跑
+    expect(result.console.map((entry) => entry.args[0])).toEqual(['C', '1']);
+  }, 30_000);
+
+  it('同名目录按链上位置区分（2.2）', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhaseRaw(commands, target, 'prerequest', [
+      { label: '集合层', code: "console.log('C');" },
+      { label: '目录第 1 层「重复」', code: "console.log('1');" },
+      { label: '目录第 2 层「重复」', code: 'throw new Error("炸了");' },
+      { label: '请求层', code: "console.log('R');" },
+    ]);
+
+    expect(result.error).toContain('目录第 2 层「重复」');
+    // 只给名字的报错无法指认是哪一层：位置必须出现
+    expect(result.error).not.toContain('目录第 1 层「重复」');
   }, 30_000);
 });
 

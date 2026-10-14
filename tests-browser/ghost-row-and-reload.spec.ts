@@ -107,6 +107,8 @@ async function openRequest(browserInstance: Browser): Promise<Page> {
 
   await page.getByTestId('workspace-tree').getByText('探针请求').click();
   await page.getByLabel('请求地址').waitFor();
+  // 默认页签是 Body（spec: ui-layout「请求编辑器的默认标签页」）：键值表住在 Params 下
+  await page.getByRole('button', { name: 'Params', exact: true }).click();
 
   return page;
 }

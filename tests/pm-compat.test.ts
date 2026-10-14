@@ -5,9 +5,38 @@
 // postman-sandbox@6.7.4 的实际行为，见 D4：以上游实现为准，不以文档为准）。
 
 import { describe, expect, it, vi } from 'vitest';
-import { runScriptPhase } from '../src/lib/scriptRuntime';
+import { runScriptPhase as runScriptPhaseRaw } from '../src/lib/scriptRuntime';
 import type { Commands } from '../src/lib/commands';
 import type { ResponsePayload, Variable } from '../src/lib/types';
+
+type RawPhaseArgs = Parameters<typeof runScriptPhaseRaw>;
+
+/**
+ * 层级标签由调用方给出（生产代码里取自真实的目录链）。本文件只关心"脚本看到的世界"，
+ * 层级与它无关，因此统一用一个笼统的标签。
+ */
+const runScriptPhase = (
+  commands: RawPhaseArgs[0],
+  target: RawPhaseArgs[1],
+  listen: RawPhaseArgs[2],
+  codes: (string | null | undefined)[],
+  response?: RawPhaseArgs[4],
+  requestUrl?: RawPhaseArgs[5],
+  timeoutMs?: RawPhaseArgs[6],
+  cancellation?: RawPhaseArgs[7],
+  request?: RawPhaseArgs[8],
+) =>
+  runScriptPhaseRaw(
+    commands,
+    target,
+    listen,
+    codes.map((code, index) => ({ label: `第 ${index + 1} 段`, code: code ?? null })),
+    response,
+    requestUrl,
+    timeoutMs,
+    cancellation,
+    request,
+  );
 
 function variable(name: string, value: string): Variable {
   return {

@@ -307,13 +307,21 @@ export function applyTreeMove(trees: CollectionTree[], move: TreeMove): Collecti
       }
       if (!node) return trees;
 
+      // 归属也一并落到节点上：树里的 `request` 就是打开标签时草稿的来源，留着旧归属会让
+      // 「树里看着在目录里、脚本编排却按旧目录算」——本次实测的失败正是这么来的（design D3）。
+      // 文件夹移动只改它自己的 `parent_folder_id`，后代相对各自父级的归属不变，无需逐层改。
+      const moved =
+        move.kind === 'move-request' && node.request
+          ? { ...node, request: { ...node.request, folder_id: move.folderId } }
+          : node;
+
       // 乐观重排必须与后端同一条规则：跨父级也按位置插入。这里若仍用「追加末尾」，
       // 界面会先显示末尾、后端确认后跳到中间——"瞬时看不出、刷新才对不上"的那类错位。
       return detached.map((tree) =>
         tree.collection.id === move.collectionId
           ? {
               ...tree,
-              children: insertAt(tree.children, targetFolderId, node as TreeNode, move.index),
+              children: insertAt(tree.children, targetFolderId, moved, move.index),
             }
           : tree,
       );

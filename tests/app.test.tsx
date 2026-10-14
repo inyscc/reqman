@@ -662,6 +662,22 @@ async function openRequest() {
   await screen.findByLabelText('请求地址');
 }
 
+/**
+ * 切到请求编辑器的 Params 页签。
+ *
+ * 打开请求的默认页签已是 Body（spec: ui-layout「请求编辑器的默认标签页」），因此凡是
+ * 要看参数表的用例都得先切过去——这正是「默认值只回答首次落在哪一页」的副产品。
+ */
+function openParamsTab() {
+  fireEvent.click(screen.getByRole('button', { name: 'Params', exact: true }));
+}
+
+/** 请求编辑器当前激活的内层页签文案（读页签栏的 active 标记）。 */
+function activeInnerTab(): string | null {
+  const active = document.querySelector('.request-editor .request-tabs .tab.active');
+  return active?.textContent?.trim() ?? null;
+}
+
 describe('前端数据流骨架', () => {
   it('从后端读取工作区与集合树并渲染（6.1）', async () => {
     const { client } = harness();
@@ -951,6 +967,7 @@ describe('前端数据流骨架', () => {
     });
     render(<App client={client} />);
     await openRequest();
+    openParamsTab();
 
     fireEvent.change(screen.getByLabelText('描述 0'), { target: { value: '查询说明' } });
     fireEvent.change(screen.getByLabelText('新增行的描述'), {
@@ -976,6 +993,7 @@ describe('前端数据流骨架', () => {
     });
     render(<App client={client} />);
     await openRequest();
+    openParamsTab();
 
     fireEvent.change(screen.getByLabelText('新增行的描述'), {
       target: { value: '还没填名称的说明' },
@@ -2245,6 +2263,186 @@ describe('端到端串联（10.1）', () => {
   }, 60_000);
 });
 
+// ---------------------------------------------------------------------------
+// 目录链编排（change: run-ancestor-folder-scripts）
+//
+// 这两条锁的是「链从哪来」与「链算几次」：归属取请求**当前的**记录（拖拽之后不必重开标签），
+// 且前置与后置共用发送前算出的那一条链。
+// ---------------------------------------------------------------------------
+
+function folderWith(
+  id: string,
+  name: string,
+  pre: string | null,
+  test: string | null,
+): Folder {
+  return {
+    id,
+    collection_id: 'c1',
+    parent_folder_id: null,
+    name,
+    description: null,
+    auth: emptyAuth(),
+    pre_request_script: pre,
+    test_script: test,
+    sort_order: 0,
+  };
+}
+
+/** 集合根下「一个目录 + 一个请求」：用于把请求拖进目录。 */
+function treesWithFolder(folderId: string, folderName: string): CollectionTree[] {
+  return [
+    {
+      collection,
+      children: [
+        folderNode(folderName, [], folderId),
+        requestNode('被拖的请求', 'https://api.test/moved', 'r-moved'),
+      ],
+    },
+  ];
+}
+
+describe('目录链编排（run-ancestor-folder-scripts）', () => {
+  it('拖进目录后不重开标签直接发送：新目录的脚本被执行（4.1 / 4.2）', async () => {
+    const folder = folderWith(
+      'F',
+      '被拖进的目录',
+      "console.log('目录前置');",
+      "console.log('目录后置');",
+    );
+    const requestMove = vi.fn(async () => undefined);
+    const { client, sendRequest } = harness();
+
+    render(
+      <App
+        client={{
+          ...client,
+          workspaceTree: async () => treesWithFolder(folder.id, folder.name),
+          // 假后端的**当前**归属：拖拽落库之后就是目录 F——标签里那份草稿仍是 null，
+          // 发送若照它算就会漏掉这个目录的脚本（本次线上问题的成因）
+          requestGet: async (id: string) =>
+            makeRequest({ id, name: '被拖的请求', folder_id: folder.id }),
+          folderGet: async (id: string) => {
+            if (id !== folder.id) throw new Error(`没有这个目录：${id}`);
+            return folder;
+          },
+          requestMove,
+        }}
+      />,
+    );
+
+    // 先打开标签：此时它在集合根下
+    fireEvent.click(await tree().findByText('被拖的请求'));
+    await screen.findByLabelText('请求地址');
+
+    // 拖进目录（落在目录行的中间区域 = 移入），接着**不重开标签**直接发送
+    const view = within(screen.getByTestId('workspace-tree'));
+    const { target, transfer } = dragOver(view, '被拖的请求', folder.name, 0.5);
+    dropOn(target, 0.5, transfer);
+    await waitFor(() => expect(requestMove).toHaveBeenCalledWith('r-moved', folder.id, null));
+
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalled());
+
+    fireEvent.click(await screen.findByText('脚本'));
+    const consoleText = (await screen.findByTestId('script-console')).textContent ?? '';
+    expect(consoleText).toContain('目录前置');
+    expect(consoleText).toContain('目录后置');
+  }, 60_000);
+
+  it('链只算一次：响应前改归属不影响后置所跑的那条链（3.1）', async () => {
+    const first = folderWith('F1', '目录一', "console.log('目录一前置');", "console.log('目录一后置');");
+    const second = folderWith('F2', '目录二', "console.log('目录二前置');", "console.log('目录二后置');");
+    const folders = new Map<string, Folder>([
+      [first.id, first],
+      [second.id, second],
+    ]);
+    const { client } = harness();
+
+    // 请求在飞行途中被移走：后置若重新解析归属，就会落到目录二
+    let moved = false;
+    const sendRequest = vi.fn(async () => {
+      moved = true;
+      return response();
+    });
+
+    render(
+      <App
+        client={{
+          ...client,
+          workspaceTree: async () =>
+            treeWith(makeRequest({ id: 'r-chain', name: '被拖的请求', folder_id: 'F1' }), first),
+          requestGet: async (id: string) =>
+            makeRequest({ id, name: '被拖的请求', folder_id: moved ? 'F2' : 'F1' }),
+          folderGet: async (id: string) => folders.get(id) as Folder,
+          sendRequest,
+        }}
+      />,
+    );
+
+    fireEvent.click(await tree().findByText('被拖的请求'));
+    await screen.findByLabelText('请求地址');
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalled());
+
+    fireEvent.click(await screen.findByText('脚本'));
+    const consoleText = (await screen.findByTestId('script-console')).textContent ?? '';
+    expect(consoleText).toContain('目录一前置');
+    expect(consoleText).toContain('目录一后置');
+    expect(consoleText).not.toContain('目录二前置');
+    expect(consoleText).not.toContain('目录二后置');
+  }, 60_000);
+
+  it('拖进目录只同步归属、不重载草稿：编辑内容与未保存改动都还在（4.1）', async () => {
+    const folder = folderWith('F', '被拖进的目录', null, null);
+    const requestMove = vi.fn(async () => undefined);
+    const { client } = harness();
+
+    render(
+      <App
+        client={{
+          ...client,
+          workspaceTree: async () => treesWithFolder(folder.id, folder.name),
+          requestGet: async (id: string) =>
+            makeRequest({ id, name: '被拖的请求', folder_id: folder.id }),
+          folderGet: async (id: string) => folder,
+          requestMove,
+        }}
+      />,
+    );
+
+    fireEvent.click(await tree().findByText('被拖的请求'));
+    await screen.findByLabelText('请求地址');
+    // 拖拽之前先留一笔**未保存**的编辑，拖完必须原样还在
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/edited' },
+    });
+    await screen.findByText('未保存');
+
+    const view = within(screen.getByTestId('workspace-tree'));
+    const { target, transfer } = dragOver(view, '被拖的请求', folder.name, 0.5);
+    dropOn(target, 0.5, transfer);
+    await waitFor(() => expect(requestMove).toHaveBeenCalledWith('r-moved', folder.id, null));
+
+    // 归属：节点上喂给草稿的那份请求也已指向新目录（只看界面嵌套不够，得看字段）
+    const moved = applyTreeMove(treesWithFolder(folder.id, folder.name), {
+      kind: 'move-request',
+      id: 'r-moved',
+      collectionId: 'c1',
+      folderId: folder.id,
+      index: null,
+    });
+    const placed = moved[0].children.find((node) => node.id === folder.id)?.children?.[0];
+    expect(placed?.request?.folder_id).toBe(folder.id);
+
+    // 草稿没被重载：编辑内容与未保存标记都还在
+    expect((screen.getByLabelText('请求地址') as HTMLInputElement).value).toBe(
+      'https://api.test/edited',
+    );
+    expect(screen.getByText('未保存')).toBeTruthy();
+  }, 60_000);
+});
+
 describe('安全演练（10.3）', () => {
   it('恶意集合走完导入到发送：门禁提示、无法联网与读文件、外发只走策略允许的路径', async () => {
     const { client, sendRequest } = e2eHarness(MALICIOUS_DOC, {
@@ -3298,6 +3496,8 @@ describe('空行不进请求与保存（出口清洗）', () => {
     const { client, sendRequest, variablesPreview } = harness();
     render(<App client={client} />);
     await openRequest();
+    // 参数表住在 Params 页签下（打开请求默认落在 Body）
+    openParamsTab();
 
     // 先弄脏：不脏的话走的是 saved_id，压根不带 inline
     fireEvent.change(screen.getByLabelText('请求地址'), {
@@ -3326,6 +3526,7 @@ describe('空行不进请求与保存（出口清洗）', () => {
     const { client, requestSave } = harness();
     render(<App client={client} />);
     await openRequest();
+    openParamsTab();
 
     fireEvent.change(screen.getByLabelText('请求地址'), {
       target: { value: 'https://api.test/edited' },
@@ -3350,6 +3551,7 @@ describe('空行不进请求与保存（出口清洗）', () => {
     });
     render(<App client={client} />);
     await openRequest();
+    openParamsTab();
 
     const rows = Array.from(document.querySelectorAll('.request-editor tbody tr'));
     expect(rows).toHaveLength(2);
@@ -5292,6 +5494,7 @@ describe('URL 与参数表同步（spec: URL 与参数表保持同步）', () =>
     });
     render(<App client={client} />);
     await openRequest();
+    openParamsTab();
 
     expect(urlField().value).toBe('http://localhost:8899/smoke?a=a&b=c');
     expect((screen.getByLabelText('参数名 0') as HTMLInputElement).value).toBe('a');
@@ -5308,6 +5511,7 @@ describe('URL 与参数表同步（spec: URL 与参数表保持同步）', () =>
     });
     render(<App client={client} />);
     await openRequest();
+    openParamsTab();
 
     expect(urlField().value).toBe('https://api.test/users?page=1');
     expect((screen.getByLabelText('参数名 0') as HTMLInputElement).value).toBe('page');
@@ -5827,6 +6031,36 @@ describe('响应呈现格式（response-format-selector）', () => {
     expect(screen.queryByTestId('response-sending'), '保存不该让响应头显示发送中').toBeNull();
     expect(screen.queryByTestId('response-loading'), '保存不该让响应区出现遮罩').toBeNull();
   });
+
+  it('截断提示只说事实，响应头只承载标签（spec: ui-layout「发送中的响应区反馈」）', async () => {
+    const { client } = harness({
+      sendResult: response({
+        truncated: true,
+        size_bytes: 8 * 1024 * 1024,
+        size_limit_bytes: 1 * 1024 * 1024,
+      }),
+    });
+    const { container } = render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('status');
+
+    // 截断的事实照旧写明——但不再承诺一个界面上已不存在的取回动作
+    const notice = await screen.findByText(/界面只持有前/);
+    expect(notice.textContent).not.toContain('保存全文');
+    expect(container.querySelector('.response-region')?.textContent).not.toContain('保存全文');
+
+    // 响应头右端只剩标签组：除标签之外没有常驻动作按钮
+    const header = (container.querySelector('.response-region') as HTMLElement).querySelector(
+      '.pane-header',
+    ) as HTMLElement;
+    const labels = Array.from(header.querySelectorAll('button')).map((el) => el.textContent);
+    expect(labels.length).toBeGreaterThan(0);
+    for (const label of labels) {
+      expect(['Body', 'Headers', '脚本']).toContain(label);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -6315,5 +6549,94 @@ describe('底部状态条：忙碌文案只随在飞发送（spec: 底部状态�
     await waitFor(() =>
       expect(screen.getByTestId('status-bar').textContent).not.toContain('发送中'),
     );
+  });
+});
+
+describe('请求编辑器的默认标签页（trim-response-header-and-default-body-tab）', () => {
+  /** 按名称取到对应的会话标签按钮。 */
+  const tabByName = (name: string): HTMLElement =>
+    within(screen.getByTestId('session-tabs')).getByText(name).closest('.session-tab') as HTMLElement;
+
+  it('新建 / 从集合树展开 / 复制三条入口都落在 Body（spec: 请求编辑器的默认标签页）', async () => {
+    const r2 = makeRequest({ id: 'r2', name: '另一个请求', url: 'https://api.test/other' });
+    const rNew = makeRequest({ id: 'r-new', name: '新请求' });
+    const harnessed = harness({ extraRequest: r2 });
+    harnessed.requestCreate.mockResolvedValueOnce(rNew);
+    vi.spyOn(harnessed.client, 'requestDuplicate').mockResolvedValueOnce(
+      makeRequest({ id: 'r-dup', name: '我的请求 副本' }),
+    );
+    // 树要跟着新建走：复制时 loadTree 会对账，树里没有的请求其标签会被当成「后端已消失」关掉
+    harnessed.client.workspaceTree = async () => [
+      {
+        collection,
+        children: [
+          { kind: 'request', id: 'r1', name: '我的请求', sort_order: 0, children: [], request: makeRequest() },
+          { kind: 'request', id: 'r2', name: '另一个请求', sort_order: 1, children: [], request: r2 },
+          { kind: 'request', id: 'r-new', name: '新请求', sort_order: 2, children: [], request: rNew },
+        ],
+      },
+    ];
+    render(<App client={harnessed.client} />);
+
+    // 入口一：从集合树展开一个此前未打开的请求
+    await openRequest();
+    expect(activeInnerTab()).toBe('Body');
+    // 界面不呈现 Params 页签的内容（参数表的输入框一个都不在）
+    expect(screen.queryAllByPlaceholderText('参数名')).toHaveLength(0);
+
+    // 入口二：新建请求
+    openNodeMenu('我的集合');
+    fireEvent.click(screen.getByText('新建请求'));
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
+    expect(activeInnerTab()).toBe('Body');
+
+    // 入口三：复制请求（Ctrl+D 作用于激活标签对应的请求）
+    fireEvent.keyDown(window, { key: 'd', ctrlKey: true });
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(3));
+    expect(tabByName('我的请求 副本').className).toContain('active');
+    expect(activeInnerTab()).toBe('Body');
+  });
+
+  it('重启后恢复的请求标签落在 Body（spec: 请求编辑器的默认标签页）', async () => {
+    const harnessed = harness();
+    // 重启：存储里带着上次打开的请求标签，恢复时同样按默认值落在 Body
+    const client = {
+      ...harnessed.client,
+      settingsGet: async (scope: string) => {
+        if (scope === 'ui_tabs') {
+          return JSON.stringify({ tabs: [{ kind: 'request', id: 'r1' }], activeId: 'r1' });
+        }
+        if (scope === 'script_gate') return 'allowed';
+        return null;
+      },
+    };
+    render(<App client={client} />);
+
+    await screen.findByLabelText('请求地址');
+    expect(activeInnerTab()).toBe('Body');
+    expect(screen.queryAllByPlaceholderText('参数名')).toHaveLength(0);
+  });
+
+  it('切走再切回仍是它自己的页签，默认值不覆盖既有记忆（spec: 请求编辑器的默认标签页）', async () => {
+    const { client } = harness({
+      extraRequest: makeRequest({ id: 'r2', name: '另一个请求', url: 'https://api.test/other' }),
+    });
+    render(<App client={client} />);
+
+    await openRequest();
+    openParamsTab();
+    expect(activeInnerTab()).toBe('Params');
+
+    // 切到另一个标签：它按默认值落在 Body
+    fireEvent.click(tree().getByText('另一个请求'));
+    await waitFor(() => expect(activeInnerTab()).toBe('Body'));
+
+    // 切回原标签：仍停在它自己记住的 Params，不被重置为 Body
+    fireEvent.click(tabByName('我的请求'));
+    await waitFor(() => expect(activeInnerTab()).toBe('Params'));
+
+    // 再次点击树上对应的请求，同样不重置
+    fireEvent.click(tree().getByText('我的请求'));
+    await waitFor(() => expect(activeInnerTab()).toBe('Params'));
   });
 });

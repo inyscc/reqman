@@ -44,6 +44,17 @@ export function effectiveByName(variables: Variable[]): Map<string, Variable> {
 }
 
 /**
+ * 界面上呈现的值。
+ *
+ * secret 的值本身就是后端下发的掩码，这里不做任何揭示；不可读的条目（后端给不出值）
+ * 呈现为「不可读」，而不是伪装成一个空值——空值看起来像「这个变量是空的」，与
+ * 「读不出来」是两件事。浮层与悬浮提示共用它，两处的呈现才不会各说一句。
+ */
+export function displayValue(variable: Variable): string {
+  return variable.current.state === 'value' ? variable.current.value : '不可读';
+}
+
+/**
  * 该行是否被下方的同名条目遮蔽（界面上的「被覆盖」标记的判据）。
  *
  * 判据是结构性的：**自己启用**，且同名组里存在更靠后的**启用**条目。

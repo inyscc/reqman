@@ -146,6 +146,8 @@ describe('表头吸顶（真实引擎）', () => {
     try {
       await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click();
       await page.getByLabel('请求地址').waitFor();
+      // 默认页签是 Body（spec: ui-layout「请求编辑器的默认标签页」）：参数表住在 Params 下
+      await page.getByRole('button', { name: 'Params', exact: true }).click();
 
       // 把表格撑到必须滚动：反复在幽灵行里写一行再回车
       for (let index = 0; index < 16; index += 1) {

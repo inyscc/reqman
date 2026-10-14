@@ -65,6 +65,26 @@ window.__TAURI_INTERNALS__ = {
       variable('v3', 'tokenSecret', '******', 2, true)
     ];
 
+    // 压力模式（openApp 的 stress 选项注入的窗口标记）：把某个作用域的行数拉到
+    // 足以溢出一屏——容器内滚动、表头吸顶这些结论都要靠行数撑出来。
+    var stress = window.__VARIABLE_SCROLL_STRESS__ || {};
+    var environment = {
+      id: 'e1', workspace_id: 'w1', name: '滚动环境', is_active: true,
+      proxy: null, sort_order: 0
+    };
+    function manyVariables(scope, ownerId, prefix) {
+      var list = [];
+      for (var index = 0; index < 40; index += 1) {
+        var stored = { state: 'value', value: prefix + '-value-' + index };
+        list.push({
+          id: prefix + index, scope: scope, owner_id: ownerId, name: prefix + index,
+          description: null, is_secret: false, enabled: true, sort_order: index,
+          initial: stored, current: stored
+        });
+      }
+      return list;
+    }
+
     switch (cmd) {
       case 'workspace_list': return [workspace];
       case 'workspace_active': return workspace;
@@ -79,11 +99,15 @@ window.__TAURI_INTERNALS__ = {
             }
           ]
         }];
-      case 'environment_list': return [];
-      case 'environment_active': return null;
+      case 'environment_list': return stress.environment ? [environment] : [];
+      case 'environment_active': return stress.environment ? environment : null;
       case 'globals_list': return [];
       // 两条同名变量：靠上那条应当被标注为「被下方同名变量覆盖」
-      case 'variable_list': return variables;
+      case 'variable_list':
+        if (args && args.scope === 'collection') {
+          return stress.collection ? manyVariables('collection', 'c1', 'many') : variables;
+        }
+        return stress.environment ? manyVariables('environment', 'e1', 'env') : [];
       case 'secret_reveal':
         return variables.map(function (item) {
           return item.id === 'v3'
@@ -145,9 +169,30 @@ afterAll(async () => {
   await server?.close();
 });
 
-async function openApp(): Promise<Page> {
-  const page = await browser.newPage();
+/**
+ * 打开应用。
+ *
+ * `stress` 把某个作用域的行数拉到溢出一屏（见假后端里的同名标记），
+ * `viewport` 固定窗口尺寸——「行多时必须滚」「行少时布局不变」这两条
+ * 都是几何结论，窗口一变结论就跟着变。
+ */
+async function openApp(
+  options: {
+    stress?: { collection?: boolean; environment?: boolean };
+    viewport?: { width: number; height: number };
+  } = {},
+): Promise<Page> {
+  const page = await browser.newPage(options.viewport ? { viewport: options.viewport } : {});
   await page.addInitScript(FAKE_TAURI);
+  await page.addInitScript(
+    (flags) => {
+      (window as unknown as Record<string, unknown>).__VARIABLE_SCROLL_STRESS__ = flags;
+    },
+    {
+      collection: options.stress?.collection === true,
+      environment: options.stress?.environment === true,
+    },
+  );
   await page.goto(origin, { waitUntil: 'load' });
   await page.getByTestId('workspace-tree').getByText('探针请求').waitFor();
   return page;
@@ -401,5 +446,397 @@ describe('变量表格的重复键与拖拽（真实引擎）', () => {
     await page.getByLabel('隐藏 tokenSecret').click();
     await expect.poll(() => page.getByLabel('揭示 tokenSecret').count()).toBe(1);
     expect(await rowHeight()).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 变量表格的区域滚动（change: rework-variable-table-scroll）
+// ---------------------------------------------------------------------------
+//
+// 为什么要在真引擎里量：这一组结论全是**几何**的——「滚动发生在哪一层」「表头
+// 钉没钉在容器顶部」「行多与行少时行宽是否一致」，在 jsdom / happy-dom 里没有
+// 布局可言，只能给出假结论。
+
+/** 集合实体面板的正文区（变量页的宿主）。 */
+const COLLECTION_HOST = '[data-testid="entity-script-panel"]';
+/** 环境编辑器的宿主。 */
+const ENVIRONMENT_HOST = '[data-testid="environment-editor"]';
+/** 环境编辑器正文区里那层「极端高度才溢出」的兜底滚动容器。 */
+const ENVIRONMENT_BODY = `${ENVIRONMENT_HOST} .var-editor`;
+/** 行数溢出一屏时的窗口：够高，让「滚动必须发生在容器里」这件事只能由容器承担。 */
+const OVERFLOWING_VIEWPORT = { width: 1100, height: 640 };
+
+interface TableScrollGeometry {
+  scrollTop: number;
+  overflow: number;
+  headerTop: number;
+  containerTop: number;
+  headerPosition: string;
+  headerBackground: string;
+  gutter: number;
+  horizontalOverflow: number;
+  /** 宿主范围内有没有悬浮滚动条（环境编辑器那层兜底条也算）。 */
+  overlay: boolean;
+  /** 变量表容器自己有没有悬浮滚动条——本变更要求它是 false。 */
+  tableOverlay: boolean;
+  bodyScrollTop: number;
+  bodyOverflowY: string;
+}
+
+/**
+ * 把宿主里的变量表容器滚到底，量它的几何。
+ *
+ * `body` 是这个宿主的编辑面本身（集合面板的正文区 / 环境编辑器的 `.var-editor`）：
+ * 它**不该**被表格带着滚——那正是「滚动不许扩张到整个编辑面」这条要求的判据。
+ */
+async function scrollTableToEnd(
+  page: Page,
+  root: string,
+  body: string,
+): Promise<TableScrollGeometry> {
+  await page.locator(`${root} .table-scroll`).first().evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  return page.evaluate(
+    ({ root, body }) => {
+      const host = document.querySelector(root) as HTMLElement;
+      const container = host.querySelector('.table-scroll') as HTMLElement;
+      const header = host.querySelector('.variable-table thead th') as HTMLElement;
+      const editor = document.querySelector(body) as HTMLElement;
+      const round = (value: number) => Math.round(value * 100) / 100;
+      return {
+        scrollTop: round(container.scrollTop),
+        overflow: container.scrollHeight - container.clientHeight,
+        headerTop: round(header.getBoundingClientRect().top),
+        containerTop: round(container.getBoundingClientRect().top),
+        headerPosition: getComputedStyle(header).position,
+        headerBackground: getComputedStyle(header).backgroundColor,
+        // 占位型滚动条会让 offsetWidth 比 clientWidth 大——行右端那排图标
+        // 就会随滚动条的出现而左右跳
+        gutter: container.offsetWidth - container.clientWidth,
+        horizontalOverflow: container.scrollWidth - container.clientWidth,
+        overlay: host.querySelector('[data-testid="overlay-scrollbar"]') !== null,
+        // 变量表这一处不绘制任何滚动指示（spec: ui-polish「全局细滚动条」的例外）
+        tableOverlay:
+          host.querySelector('.table-scroll-wrap [data-testid="overlay-scrollbar"]') !== null,
+        bodyScrollTop: round(editor.scrollTop),
+        bodyOverflowY: getComputedStyle(editor).overflowY,
+      };
+    },
+    { root, body },
+  );
+}
+
+/** 表格第一行的行宽与贴右缘控件的位置：行多与行少必须一模一样。 */
+async function rowEdges(page: Page, root: string) {
+  return page.evaluate((selector) => {
+    const host = document.querySelector(selector) as HTMLElement;
+    const round = (value: number) => Math.round(value * 100) / 100;
+    const table = host.querySelector('.variable-table') as HTMLElement;
+    const row = host.querySelector('.variable-table tbody tr') as HTMLElement;
+    const keyCell = row.querySelector('td.var-key') as HTMLElement;
+    const valueCell = row.querySelector('td.var-value') as HTMLElement;
+    const actions = row.querySelector('.var-row-actions') as HTMLElement;
+    return {
+      tableWidth: round(table.getBoundingClientRect().width),
+      keyCellWidth: round(keyCell.getBoundingClientRect().width),
+      keyCellRight: round(keyCell.getBoundingClientRect().right),
+      valueCellRight: round(valueCell.getBoundingClientRect().right),
+      actionsRight: round(actions.getBoundingClientRect().right),
+    };
+  }, root);
+}
+
+/** 打开集合面板的变量页签（行数由 `openApp({ stress })` 决定）。 */
+async function openCollectionVariables(page: Page): Promise<void> {
+  await page.getByTestId('workspace-tree').getByText('变量集合', { exact: true }).click();
+  await page.getByTestId('entity-script-panel').locator('.variable-table').waitFor();
+}
+
+/** 打开环境编辑器（行数由 `openApp({ stress })` 决定）。 */
+async function openEnvironmentEditor(page: Page): Promise<void> {
+  await page.getByRole('tab', { name: 'Environments' }).click();
+  await page.getByTestId('environment-editor').waitFor();
+  await page.locator('.var-editor .variable-table').waitFor();
+  await page.locator(`${ENVIRONMENT_HOST} [data-testid="environment-proxy"]`).waitFor();
+}
+
+describe('变量表格的区域滚动（真实引擎）', () => {
+  it('集合变量页行多时在容器内滚动、表头吸顶，面板自身不出现整页滚动', async () => {
+    const page = await openApp({
+      stress: { collection: true },
+      viewport: OVERFLOWING_VIEWPORT,
+    });
+    page.setDefaultTimeout(10_000);
+    try {
+      await openCollectionVariables(page);
+
+      const geometry = await scrollTableToEnd(page, COLLECTION_HOST, COLLECTION_HOST);
+      expect(geometry.overflow, '表格没有撑到需要滚动，本用例无法验证').toBeGreaterThan(40);
+      expect(geometry.scrollTop, '滚动没有发生在表格容器里').toBeGreaterThan(40);
+      expect(
+        Math.abs(geometry.headerTop - geometry.containerTop),
+        `表头没有钉在容器顶部：${JSON.stringify(geometry)}`,
+      ).toBeLessThanOrEqual(2);
+      expect(geometry.headerPosition).toBe('sticky');
+      expect(geometry.headerBackground, '表头表面是透明的，滚过的行会从它下面透出来').not.toBe(
+        'rgba(0, 0, 0, 0)',
+      );
+      expect(geometry.bodyScrollTop, '滚动扩张到了面板正文区').toBe(0);
+      // 正文区的 overflow 是给 Body 的 Monaco 补全浮层准备的，本变更不许碰它
+      expect(geometry.bodyOverflowY, '正文区的 overflow 被改动了').toBe('clip');
+      expect(geometry.gutter, '占位型滚动条吃掉了行宽').toBe(0);
+      expect(geometry.horizontalOverflow, '变量表出现了横向滚动').toBeLessThanOrEqual(0);
+      // 变量表这一处不绘制任何滚动指示（spec: ui-polish「全局细滚动条」的例外）
+      expect(geometry.tableOverlay, '变量表挂上了悬浮滚动条').toBe(false);
+      expect(geometry.overlay, '这块界面出现了滚动指示').toBe(false);
+
+      // 表头里的列宽中线跟着表头一起吸顶，且仍完全落在单元格内
+      const handle = await page.evaluate((selector) => {
+        const host = document.querySelector(selector) as HTMLElement;
+        const line = host.querySelector('.col-resize') as HTMLElement;
+        const header = line.closest('th') as HTMLElement;
+        const round = (value: number) => Math.round(value * 100) / 100;
+        return {
+          lineTop: round(line.getBoundingClientRect().top),
+          headerTop: round(header.getBoundingClientRect().top),
+          lineRight: round(line.getBoundingClientRect().right),
+          headerRight: round(header.getBoundingClientRect().right),
+        };
+      }, COLLECTION_HOST);
+      expect(handle.lineRight, '列宽中线伸出了单元格，会被滚动容器裁掉').toBeLessThanOrEqual(
+        handle.headerRight + 0.5,
+      );
+      expect(Math.abs(handle.lineTop - handle.headerTop)).toBeLessThanOrEqual(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('集合变量页行少时无任何滚动指示，行宽与贴右缘控件位置与溢出时一致', async () => {
+    const few = await openApp({ viewport: OVERFLOWING_VIEWPORT });
+    few.setDefaultTimeout(10_000);
+    let edgesWhenFew: Awaited<ReturnType<typeof rowEdges>>;
+    try {
+      await openCollectionVariables(few);
+      const geometry = await scrollTableToEnd(few, COLLECTION_HOST, COLLECTION_HOST);
+      expect(geometry.overflow, '行数不足一屏却已经需要滚动').toBeLessThanOrEqual(0);
+      expect(geometry.overlay, '行数不足一屏却出现了滚动指示').toBe(false);
+      expect(geometry.tableOverlay, '行数不足一屏却出现了滚动指示').toBe(false);
+      edgesWhenFew = await rowEdges(few, COLLECTION_HOST);
+    } finally {
+      await few.close();
+    }
+
+    const many = await openApp({
+      stress: { collection: true },
+      viewport: OVERFLOWING_VIEWPORT,
+    });
+    many.setDefaultTimeout(10_000);
+    try {
+      await openCollectionVariables(many);
+      const geometry = await scrollTableToEnd(many, COLLECTION_HOST, COLLECTION_HOST);
+      expect(geometry.overflow).toBeGreaterThan(40);
+      // 溢出时同样不出现任何滚动指示，也不占行宽——内容溢出前后行宽与贴右缘
+      // 控件的位置必须一模一样（spec: ui-polish「全局细滚动条」的例外场景）
+      expect(geometry.tableOverlay, '内容溢出时变量表画了悬浮细条').toBe(false);
+      expect(geometry.overlay, '内容溢出时这块界面出现了滚动指示').toBe(false);
+      expect(geometry.gutter).toBe(0);
+      expect(await rowEdges(many, COLLECTION_HOST)).toEqual(edgesWhenFew);
+    } finally {
+      await many.close();
+    }
+  });
+
+  it('环境编辑器里滚动表格时，环境名与代理配置区不随表格滚走', async () => {
+    const page = await openApp({
+      stress: { environment: true },
+      viewport: OVERFLOWING_VIEWPORT,
+    });
+    page.setDefaultTimeout(10_000);
+    try {
+      await openEnvironmentEditor(page);
+
+      const before = await page.evaluate((selector) => {
+        const host = document.querySelector(selector) as HTMLElement;
+        const round = (value: number) => Math.round(value * 100) / 100;
+        const name = host.querySelector('.entity-name') as HTMLElement;
+        const proxy = host.querySelector('[data-testid="environment-proxy"]') as HTMLElement;
+        const container = host.querySelector('.table-scroll') as HTMLElement;
+        const editor = host.querySelector('.var-editor') as HTMLElement;
+        return {
+          nameTop: round(name.getBoundingClientRect().top),
+          proxyBottom: round(proxy.getBoundingClientRect().bottom),
+          editorScrollTop: round(editor.scrollTop),
+          overflow: container.scrollHeight - container.clientHeight,
+        };
+      }, ENVIRONMENT_HOST);
+      expect(before.overflow, '表格没有撑到需要滚动，本用例无法验证').toBeGreaterThan(40);
+
+      await page.locator(`${ENVIRONMENT_HOST} .table-scroll`).first().evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+      });
+
+      const after = await page.evaluate((selector) => {
+        const host = document.querySelector(selector) as HTMLElement;
+        const round = (value: number) => Math.round(value * 100) / 100;
+        const name = host.querySelector('.entity-name') as HTMLElement;
+        const proxy = host.querySelector('[data-testid="environment-proxy"]') as HTMLElement;
+        const container = host.querySelector('.table-scroll') as HTMLElement;
+        const editor = host.querySelector('.var-editor') as HTMLElement;
+        const last = host.querySelector('.variable-table tbody tr:last-child') as HTMLElement;
+        return {
+          nameTop: round(name.getBoundingClientRect().top),
+          proxyBottom: round(proxy.getBoundingClientRect().bottom),
+          scrollTop: round(container.scrollTop),
+          editorScrollTop: round(editor.scrollTop),
+          lastRowBottom: round(last.getBoundingClientRect().bottom),
+          containerBottom: round(container.getBoundingClientRect().bottom),
+        };
+      }, ENVIRONMENT_HOST);
+
+      expect(after.scrollTop, '滚动没有发生在表格容器里').toBeGreaterThan(40);
+      expect(after.editorScrollTop, '滚动表格把正文区也带着滚了').toBe(before.editorScrollTop);
+      expect(after.nameTop, '环境名随表格滚走了').toBe(before.nameTop);
+      expect(after.proxyBottom, '代理配置区随表格滚走了').toBe(before.proxyBottom);
+      expect(
+        after.lastRowBottom,
+        '滚到底部时表格的最后一行仍不可见，等于滚不动',
+      ).toBeLessThanOrEqual(after.containerBottom + 1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('环境编辑器里变量表溢出时也不出现任何滚动指示', async () => {
+    const page = await openApp({
+      stress: { environment: true },
+      viewport: OVERFLOWING_VIEWPORT,
+    });
+    page.setDefaultTimeout(10_000);
+    try {
+      await openEnvironmentEditor(page);
+      const geometry = await scrollTableToEnd(page, ENVIRONMENT_HOST, ENVIRONMENT_BODY);
+
+      expect(geometry.overflow, '表格没有撑到需要滚动，本用例无法验证').toBeGreaterThan(40);
+      expect(geometry.gutter, '占位型滚动条吃掉了内容宽度').toBe(0);
+      expect(geometry.tableOverlay, '变量表右缘出现了悬浮细条').toBe(false);
+
+      // 悬停在表格上也不该冒出任何指示条：这里既没有悬浮细条，也没有原生占位条
+      await page.locator(`${ENVIRONMENT_HOST} .table-scroll`).first().hover();
+      await page.waitForTimeout(200);
+      const hovered = await page.evaluate((selector) => {
+        const host = document.querySelector(selector) as HTMLElement;
+        const editor = host.querySelector('.var-editor') as HTMLElement;
+        return {
+          overlays: host.querySelectorAll('[data-testid="overlay-scrollbar"]').length,
+          editorGutter: editor.offsetWidth - editor.clientWidth,
+          editorOverflow: editor.scrollHeight - editor.clientHeight,
+        };
+      }, ENVIRONMENT_HOST);
+      expect(hovered.overlays, '悬停表格时冒出了滚动指示').toBe(0);
+      expect(hovered.editorGutter, '正文区的原生滚动条占住了宽度').toBe(0);
+      // 窗口够高时正文区不溢出——这也说明上面那条「一条指示都没有」不是靠溢出与否碰巧成立的
+      expect(
+        hovered.editorOverflow,
+        '窗口够高时正文区不该溢出（那正是兜底条出现的条件）',
+      ).toBeLessThanOrEqual(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('窗口压得很矮时正文区兜底滚动，代理配置区与表格最后一行都可达', async () => {
+    const page = await openApp({
+      stress: { environment: true },
+      viewport: OVERFLOWING_VIEWPORT,
+    });
+    page.setDefaultTimeout(10_000);
+    try {
+      await openEnvironmentEditor(page);
+      await page.setViewportSize({ width: 1100, height: 260 });
+
+      const short = await page.evaluate((selector) => {
+        const host = document.querySelector(selector) as HTMLElement;
+        const round = (value: number) => Math.round(value * 100) / 100;
+        const editor = host.querySelector('.var-editor') as HTMLElement;
+        const table = host.querySelector('.table-scroll') as HTMLElement;
+        const proxy = host.querySelector('[data-testid="environment-proxy"]') as HTMLElement;
+        const last = host.querySelector('.variable-table tbody tr:last-child') as HTMLElement;
+
+        const overflow = editor.scrollHeight - editor.clientHeight;
+        editor.scrollTop = 0;
+        const proxyReachable =
+          proxy.getBoundingClientRect().top >= editor.getBoundingClientRect().top - 1;
+        // 兜底滚到底：表格区域的底边应当进入视野（表格容器自己还要能继续滚）
+        editor.scrollTop = editor.scrollHeight;
+        const scrolledByFallback = editor.scrollTop > 0;
+        const tableReachable =
+          table.getBoundingClientRect().bottom <= editor.getBoundingClientRect().bottom + 1;
+        // 表格容器本身照常滚得动：滚到容器底部时最后一行可见
+        table.scrollTop = table.scrollHeight;
+        const lastRowVisible =
+          last.getBoundingClientRect().bottom <= table.getBoundingClientRect().bottom + 1;
+
+        return {
+          tableHeight: round(table.getBoundingClientRect().height),
+          overflow,
+          editorGutter: editor.offsetWidth - editor.clientWidth,
+          tableOverlay:
+            host.querySelector('.table-scroll-wrap [data-testid="overlay-scrollbar"]') !== null,
+          proxyReachable,
+          scrolledByFallback,
+          tableReachable,
+          lastRowVisible,
+        };
+      }, ENVIRONMENT_HOST);
+
+      // 表格容器保住了最小高度，没有被压成几像素
+      expect(short.tableHeight, `表格被压到 ${short.tableHeight}px`).toBeGreaterThanOrEqual(238);
+      expect(short.overflow, '窗口压得很矮时正文区没有兜底溢出').toBeGreaterThan(0);
+      expect(short.editorGutter, '兜底滚动条占住了宽度').toBe(0);
+      expect(short.tableOverlay, '变量表在矮窗口下画了滚动指示').toBe(false);
+      expect(short.proxyReachable, '代理配置区被挤出了视野').toBe(true);
+      expect(short.scrolledByFallback, '正文区不可滚，下面的内容够不着').toBe(true);
+      expect(short.tableReachable, '兜底滚到底也够不着表格区域').toBe(true);
+      expect(short.lastRowVisible, '表格容器在矮窗口下滚不动了').toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('两种宿主里的表现一致：都在容器内滚动、表头都吸顶、都不绘制滚动指示', async () => {
+    const page = await openApp({
+      stress: { collection: true, environment: true },
+      viewport: OVERFLOWING_VIEWPORT,
+    });
+    page.setDefaultTimeout(10_000);
+    try {
+      await openCollectionVariables(page);
+      const inCollection = await scrollTableToEnd(page, COLLECTION_HOST, COLLECTION_HOST);
+
+      await openEnvironmentEditor(page);
+      const inEnvironment = await scrollTableToEnd(page, ENVIRONMENT_HOST, ENVIRONMENT_BODY);
+
+      const hosts: [string, TableScrollGeometry][] = [
+        ['集合实体面板', inCollection],
+        ['环境编辑器', inEnvironment],
+      ];
+      for (const [label, geometry] of hosts) {
+        expect(geometry.overflow, `${label}：表格没有撑到需要滚动`).toBeGreaterThan(40);
+        expect(geometry.scrollTop, `${label}：滚动没有发生在容器里`).toBeGreaterThan(40);
+        expect(
+          Math.abs(geometry.headerTop - geometry.containerTop),
+          `${label}：表头没有吸顶`,
+        ).toBeLessThanOrEqual(2);
+        expect(geometry.headerPosition, `${label}：表头不是 sticky`).toBe('sticky');
+        expect(geometry.gutter, `${label}：占位型滚动条吃掉了行宽`).toBe(0);
+        expect(geometry.tableOverlay, `${label}：变量表右缘出现了滚动指示`).toBe(false);
+        expect(geometry.overlay, `${label}：这块界面出现了滚动指示`).toBe(false);
+        expect(geometry.bodyScrollTop, `${label}：滚动扩张到了整个编辑面`).toBe(0);
+      }
+    } finally {
+      await page.close();
+    }
   });
 });

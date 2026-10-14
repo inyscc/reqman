@@ -283,20 +283,16 @@ function calibrateLineOffset(context: SandboxContext, executionId: string): Prom
   });
 }
 
-/** 三级脚本的层级标签，与 phases 的顺序（集合 → 文件夹 → 请求）一一对应。 */
-const SCRIPT_LEVEL_LABELS = ['集合', '文件夹', '请求'] as const;
-
-function labelScript(listen: ScriptListen, index: number): string {
+function labelScript(listen: ScriptListen, label: string): string {
   const phase = listen === 'prerequest' ? '前置' : '后置';
-  const level = SCRIPT_LEVEL_LABELS[index] ?? `第 ${index + 1} 段`;
 
-  return `${phase}脚本 · ${level}层`;
+  return `${phase}脚本 · ${label}`;
 }
 
 /** 把带行号标记的原始错误整理成可读、可定位的报告。 */
 function formatScriptError(
   listen: ScriptListen,
-  index: number,
+  label: string,
   rawMessage: string | null,
   lineOffset: number | null,
 ): string {
@@ -312,7 +308,7 @@ function formatScriptError(
     }
   }
 
-  return `${labelScript(listen, index)}${line ? `（${line}）` : ''}：${message.trim()}`;
+  return `${labelScript(listen, label)}${line ? `（${line}）` : ''}：${message.trim()}`;
 }
 
 function disposeContext(context: SandboxContext): Promise<void> {
@@ -1207,18 +1203,32 @@ async function raceWithCancellation<T>(
 }
 
 /**
+ * 一段待执行的脚本。
+ *
+ * `label` 是**调用方给出的层级描述**（集合层 / 目录第 N 层「目录名」/ 请求层），只用于在错误报告
+ * 里指认"哪一层炸了"。运行时不再内置「集合 → 文件夹 → 请求」的固定三段表：目录层是一条递归
+ * 祖先链，层数由数据决定，按位置推标签必然对错号（design D2）。
+ */
+export type ScriptSegment = {
+  /** 层级描述，出现在错误报告里；运行时原样使用，不加工。 */
+  label: string;
+  /** 该层的脚本；空白表示这一层没有配置脚本。 */
+  code: string | null;
+};
+
+/**
  * 执行一个脚本阶段的全部脚本。
  *
- * `scripts` 必须已按「集合 → 文件夹 → 请求」排好序：本函数按数组顺序执行，且让前一段
- * 的写入对后一段可见，因此同名变量最终取请求层的值（spec: 脚本执行时机与顺序）。
+ * `scripts` 必须已按「集合 → 目录链（由外到内）→ 请求」排好序：本函数按数组顺序执行，且让前
+ * 一段的写入对后一段可见，因此同名变量最终取请求层的值（spec: 脚本执行时机与顺序）。
  *
- * 三个层级都没有脚本时不创建上下文，也不报错——空跑一次建沙箱的开销没有意义。
+ * 所有层级都没有脚本时不创建上下文，也不报错——空跑一次建沙箱的开销没有意义。
  */
 export async function runScriptPhase(
   commands: Commands,
   target: ScriptRuntimeTarget,
   listen: ScriptListen,
-  scripts: (string | null | undefined)[],
+  scripts: ScriptSegment[],
   /** 本次响应；后置脚本据此得到 `pm.response`。 */
   response: ResponsePayload | null = null,
   /** 解析后的请求 URL；提供时 `pm.cookies` 才有当前请求的集合可读。 */
@@ -1230,7 +1240,7 @@ export async function runScriptPhase(
   /**
    * 本次请求的形态，喂给 `pm.request`（spec: pm.request 的填充）。
    *
-   * 一个阶段里的三段脚本拿到**同一份快照**：脚本对它的改动既不跨段可见，也不影响实际
+   * 一个阶段里的各段脚本拿到**同一份快照**：脚本对它的改动既不跨段可见，也不影响实际
    * 发出的请求（design D6，与 Postman 的已知差异）。
    */
   request: SandboxRequest | null = null,
@@ -1238,13 +1248,10 @@ export async function runScriptPhase(
   const entries: ConsoleEntry[] = [];
   const assertions: TestAssertion[] = [];
   const secretValues: string[] = [];
-  // 保留原始索引：层级标签按 phases 的位置（集合 → 文件夹 → 请求）对号，
-  // 过滤后用错索引会把「请求层」标成「文件夹层」
-  const codes = scripts
-    .map((code, index) => ({ code, index }))
-    .filter((item): item is { code: string; index: number } =>
-      Boolean(item.code && item.code.trim()),
-    );
+  // 标签随脚本一起过滤：它已经挂在段上，不再靠位置推（design D2）
+  const codes = scripts.filter((segment): segment is ScriptSegment & { code: string } =>
+    Boolean(segment.code && segment.code.trim()),
+  );
 
   if (codes.length === 0) {
     return { console: entries, assertions, error: null, written: [], visualizer: null };
@@ -1338,7 +1345,7 @@ export async function runScriptPhase(
       }
     }
 
-    for (const { code, index } of codes) {
+    for (const [index, { label, code }] of codes.entries()) {
       const executionId = `exec-${index}-${Math.random().toString(36).slice(2, 10)}`;
       const outcome = await raceWithCancellation(
         executeOne(
@@ -1382,7 +1389,7 @@ export async function runScriptPhase(
       if (outcome.visualizer) visualizer = outcome.visualizer;
 
       if (outcome.error) {
-        error = formatScriptError(listen, index, outcome.error, lineOffset);
+        error = formatScriptError(listen, label, outcome.error, lineOffset);
         break;
       }
     }

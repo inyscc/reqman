@@ -11,8 +11,37 @@
 // `__uvm_emit` 被删除只说明此刻没人能写，协议边界必须由宿主自己守。
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BRIDGE_EVENTS, runScriptPhase } from '../src/lib/scriptRuntime';
+import { BRIDGE_EVENTS, runScriptPhase as runScriptPhaseRaw } from '../src/lib/scriptRuntime';
 import type { Commands } from '../src/lib/commands';
+
+type RawPhaseArgs = Parameters<typeof runScriptPhaseRaw>;
+
+/**
+ * 层级标签由调用方给出（生产代码里取自真实的目录链）。桥的协议边界与层级无关，
+ * 因此统一用一个笼统的标签。
+ */
+const runScriptPhase = (
+  commands: RawPhaseArgs[0],
+  target: RawPhaseArgs[1],
+  listen: RawPhaseArgs[2],
+  codes: (string | null | undefined)[],
+  response?: RawPhaseArgs[4],
+  requestUrl?: RawPhaseArgs[5],
+  timeoutMs?: RawPhaseArgs[6],
+  cancellation?: RawPhaseArgs[7],
+  request?: RawPhaseArgs[8],
+) =>
+  runScriptPhaseRaw(
+    commands,
+    target,
+    listen,
+    codes.map((code, index) => ({ label: `第 ${index + 1} 段`, code: code ?? null })),
+    response,
+    requestUrl,
+    timeoutMs,
+    cancellation,
+    request,
+  );
 
 type Handler = (...args: unknown[]) => void;
 
