@@ -15,6 +15,9 @@ dist-ssr
 # CodeGraph index (local-first code knowledge graph)
 .codegraph
 
+# Agent workspace data (local memory and session state)
+.workbuddy
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
