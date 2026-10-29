@@ -68,10 +68,12 @@ import {
 import type {
   ConsoleEntry,
   PhaseCancellation,
+  SandboxRequest,
   ScriptSegment,
   TestAssertion,
   VisualizerResult,
 } from './lib/scriptRuntime';
+import { applyScriptHeaders, diffRequestHeaders, withSentHeaders } from './lib/scriptHeaders';
 
 /**
  * 取消的稳定错误码（与 Rust 侧 `ErrorCode::Cancelled` 一致）。
@@ -1632,9 +1634,11 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     // 未解析变量的拦截**不在这里**——它在后端的建连之前完成（spec: 未解析变量提示）。
     // 拦在这一步会让「前置脚本写入变量 + 请求体引用它」这条 Postman 里的常规用法永远
     // 发不出去：脚本是唯一会创建该变量的东西，却因为该变量不存在而跑不到。
+    // 待发的那一份草稿只算一次：前置脚本改过请求头时要在这上面合并（design D3）
+    const inlineDraft = cleanForSend(draft);
     const sendInput = {
       saved_id: dirty ? null : draft.id,
-      inline: cleanForSend(draft),
+      inline: inlineDraft,
       environment_id: environmentId,
     };
     let resolved: RequestPreview;
@@ -1657,9 +1661,16 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       : null;
     let phases: { pre: ScriptSegment[]; test: ScriptSegment[] } | null = null;
     let requestUrl: string | null = null;
-    // 喂给沙箱的请求形态：一个阶段里的各段脚本共用同一份快照（design D6）。
-    // 它带上的是解析后的取值，脚本因此读得出本次请求的目标与内容。
+    // 喂给沙箱的请求形态：一个阶段里的各段脚本共用这份快照，**请求头例外**——每段
+    // 执行完的改动都会接力给下一段（design D2）。
     const sandboxRequest = toSandboxRequest(resolved);
+    // 前置脚本结束时的请求形态：后置阶段据此看到脚本改过的头；没有前置脚本时就是快照
+    let scriptedRequest: SandboxRequest = sandboxRequest;
+    // 待发请求与「请求头是否被脚本改过」。未改动时完全走原路径（design D3）
+    let outgoing: { request: SavedRequest; changed: boolean } = {
+      request: inlineDraft,
+      changed: false,
+    };
     let scriptError: string | null = null;
     let scriptVisualizer: VisualizerResult | null = null;
     const scriptConsole: ConsoleEntry[] = [];
@@ -1741,6 +1752,14 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         scriptConsole.push(...pre.console);
         scriptAssertions.push(...pre.assertions);
 
+        // 前置脚本对请求头的改动落到**真正发出去的那一份**上（spec: pm.request 的填充）。
+        // 按差异合并：脚本没碰的头仍保持 `{{var}}` 原样，交给后端解析（design D3）。
+        scriptedRequest = pre.request ?? sandboxRequest;
+        outgoing = applyScriptHeaders(
+          inlineDraft,
+          diffRequestHeaders(sandboxRequest.header, scriptedRequest.header),
+        );
+
         // 取消发生在脚本段：不再往后走，已经产生的输出照常写回
         if (attempt.isCancelled()) {
           writeScriptReport();
@@ -1750,8 +1769,10 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       }
 
       const payload = await client.sendRequest({
-        saved_id: dirty ? null : draft.id,
-        inline: cleanForSend(draft),
+        // 请求头被脚本改过时必须走内联路径：后端 `saved_id` 优先于 `inline`，带着
+        // `saved_id` 发过去，合并结果会被整份忽略——这正是「改了没用」的老毛病（design D3）
+        saved_id: outgoing.changed ? null : sendInput.saved_id,
+        inline: outgoing.request,
         environment_id: environmentId,
         // 会话标识：主请求与脚本内的请求归同一组，取消时一并撤销
         attempt_id: attempt.attemptId,
@@ -1771,7 +1792,9 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           payload.request_url || requestUrl,
           SCRIPT_TIMEOUT_MS,
           attempt,
-          sandboxRequest,
+          // 后置脚本读到的请求头以**实际发出的那一份**为准：认证落成的头与正文类型
+          // 只有后端知道（spec: pm.request 的填充 / design D4）
+          withSentHeaders(scriptedRequest, payload.request_headers),
         );
 
         scriptError = scriptError ?? post.error;

@@ -896,6 +896,78 @@ describe('前端数据流骨架', () => {
     expect(sendRequest).not.toHaveBeenCalled();
   });
 
+  it('前置脚本改写的请求头随请求发出，后置脚本读到的是实际发出的头（spec: pm.request 的填充）', async () => {
+    const { client, sendRequest } = harness({
+      request: makeRequest({
+        headers: [{ key: 'X-Trace', value: 'abc', enabled: true, description: null }],
+        pre_request_script: "pm.request.headers.upsert({ key: 'X-Sign', value: 'v1' });",
+        test_script: [
+          "pm.test('签名头带上了', function () { pm.expect(pm.request.headers.get('X-Sign')).to.eql('v1'); });",
+          // 认证落成的头只有后端知道，靠载荷里的 request_headers 交给后置脚本
+          "pm.test('认证头读得到', function () { pm.expect(pm.request.headers.get('Authorization')).to.eql('Bearer t'); });",
+        ].join('\n'),
+      }),
+      // 预览解析出的头：脚本据此读出本次请求，并在此基础上改写
+      previewResult: preview({ headers: [['X-Trace', 'abc']] }),
+      sendResult: response({
+        request_headers: [
+          ['X-Trace', 'abc'],
+          ['X-Sign', 'v1'],
+          ['Authorization', 'Bearer t'],
+          ['Content-Type', 'application/json'],
+        ],
+      }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1), { timeout: 20_000 });
+
+    const input = sendRequest.mock.calls[0][0] as {
+      saved_id: string | null;
+      inline: SavedRequest;
+    };
+    // 后端 `saved_id` 优先于 `inline`：请求头被改过时必须走内联路径，否则合并结果会被
+    // 整份忽略——这正是「改了没用」的老毛病
+    expect(input.saved_id).toBeNull();
+    expect(input.inline.headers).toEqual([
+      { key: 'X-Trace', value: 'abc', enabled: true, description: null },
+      { key: 'X-Sign', value: 'v1', enabled: true, description: null },
+    ]);
+
+    // 后置脚本的两条断言都通过：脚本自己加的头与后端回带的认证头都读得到
+    fireEvent.click(await screen.findByText('脚本'));
+    await screen.findByTestId('script-report');
+    expect(screen.getAllByTestId('assertion-pass')).toHaveLength(2);
+  }, 60_000);
+
+  it('脚本没碰请求头时发送路径不变：仍按 saved_id 发送（不回归）', async () => {
+    const { client, sendRequest } = harness({
+      request: makeRequest({
+        headers: [{ key: 'X-Trace', value: 'abc', enabled: true, description: null }],
+        // 脚本跑了，但一个字都没改到请求头（写变量会走落库，与本用例无关）
+        pre_request_script: "console.log('只读脚本');",
+      }),
+      previewResult: preview({ headers: [['X-Trace', 'abc']] }),
+      variables: [],
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1), { timeout: 20_000 });
+
+    const input = sendRequest.mock.calls[0][0] as {
+      saved_id: string | null;
+      inline: SavedRequest;
+    };
+    expect(input.saved_id).toBe('r1');
+    expect(input.inline.headers).toEqual([
+      { key: 'X-Trace', value: 'abc', enabled: true, description: null },
+    ]);
+  }, 60_000);
+
   it('面包屑并入会话标签行，身份在这一行而请求级操作不在（rework-visual-system-and-app-chrome）', async () => {
     const { client } = harness();
     render(<App client={client} />);

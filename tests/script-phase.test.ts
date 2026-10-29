@@ -223,6 +223,8 @@ describe('脚本执行编排', () => {
       error: null,
       written: [],
       visualizer: null,
+      // 没有脚本就没有可合并的改动：请求形态原样交回
+      request: null,
     });
     // 连变量都没读，说明沙箱上下文也没建——空跑一次建上下文没有意义
     expect(calls).toEqual([]);
@@ -1040,7 +1042,7 @@ describe('pm.request 的填充', () => {
     expect(printed).toContain('auth= bearer');
   }, 30_000);
 
-  it('pm.request 是快照：宿主不接收对它的改动（2.5）', async () => {
+  it('前置脚本改写的请求头被回传，并接力给下一段（D1 / D2）', async () => {
     const { commands } = fakeCommands();
 
     const result = await runScriptPhase(
@@ -1049,7 +1051,11 @@ describe('pm.request 的填充', () => {
       'prerequest',
       [
         `pm.request.headers.add({ key: 'X-Injected', value: '1' });
+         pm.request.headers.upsert({ key: 'X-Trace', value: 'zzz' });
          pm.request.url = 'https://evil.test/';`,
+        `console.log('injected=', pm.request.headers.get('X-Injected'));
+         console.log('trace=', pm.request.headers.get('X-Trace'));
+         console.log('url=', pm.request.url.toString());`,
       ],
       null,
       null,
@@ -1059,15 +1065,40 @@ describe('pm.request 的填充', () => {
     );
 
     expect(result.error).toBeNull();
-    // 结果里没有任何「回传的请求」——宿主只回读三个持久化作用域与可视化模板，
-    // 因此脚本对 pm.request 的改动既不出沙箱，也影响不到实际发出的请求（design D6）
-    expect(Object.keys(result).sort()).toEqual([
-      'assertions',
-      'console',
-      'error',
-      'visualizer',
-      'written',
+
+    // 头被回传：宿主据此把它们合并进待发请求
+    expect(result.request?.header).toEqual([
+      { key: 'X-Trace', value: 'zzz' },
+      { key: 'X-Injected', value: '1' },
     ]);
+
+    // 改动跨段可见：第二段读到的是第一段改过的值
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    expect(printed).toContain('injected= 1');
+    expect(printed).toContain('trace= zzz');
+
+    // 其余字段仍是快照：URL 的改写不传播，下一段读到的还是原目标
+    expect(result.request?.url).toBe('https://api.test/users?page=2');
+    expect(printed).toContain('url= https://api.test/users?page=2');
+  }, 30_000);
+
+  it('后置阶段不回传请求头的改动（请求早已发出）', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'test',
+      [`pm.request.headers.add({ key: 'X-Late', value: '1' });`],
+      null,
+      null,
+      undefined,
+      null,
+      sandboxRequest,
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.request?.header).toEqual([{ key: 'X-Trace', value: 'abc' }]);
   }, 30_000);
 });
 

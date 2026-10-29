@@ -17,10 +17,10 @@
  * 形态声明（见 `scriptRuntime.ts` 的 `toSandboxRequest` / `toSandboxResponse`）。把它们
  * 收成 `unknown` 会让这些成员之后的补全整体消失——`unknown` 上不允许访问任何属性。
  *
- * 两处刻意的"少声明"：
- * - `pm.request` 的写方法（`headers.add` / `url = ...`）**不声明**：宿主实现的是一份
- *   快照，脚本对它的改动既不跨段可见、也不影响实际发出的请求（design D6）。声明了
- *   会让人以为改得动。
+ * 一处刻意的"少声明"：
+ * - `pm.request` 里**除请求头之外**的写面（`url = ...`、`method = ...`、`body`）**不声明**：
+ *   那些字段仍是快照，脚本对它们的改动既不跨段可见、也不影响实际发出的请求（design D1）。
+ *   声明了会让人以为改得动。请求头的写方法则是真能力，照实声明。
  * - `pm.require` 的返回仍是 `unknown`：内置库有九个，逐个声明不划算。
  *
  * **同步**：升级 `postman-sandbox`（版本见 package.json，当前 6.7.4）时须按新的
@@ -64,11 +64,26 @@ declare namespace pm {
     runRequest(requestId: string, options?: unknown): Promise<unknown>;
   }
 
-  /** 请求头或响应头的集合（postman-collection 的 HeaderList）。 */
+  /**
+   * 请求头或响应头的集合（postman-collection 的 HeaderList）。
+   *
+   * 写方法只在**前置脚本**里真的能改变发出的请求（spec: pm.request 的填充）：脚本改的
+   * 是请求头，改动会随请求发出。后置脚本里它们仍可调用（上游对象就是可写的），但那时
+   * 请求早已发出，改不出任何效果——与 Postman 一致。
+   */
   interface HeaderList {
     /** 取某个头的值；不存在时为 undefined。 */
     get(name: string): string | undefined;
+    has(name: string): boolean;
     all(): Array<{ key: string; value: string }>;
+    /** 逐条头（含 \`disabled\` 标记）；直接改成员同样生效。 */
+    members: Array<{ key: string; value: string; disabled?: boolean }>;
+    /** 新增一条头；同名头会**追加**而不是替换。 */
+    add(header: { key: string; value: string }): void;
+    /** 按名新增或改写；同名头只留一条。 */
+    upsert(header: { key: string; value: string }): void;
+    /** 按名移除；可以给名字，也可以给一条头。 */
+    remove(name: string | { key: string }): void;
   }
 
   /** 响应里的一条 Cookie（postman-collection 的 Cookie）。 */
@@ -107,10 +122,11 @@ declare namespace pm {
   }
 
   /**
-   * 脚本执行时刻的请求快照（spec: pm-script-runtime「pm.request 的填充」）。
+   * 脚本执行时刻的请求（spec: pm-script-runtime「pm.request 的填充」）。
    *
-   * **只读**：对它的改动既不跨脚本段可见，也不影响实际发出的请求（design D6），
-   * 因此这里只声明读取面。
+   * **请求头可改写**：对 \`headers\` 的改动会落到实际发出的请求上，并在同一阶段的后续
+   * 脚本与后置脚本中可见（design D1/D2）。**其余字段仍是快照**：改写 \`url\` / \`method\` /
+   * \`body\` 不影响实际发出的请求，也不跨段可见，所以这里只给它们的读取面。
    */
   interface Request {
     url: RequestUrl;

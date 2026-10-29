@@ -328,6 +328,14 @@ export interface ResponsePayload {
    * 确定当前请求——前置脚本改写过目标变量时，两者并不是一回事。
    */
   request_url: string;
+  /**
+   * 本次请求**实际带上**的请求头（名、值）：配置的头、认证落成的头、正文的
+   * `Content-Type`，以及随请求携带的 `Cookie`。
+   *
+   * 后置脚本的 `pm.request` 以它为准（spec: pm-script-runtime「pm.request 的填充」）。
+   * 可选：响应桩不必都补上它，真实后端总会给。
+   */
+  request_headers?: [string, string][];
   via_proxy: boolean;
   http_version: string;
   /**

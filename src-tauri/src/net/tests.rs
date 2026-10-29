@@ -1668,6 +1668,74 @@ async fn request_url_reports_the_target_that_was_actually_sent() {
 }
 
 #[tokio::test]
+async fn request_headers_report_what_was_actually_sent() {
+    let server = TestServer::start(Reply::ok("{}"));
+    let harness = Harness::new("net-request-headers");
+    let target = format!("{}/path", server.base_url());
+
+    let mut request = harness.request("R", "POST", &target);
+    request.headers = vec![KeyValue::new("X-Trace", "abc")];
+    request.body = RequestBody::raw("{\"a\":1}", RawLanguage::Json);
+    request.auth = AuthConfig::bearer("tok-123");
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("发送");
+
+    // 后置脚本的 `pm.request` 以这份为准：配置的头、认证落成的头与正文类型都在里面
+    let find = |name: &str| {
+        payload
+            .request_headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    };
+    assert_eq!(find("X-Trace"), Some("abc"));
+    assert_eq!(find("Authorization"), Some("Bearer tok-123"));
+    assert_eq!(find("Content-Type"), Some("application/json"));
+    // 响应带来的头不属于「发出的请求头」
+    assert!(find("Set-Cookie").is_none());
+}
+
+#[tokio::test]
+async fn request_headers_carry_the_cookies_that_were_sent_but_not_the_new_ones() {
+    let harness = Harness::new("net-request-headers-cookie");
+    let server = TestServer::start(Reply::WithHeaders {
+        status: 200,
+        headers: vec![(
+            "Set-Cookie".into(),
+            "sid=abc123; Path=/; Max-Age=3600".into(),
+        )],
+        body: b"ok".to_vec(),
+    });
+    let request = harness.request("R", "GET", &server.url("/first"));
+    let saved = harness.save(&request);
+    let input = SendRequestInput::saved(&saved.id);
+
+    // 首次：还没有 Cookie 可带
+    let first = harness.send(&input).await.expect("首次发送");
+    assert!(
+        !first
+            .request_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("Cookie")),
+        "首次请求不应报告 Cookie 头"
+    );
+
+    // 再次：上一次响应写入的 Cookie 会随请求带上，快照必须是发送前的那一份
+    let second = harness.send(&input).await.expect("再次发送");
+    let cookies: Vec<&(String, String)> = second
+        .request_headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("Cookie"))
+        .collect();
+    assert_eq!(cookies.len(), 1, "Cookie 头只应出现一次");
+    assert_eq!(cookies[0].1, "sid=abc123");
+}
+
+#[tokio::test]
 async fn request_without_any_entry_point_is_rejected() {
     let harness = Harness::new("net-no-entry");
     let input = SendRequestInput {

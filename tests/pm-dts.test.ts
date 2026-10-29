@@ -39,11 +39,25 @@ describe('pm 补全声明与实现不漂移', () => {
     }
   });
 
-  it('快照语义：不声明 pm.request 的写方法', () => {
-    // 声明了就会让人以为改得动，而宿主喂进去的是一份快照（design D6）：
-    // 脚本对它的改动既不跨段可见，也不影响实际发出的请求
-    expect(PM_DTS).not.toContain('add(');
-    expect(PM_DTS).not.toContain('remove(');
-    expect(PM_DTS).not.toContain('upsert(');
+  it('请求头可改写：声明了写方法', () => {
+    // 请求头的改动会落到实际发出的请求上（spec: pm.request 的填充），因此这里必须
+    // 声明得出来——声明面与运行时不漂移
+    for (const member of ['add(header', 'upsert(header', 'remove(name', 'members:']) {
+      expect(PM_DTS, `补全声明缺少 ${member}`).toContain(member);
+    }
+  });
+
+  it('其余字段仍是快照：只声明读取面', () => {
+    // 只取 `interface Request` 这一段：别处的 `url: string`（sendRequest 的载荷）不相关
+    const requestBlock = PM_DTS.slice(
+      PM_DTS.indexOf('interface Request {'),
+      PM_DTS.indexOf('interface Response {'),
+    );
+
+    // URL 以 `RequestUrl` 声明（可 toString()），不是可赋值的裸字符串
+    expect(requestBlock).toContain('url: RequestUrl');
+    expect(requestBlock).toContain('method: string');
+    // 不声明改写面的方法（例如 setUrl / setMethod）
+    expect(requestBlock).not.toMatch(/set(Url|Method|Body)\s*\(/);
   });
 });

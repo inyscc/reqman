@@ -140,6 +140,13 @@ export interface ScriptPhaseResult {
   written: string[];
   /** `pm.visualizer.set` 的结果（原始模板与数据，渲染由宿主做，任务 4.6）。 */
   visualizer: VisualizerResult | null;
+  /**
+   * 该阶段结束时 `pm.request` 的形态（请求头已并入脚本的改动）。
+   *
+   * 调用方据此把前置脚本对请求头的改动合并进待发请求（design D3）；未喂入请求时为
+   * `null`，此时脚本看到的是一份空请求，也就没有可合并的东西。
+   */
+  request: SandboxRequest | null;
 }
 
 export interface VisualizerResult {
@@ -511,11 +518,23 @@ function toInlineRequest(raw: unknown): SavedRequest {
   };
 }
 
+/**
+ * 一条请求头。
+ *
+ * `disabled` 只出现在**回读**的形态里：脚本可以把自己加的头置为禁用，那等价于「这次不发
+ * 它」，因此它不会进入实际发出的请求（见 `scriptHeaders.ts` 的合并规则）。
+ */
+export interface SandboxHeader {
+  key: string;
+  value: string;
+  disabled?: boolean;
+}
+
 /** 喂给沙箱的请求形态：postman-collection `Request` 的 JSON 形状。 */
 export interface SandboxRequest {
   url: string;
   method: string;
-  header: { key: string; value: string }[];
+  header: SandboxHeader[];
   body?: { mode: 'raw'; raw: string };
   auth?: { type: string };
 }
@@ -552,6 +571,33 @@ function fromInlineRequest(request: SavedRequest): SandboxRequest {
     header: request.headers.map((header) => ({ key: header.key, value: header.value })),
     ...(request.body.raw ? { body: { mode: 'raw' as const, raw: request.body.raw } } : {}),
   };
+}
+
+/**
+ * 从沙箱回传的 `execution.request` 里读出**执行后**的请求头。
+ *
+ * 这是「脚本改得动请求头」的唯一入口（design D2）：沙箱为每段脚本新建一个 `sdk.Request`，
+ * 改动不会落回 `context.request`，因此只能由宿主在每段结束后读回、再喂给下一段。
+ *
+ * 只认字符串键、跳过禁用项（`disabled` 等价于「这次不发」），形态不对时返回 `null`——
+ * 调用方据此保留上一份快照，而不是把请求头清空。
+ */
+function readSandboxHeaders(raw: unknown): SandboxHeader[] | null {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const header = (raw as { header?: unknown }).header;
+  if (!Array.isArray(header)) return null;
+
+  const headers: SandboxHeader[] = [];
+
+  for (const item of header) {
+    const entry = (item ?? {}) as { key?: unknown; value?: unknown; disabled?: unknown };
+    if (typeof entry.key !== 'string') continue;
+    if (entry.disabled) continue;
+    headers.push({ key: entry.key, value: String(entry.value ?? '') });
+  }
+
+  return headers;
 }
 
 /**
@@ -844,6 +890,8 @@ function executeOne(
   error: string | null;
   next: Record<ContextScope, ScopeValues>;
   visualizer: VisualizerResult | null;
+  /** 执行后回读的请求头；未喂入请求或回读失败时为 `null`。 */
+  headers: SandboxHeader[] | null;
 }> {
   return new Promise((resolve) => {
     context.on(
@@ -1001,7 +1049,10 @@ function executeOne(
       },
       (error, execution) => {
         const result = (execution ?? {}) as Partial<
-          Record<ContextScope, { values?: unknown }> & { return?: { visualizer?: unknown } }
+          Record<ContextScope, { values?: unknown }> & {
+            return?: { visualizer?: unknown };
+            request?: unknown;
+          }
         >;
 
         // pm.visualizer.set 写入 execution.return.visualizer（原始模板 + 数据，
@@ -1021,6 +1072,9 @@ function executeOne(
             rawVisualizer && typeof rawVisualizer.template === 'string'
               ? { template: rawVisualizer.template, data: rawVisualizer.data ?? null }
               : null,
+          // 只有在**这一段正常结束**时回读才有意义：被超时强杀的那一段没有
+          // `execution.request`，读回 `null` 正好让调用方保留上一份快照
+          headers: error ? null : readSandboxHeaders(result.request),
         });
       },
     );
@@ -1240,8 +1294,9 @@ export async function runScriptPhase(
   /**
    * 本次请求的形态，喂给 `pm.request`（spec: pm.request 的填充）。
    *
-   * 一个阶段里的各段脚本拿到**同一份快照**：脚本对它的改动既不跨段可见，也不影响实际
-   * 发出的请求（design D6，与 Postman 的已知差异）。
+   * 一个阶段里的各段脚本**共用同一份快照的请求头接力**：每段执行完就把 `pm.request` 的
+   * 请求头读回，作为下一段的输入，因此集合层加的头目录层与请求层都读得到；方法、URL、
+   * 正文与认证仍是快照（design D1 / D2）。
    */
   request: SandboxRequest | null = null,
 ): Promise<ScriptPhaseResult> {
@@ -1254,7 +1309,14 @@ export async function runScriptPhase(
   );
 
   if (codes.length === 0) {
-    return { console: entries, assertions, error: null, written: [], visualizer: null };
+    return {
+      console: entries,
+      assertions,
+      error: null,
+      written: [],
+      visualizer: null,
+      request,
+    };
   }
 
   // 弃用提示（任务 4.3）：上游沙箱对已弃用库不做任何提示（实测），由宿主静态
@@ -1292,6 +1354,8 @@ export async function runScriptPhase(
   let visualizer: VisualizerResult | null = null;
   // 用户取消导致的中止：这时不落库（见函数末尾的说明）
   let cancelled = false;
+  // 请求头的接力状态（design D2）：每段结束后由回读结果更新，喂给下一段
+  let currentHeaders: SandboxHeader[] | null = request ? request.header : null;
 
   try {
     // 沙箱派发 execution.console，宿主转译后重发为 'console'
@@ -1358,7 +1422,7 @@ export async function runScriptPhase(
           listen,
           code,
           scopes,
-          request,
+          request && currentHeaders ? { ...request, header: currentHeaders } : request,
           requestCookies,
           secretNames,
           timeoutMs,
@@ -1388,6 +1452,10 @@ export async function runScriptPhase(
       // 可视化模板取最后一段设置的值（后置脚本通常在最后设置）
       if (outcome.visualizer) visualizer = outcome.visualizer;
 
+      // 接力请求头**只在前置阶段**：请求发出之后脚本再改「请求」没有任何东西可影响，
+      // 若在后置阶段也接力，结果里那份 `request` 就会声称一份根本没发出去的头
+      if (listen === 'prerequest' && outcome.headers) currentHeaders = outcome.headers;
+
       if (outcome.error) {
         error = formatScriptError(listen, label, outcome.error, lineOffset);
         break;
@@ -1404,5 +1472,12 @@ export async function runScriptPhase(
   //   变量在请求层脚本写坏时仍然保留）。
   const written = cancelled ? [] : await persistWrites(commands, target, before, scopes);
 
-  return { console: entries, assertions, error, written, visualizer };
+  return {
+    console: entries,
+    assertions,
+    error,
+    written,
+    visualizer,
+    request: request && currentHeaders ? { ...request, header: currentHeaders } : request,
+  };
 }

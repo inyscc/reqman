@@ -145,6 +145,13 @@ pub struct ResponsePayload {
     /// `pm.cookies` 的当前请求——前置脚本改写过目标变量时，两者并不是一回事
     /// （spec: pm-script-runtime「pm.cookies 的当前请求目标」）。
     pub request_url: String,
+    /// 本次请求**实际带上**的请求头（名、值）：配置的头、认证落成的头、正文的
+    /// `Content-Type`，以及随请求携带的 `Cookie`。
+    ///
+    /// 后置脚本的 `pm.request` 以它为准（spec: pm-script-runtime「pm.request 的填充」）：
+    /// 前置脚本加的头、认证装配出的 `Authorization` 因此都读得到。更底层的
+    /// `Host` / `Content-Length` / `User-Agent` 由网络栈补齐，不在这里。
+    pub request_headers: Vec<(String, String)>,
     /// 本次请求是否经由代理发出。
     pub via_proxy: bool,
     /// 本次发送的**代理决定**：直连还是经代理、由哪一层定、为什么。
@@ -456,9 +463,16 @@ pub async fn send_request(
     let started = Instant::now();
     logging::global().log_request_start(&resolved.method, &url, &resolved.header_names());
 
+    // 随请求携带的 Cookie 由 jar 在发送时附加。这份快照必须在**发送之前**取：发送之后
+    // jar 已经吃进了本次响应的 `set-cookie`，那时再取会把响应带来的 Cookie 当成请求
+    // 带出去的（后置脚本读到的请求头据此与实际发出的那一份对齐）。
+    let sent_cookies = jar.matches_for_url(&url);
+
     let mut response = None;
     let mut last_failure: Option<(usize, AppError)> = None;
     let mut succeeded_index = 0usize;
+    // 实际落到请求上的头，由 `build_attempt` 逐跳产出；取成功那一跳的
+    let mut sent_headers: Vec<(String, String)> = Vec::new();
 
     for (index, hop) in outcome.plan().iter().take(attempts).enumerate() {
         if send.is_cancelled() {
@@ -466,7 +480,7 @@ pub async fn send_request(
         }
 
         let via_hop = hop.uses_proxy();
-        let builder = build_attempt(
+        let (builder, attempt_headers) = build_attempt(
             &resolved,
             hop,
             timeout,
@@ -486,6 +500,7 @@ pub async fn send_request(
         match sent {
             Ok(value) => {
                 succeeded_index = index;
+                sent_headers = attempt_headers;
                 response = Some(value);
                 break;
             }
@@ -587,6 +602,19 @@ pub async fn send_request(
         // 实际用于发送的目标（认证落在查询串上的部分已经并入），与 final_url 不同：
         // 后者可能已被重定向改写
         request_url: url.clone(),
+        // 实际带上请求头的快照：Cookie 由 jar 在发送时附加，故在此补上发送前的那一份
+        request_headers: {
+            let mut headers = sent_headers;
+            if !sent_cookies.is_empty() {
+                let joined = sent_cookies
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                headers.push(("Cookie".to_string(), joined));
+            }
+            headers
+        },
         via_proxy,
         http_version: negotiated_version,
         // 与失败路径上挂的是**同一份**决定（design D6）
@@ -644,6 +672,10 @@ fn hop_unavailable(code: ErrorCode) -> bool {
 ///
 /// 每跳一份——代理是挂在客户端上的，换一跳就得换一个客户端。正文也重新构造：可重放的
 /// 载体不碰一次性句柄，重建没有副作用；不可重放的载体根本走不到第二跳（见调用处）。
+///
+/// 第二个返回值是本次真正落到请求上的头（配置的头 + 认证头 + 正文类型），供响应载荷把
+/// 「实际发出的请求」交给后置脚本。multipart 的 `Content-Type` 带 boundary 且由 reqwest
+/// 内部生成，这里不补——它取不到，也不该被承诺（design D4）。
 #[allow(clippy::too_many_arguments)]
 async fn build_attempt<C: reqwest::cookie::CookieStore + 'static>(
     resolved: &ResolvedRequest,
@@ -653,7 +685,7 @@ async fn build_attempt<C: reqwest::cookie::CookieStore + 'static>(
     uploads: &UploadRegistry,
     url: &str,
     auth_headers: &[(String, String)],
-) -> AppResult<reqwest::RequestBuilder> {
+) -> AppResult<(reqwest::RequestBuilder, Vec<(String, String)>)> {
     let client = build_client(resolved, decision, timeout, cookie_provider)?;
 
     let method = reqwest::Method::from_bytes(resolved.method.as_bytes()).map_err(|_| {
@@ -664,14 +696,17 @@ async fn build_attempt<C: reqwest::cookie::CookieStore + 'static>(
     })?;
 
     let mut builder = client.request(method, url);
+    let mut applied: Vec<(String, String)> = Vec::new();
 
     for (name, value) in &resolved.headers {
         headers::validate_header(name, value)?;
         builder = builder.header(name.as_str(), value.as_str());
+        applied.push((name.clone(), value.clone()));
     }
     for (name, value) in auth_headers {
         headers::validate_header(name, value)?;
         builder = builder.header(name.as_str(), value.as_str());
+        applied.push((name.clone(), value.clone()));
     }
 
     let content_type_configured = resolved
@@ -681,21 +716,31 @@ async fn build_attempt<C: reqwest::cookie::CookieStore + 'static>(
 
     let built = body::build(&resolved.body, uploads, content_type_configured).await?;
 
+    let push_content_type = |mut applied: Vec<(String, String)>, content_type: &str| {
+        applied.push(("Content-Type".to_string(), content_type.to_string()));
+        applied
+    };
+
     Ok(match built {
-        body::BuiltBody::None => builder,
+        body::BuiltBody::None => (builder, applied),
         body::BuiltBody::Bytes { data, content_type } => {
             if let Some(content_type) = content_type {
-                builder = builder.header("Content-Type", content_type);
+                builder = builder.header("Content-Type", content_type.as_str());
+                applied = push_content_type(applied, &content_type);
             }
-            builder.body(data)
+            (builder.body(data), applied)
         }
-        body::BuiltBody::Form(pairs) => builder.form(&pairs),
-        body::BuiltBody::Multipart(form) => builder.multipart(*form),
+        body::BuiltBody::Form(pairs) => (
+            builder.form(&pairs),
+            push_content_type(applied, "application/x-www-form-urlencoded"),
+        ),
+        body::BuiltBody::Multipart(form) => (builder.multipart(*form), applied),
         body::BuiltBody::Stream { body, content_type } => {
             if let Some(content_type) = content_type {
-                builder = builder.header("Content-Type", content_type);
+                builder = builder.header("Content-Type", content_type.as_str());
+                applied = push_content_type(applied, &content_type);
             }
-            builder.body(body)
+            (builder.body(body), applied)
         }
     })
 }

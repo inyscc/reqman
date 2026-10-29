@@ -66,17 +66,31 @@ interface SandboxOutcome {
   console?: string[];
   report?: Record<string, unknown>;
   assertions?: { name: string; passed: boolean }[];
+  /** 阶段结束时的请求头（脚本改动已并入），前端据此合并进待发请求。 */
+  headers?: { key: string; value: string }[];
+}
+
+/** 单段脚本的便捷入口：等价于只给一段。 */
+interface RunOptions {
+  /** 多段脚本（按顺序执行）——跨段可见性要靠它验证。 */
+  segments?: string[];
+  /** 喂给 `pm.request` 的请求形态。 */
+  request?: { url: string; method: string; header: { key: string; value: string }[] };
 }
 
 /** 在真浏览器里跑一段脚本，回传 runScriptPhase 的结果。 */
-async function runInBrowser(browser: Browser, code: string): Promise<SandboxOutcome> {
+async function runInBrowser(
+  browser: Browser,
+  code: string,
+  options: RunOptions = {},
+): Promise<SandboxOutcome> {
   const page = await browser.newPage();
   const logs: string[] = [];
   page.on('pageerror', (error) => logs.push(`[pageerror] ${error.message}`));
 
   await page.goto(origin, { waitUntil: 'domcontentloaded' });
 
-  const outcome = await page.evaluate(async (script: string) => {
+  const outcome = await page.evaluate(async (payload: { codes: string[]; request?: RunOptions['request'] }) => {
     // 用 new Function 包一层：字面量 import() 会被 vitest 改写成 SSR 辅助函数，
     // 而这段代码是在浏览器里求值的
     const dynamicImport = new Function('p', 'return import(p)') as (
@@ -124,7 +138,12 @@ async function runInBrowser(browser: Browser, code: string): Promise<SandboxOutc
         { workspaceId: 'w1', collectionId: 'c1', environmentId: null },
         'prerequest',
         // 段要带层级标签：运行时不再按位置猜层级（design D2）
-        [{ label: '请求层', code: script }],
+        payload.codes.map((code) => ({ label: '请求层', code })),
+        null,
+        null,
+        undefined,
+        null,
+        payload.request ?? null,
       );
       const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
       const raw = /ESCAPE-PROBE (\{.*\})/.exec(printed);
@@ -138,6 +157,7 @@ async function runInBrowser(browser: Browser, code: string): Promise<SandboxOutc
           name: item.name,
           passed: item.passed,
         })),
+        headers: result.request?.header,
       };
     } catch (error) {
       return {
@@ -146,7 +166,7 @@ async function runInBrowser(browser: Browser, code: string): Promise<SandboxOutc
         stack: String(error && (error as Error).stack).slice(0, 600),
       };
     }
-  }, code);
+  }, { codes: options.segments ?? [code], request: options.request });
 
   if (logs.length > 0) console.log('浏览器日志：\n' + logs.join('\n'));
   await page.close();
@@ -163,6 +183,36 @@ describe('脚本沙箱在真实浏览器里', () => {
       expect(outcome.thrown).toBeUndefined();
       expect(outcome.error).toBeNull();
       expect(outcome.console?.join(' ')).toContain('browser-sandbox-ok');
+    } finally {
+      await browser.close();
+    }
+  }, 120_000);
+
+  it('前置脚本的请求头改动回传给宿主，并跨段可见（spec: pm.request 的填充）', async () => {
+    const browser = await launchBrowser();
+    try {
+      const outcome = await runInBrowser(browser, '', {
+        request: {
+          url: 'https://api.test/x',
+          method: 'GET',
+          header: [{ key: 'X-Trace', value: 'abc' }],
+        },
+        segments: [
+          `pm.request.headers.add({ key: 'X-Injected', value: '1' });`,
+          `console.log('seen=', pm.request.headers.get('X-Injected'));`,
+        ],
+      });
+
+      expect(outcome.thrown).toBeUndefined();
+      expect(outcome.error).toBeNull();
+      // 浏览器后端（blob Worker）与 Node 后端走的是两套实现，回读的形态必须一致：
+      // 头被带回来，前端才有东西可合并进待发请求
+      expect(outcome.headers).toEqual([
+        { key: 'X-Trace', value: 'abc' },
+        { key: 'X-Injected', value: '1' },
+      ]);
+      // 第二段读到第一段的改动
+      expect(outcome.console?.join(' ')).toContain('seen= 1');
     } finally {
       await browser.close();
     }
