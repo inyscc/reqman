@@ -336,6 +336,14 @@ export interface ResponsePayload {
    * 可选：响应桩不必都补上它，真实后端总会给。
    */
   request_headers?: [string, string][];
+  /**
+   * 本次请求**实际发出**的正文文本，仅 `raw` 形态有值。
+   *
+   * 后置脚本的 `pm.request.body.raw` 以它为准：脚本手里那份是「脚本执行前」的解析
+   * 快照，前置脚本刚写入的变量在其中还是旧值（spec: pm-script-runtime「pm.request 的填充」）。
+   * 可选：响应桩不必都补上它，真实后端总会给。
+   */
+  request_body?: string | null;
   via_proxy: boolean;
   http_version: string;
   /**

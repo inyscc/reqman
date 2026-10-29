@@ -124,3 +124,23 @@ export function withSentHeaders(
 
   return { ...request, header: sent.map(([key, value]) => ({ key, value })) };
 }
+
+/**
+ * 把「实际发出的正文」盖到请求形态上，供后置阶段的 `pm.request` 与
+ * `pm.response.originalRequest` 使用。
+ *
+ * 为什么必须盖：喂进沙箱的那份请求是**脚本执行前**解析出来的，前置脚本刚写入的变量在
+ * 其中还是旧值。后置脚本打印 `pm.request.body.raw` 时若读到那份快照，就会得出「请求
+ * 用的还是旧值」的错误结论——真正发出去的是后端在脚本落库之后重新解析的那一份
+ * （spec: pm-script-runtime「pm.request 的填充」）。
+ *
+ * 后端只在 `raw` 形态报正文；表单、多段与二进制不报，此时原样返回。
+ */
+export function withSentBody(
+  request: SandboxRequest,
+  sent: string | null | undefined,
+): SandboxRequest {
+  if (sent === null || sent === undefined) return request;
+
+  return { ...request, body: { mode: 'raw', raw: sent } };
+}

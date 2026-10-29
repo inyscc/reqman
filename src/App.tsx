@@ -73,7 +73,7 @@ import type {
   TestAssertion,
   VisualizerResult,
 } from './lib/scriptRuntime';
-import { applyScriptHeaders, diffRequestHeaders, withSentHeaders } from './lib/scriptHeaders';
+import { applyScriptHeaders, diffRequestHeaders, withSentBody, withSentHeaders } from './lib/scriptHeaders';
 
 /**
  * 取消的稳定错误码（与 Rust 侧 `ErrorCode::Cancelled` 一致）。
@@ -1671,6 +1671,10 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       request: inlineDraft,
       changed: false,
     };
+    // 前置脚本写入的**本地**作用域（`pm.variables`）：不落库，但要交给本次请求的解析，
+    // 否则「脚本里算一个值、请求里引用它」这条最常用的写法就只在别的三个作用域里成立
+    let scriptLocal: Record<string, string> = {};
+    let scriptLocalSecretNames: string[] = [];
     let scriptError: string | null = null;
     let scriptVisualizer: VisualizerResult | null = null;
     const scriptConsole: ConsoleEntry[] = [];
@@ -1759,6 +1763,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           inlineDraft,
           diffRequestHeaders(sandboxRequest.header, scriptedRequest.header),
         );
+        scriptLocal = pre.local;
+        scriptLocalSecretNames = pre.localSecretNames;
 
         // 取消发生在脚本段：不再往后走，已经产生的输出照常写回
         if (attempt.isCancelled()) {
@@ -1774,6 +1780,10 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         saved_id: outgoing.changed ? null : sendInput.saved_id,
         inline: outgoing.request,
         environment_id: environmentId,
+        // 前置脚本经 `pm.variables.set` 写入的本地作用域：只在本次执行期间有效，
+        // 因此不能指望数据库里查得到，必须随这次发送一起交给解析（本地作用域优先级最高）
+        local: scriptLocal,
+        local_secret_names: scriptLocalSecretNames,
         // 会话标识：主请求与脚本内的请求归同一组，取消时一并撤销
         attempt_id: attempt.attemptId,
       });
@@ -1792,9 +1802,15 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           payload.request_url || requestUrl,
           SCRIPT_TIMEOUT_MS,
           attempt,
-          // 后置脚本读到的请求头以**实际发出的那一份**为准：认证落成的头与正文类型
-          // 只有后端知道（spec: pm.request 的填充 / design D4）
-          withSentHeaders(scriptedRequest, payload.request_headers),
+          // 后置脚本读到的是**实际发出的那一份**：认证落成的头、正文的 `Content-Type`
+          // 只有后端知道；正文同理，喂进沙箱的快照是脚本执行前的解析结果，前置脚本刚写
+          // 入的变量在其中还是旧值（spec: pm.request 的填充 / design D4）
+          withSentBody(
+            withSentHeaders(scriptedRequest, payload.request_headers),
+            payload.request_body,
+          ),
+          // 本地作用域在一个请求的一次执行里连续：前置 `pm.variables.set` 的值后置读得到
+          scriptLocal,
         );
 
         scriptError = scriptError ?? post.error;

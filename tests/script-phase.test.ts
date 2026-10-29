@@ -39,6 +39,7 @@ const runScriptPhase = (
   timeoutMs?: RawPhaseArgs[6],
   cancellation?: RawPhaseArgs[7],
   request?: RawPhaseArgs[8],
+  initialLocal?: RawPhaseArgs[9],
 ) =>
   runScriptPhaseRaw(
     commands,
@@ -50,6 +51,7 @@ const runScriptPhase = (
     timeoutMs,
     cancellation,
     request,
+    initialLocal,
   );
 
 function variable(name: string, value: string): Variable {
@@ -222,6 +224,9 @@ describe('脚本执行编排', () => {
       assertions: [],
       error: null,
       written: [],
+      // 没有脚本就没有本地写入可交回
+      local: {},
+      localSecretNames: [],
       visualizer: null,
       // 没有脚本就没有可合并的改动：请求形态原样交回
       request: null,
@@ -1344,5 +1349,105 @@ describe('连带修复', () => {
     expect(result.error).toContain('坏了');
     expect(result.written).toContain('x');
     expect(calls).toContain('variableSet');
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// 本地作用域（spec: variable-engine「本地变量与迭代数据」）
+// ---------------------------------------------------------------------------
+
+describe('本地作用域', () => {
+  it('pm.variables 的写入随阶段结果返回，且不落库', async () => {
+    const { commands, calls } = fakeCommands();
+
+    const result = await runScriptPhase(commands, target, 'prerequest', [
+      'pm.variables.set("nonce", "abc");',
+    ]);
+
+    expect(result.error).toBeNull();
+    // 调用方据此把取值交给**本次请求**的解析；数据库里永远不会有这个名字
+    expect(result.local).toMatchObject({ nonce: 'abc' });
+    expect(result.written).not.toContain('nonce');
+    expect(calls).not.toContain('variableSet');
+    expect(calls).not.toContain('globalsSet');
+  }, 30_000);
+
+  it('本地作用域的写入在段与段之间接力', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(commands, target, 'prerequest', [
+      'pm.variables.set("nonce", "abc");',
+      // 第二段读得到第一段写的值（沙箱按阶段喂入同一份本地作用域）
+      'console.log("seen=", pm.variables.get("nonce"));',
+    ]);
+
+    expect(result.error).toBeNull();
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    expect(printed).toContain('seen= abc');
+    expect(result.local).toMatchObject({ nonce: 'abc' });
+  }, 30_000);
+
+  it('本地取值以最高优先级交给脚本内请求的解析', async () => {
+    const { commands, sendRequest } = fakeCommands([variable('x', 'ENV')]);
+
+    await runScriptPhase(commands, target, 'prerequest', [
+      'pm.variables.set("x", "LOCAL");',
+      // 段与段之间才可见：同一段内的写入只有沙箱知道（见「同一段脚本内的写入不外泄」）
+      `pm.sendRequest({ url: 'https://api.test/{{x}}' }, function () {});`,
+    ]);
+
+    const input = sendRequest.mock.calls[0][0] as { local?: Record<string, string> };
+    // 本地层级高于环境：同名时取本地那一份，与 Rust 侧 `load_scope_layers` 同序
+    expect(input.local?.x).toBe('LOCAL');
+  }, 30_000);
+
+  it('后置阶段接住前置阶段写入的本地值', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'test',
+      ['console.log("seen=", pm.variables.get("nonce"));'],
+      sentResponse(),
+      'https://api.test/ping',
+      undefined,
+      null,
+      null,
+      // App 把前置阶段交回的 local 原样传进来：同一个请求的一次执行里它是连续的
+      { nonce: 'abc' },
+    );
+
+    expect(result.error).toBeNull();
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    expect(printed).toContain('seen= abc');
+  }, 30_000);
+
+  it('抄进本地作用域的 secret 明文被标记出来', async () => {
+    const secret: Variable = {
+      id: 'v-token',
+      scope: 'environment',
+      owner_id: 'e1',
+      name: 'token',
+      description: null,
+      is_secret: true,
+      enabled: true,
+      sort_order: 0,
+      initial: { state: 'unreadable' },
+      current: { state: 'unreadable' },
+    };
+    const revealed: Variable = { ...secret, current: { state: 'value', value: 'SECRET123456' } };
+    const { commands: base } = fakeCommands([secret]);
+    const commands = { ...base, secretReveal: async () => revealed } as Commands;
+
+    const result = await runScriptPhase(commands, target, 'prerequest', [
+      'pm.variables.set("copied", pm.environment.get("token"));',
+      'pm.variables.set("plain", "just-a-value");',
+    ]);
+
+    expect(result.local).toMatchObject({ copied: 'SECRET123456', plain: 'just-a-value' });
+    // 这些名字在数据库里没有对应的行，后端无从判断哪个是 secret：只能靠取值比对标出来，
+    // 漏标就是明文以普通变量的身份进日志与错误消息
+    expect(result.localSecretNames).toEqual(['copied']);
   }, 30_000);
 });

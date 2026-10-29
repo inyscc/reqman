@@ -942,6 +942,42 @@ describe('前端数据流骨架', () => {
     expect(screen.getAllByTestId('assertion-pass')).toHaveLength(2);
   }, 60_000);
 
+  it('后置脚本读到的正文是实际发出去的那一份（spec: pm.request 的填充）', async () => {
+    // 用户的实际用法：前置脚本算一个值写进变量，请求体里 `{{stage}}` 引用它。
+    // 喂进沙箱的请求是**脚本执行前**解析出来的（这里刻意给旧值 "0"），后端发出去的是
+    // 脚本落库之后重新解析的那一份（"1"）。后置脚本必须读到后者，否则它打印出来的
+    // 正文永远差一拍，看起来就像「请求没用上刚算出来的变量」。
+    const { client, sendRequest } = harness({
+      request: makeRequest({
+        method: 'POST',
+        body: {
+          ...emptyBody(),
+          kind: 'raw',
+          raw: '{"channelId":"{{stage}}"}',
+          raw_language: 'json',
+        },
+        pre_request_script: "pm.collectionVariables.set('stage', '1');",
+        test_script:
+          "pm.test('正文用的是新值', function () { pm.expect(pm.request.body.raw).to.eql('{\"channelId\":\"1\"}'); });",
+      }),
+      previewResult: preview({ method: 'POST', body_text: '{"channelId":"0"}' }),
+      sendResult: response({ request_body: '{"channelId":"1"}' }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1), { timeout: 20_000 });
+
+    // 发出去的是模板本身，解析交给后端——脚本写入的变量因此在发送时才被求值
+    const input = sendRequest.mock.calls[0][0] as { inline: SavedRequest };
+    expect(input.inline.body.raw).toBe('{"channelId":"{{stage}}"}');
+
+    fireEvent.click(await screen.findByText('脚本'));
+    await screen.findByTestId('script-report');
+    expect(screen.getAllByTestId('assertion-pass')).toHaveLength(1);
+  }, 60_000);
+
   it('脚本没碰请求头时发送路径不变：仍按 saved_id 发送（不回归）', async () => {
     const { client, sendRequest } = harness({
       request: makeRequest({
@@ -1568,6 +1604,22 @@ describe('前端数据流骨架', () => {
     expect(globalsSet.mock.invocationCallOrder[0]).toBeLessThan(
       sendRequest.mock.invocationCallOrder[0],
     );
+  }, 30_000);
+
+  it('前置脚本写入的本地变量随本次请求交给解析', async () => {
+    const scripted = makeRequest({
+      pre_request_script: 'pm.variables.set("nonce", "abc123");',
+    });
+    const { client, sendRequest } = harness({ request: scripted });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+
+    await waitFor(() => expect(sendRequest).toHaveBeenCalled(), { timeout: 15_000 });
+    const input = sendRequest.mock.calls[0][0] as { local?: Record<string, string> };
+    // 本地作用域不落库，只能靠这次发送带过去；不带的话 body 里的 {{nonce}} 解析不出来
+    expect(input.local?.nonce).toBe('abc123');
   }, 30_000);
 });
 

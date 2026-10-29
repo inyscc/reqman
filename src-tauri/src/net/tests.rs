@@ -3,8 +3,8 @@
 use super::*;
 use crate::secrets::MemoryKeyProvider;
 use crate::storage::model::{
-    setting_keys, ApiKeyLocation, FormField, FormFieldKind, ProxyConfig, ProxyLayer, ProxyMode,
-    ProxyReason, RawLanguage, RequestBody, Scope, TimeoutSetting,
+    setting_keys, ApiKeyLocation, BodyKind, FormField, FormFieldKind, ProxyConfig, ProxyLayer,
+    ProxyMode, ProxyReason, RawLanguage, RequestBody, Scope, TimeoutSetting,
 };
 use crate::storage::{requests, variables, workspace, Db};
 use crate::testutil::{closed_port_addr, HttpsTestServer, Reply, TempDir, TestServer};
@@ -1527,6 +1527,43 @@ async fn end_to_end_variables_proxy_and_metadata() {
     assert_eq!(recorded.body_text(), "{\"n\":\"42\"}");
 }
 
+/// 本地作用域（脚本的 `pm.variables`）参与解析，且不被严格模式当成未定义变量拦下。
+///
+/// 这条路径数据库里查不到任何东西：取值由脚本阶段在内存里算出来、随本次发送送来。
+/// 若 `unresolved` 只看数据库那几层，前置脚本算出的值引用在 body 里就会被拦截，
+/// 「脚本里算一个值、请求里引用它」这条最常用的写法整条失效。
+#[tokio::test]
+async fn local_variables_take_part_in_resolution_under_strict_mode() {
+    let proxy = TestServer::start(Reply::ok("{\"ok\":true}"));
+    let harness = Harness::new("net-local-vars");
+    variables::set_global_proxy(&harness.db, Some(ProxyConfig::manual(proxy.base_url())))
+        .expect("设置全局代理");
+
+    let mut request = harness.request("R", "POST", "http://api.test/echo");
+    request.headers = vec![KeyValue::new("X-Nonce", "{{nonce}}")];
+    request.body = RequestBody::raw("{\"n\":\"{{nonce}}\"}", RawLanguage::Json);
+    let saved = harness.save(&request);
+
+    // 严格模式是缺省：这里刻意不关掉它，验的正是「本地写入按已定义处理」
+    let mut input = SendRequestInput::saved(&saved.id);
+    input.local = [("nonce".to_string(), "abc123".to_string())]
+        .into_iter()
+        .collect();
+
+    let payload = harness.send(&input).await.expect("本地作用域应参与解析");
+
+    assert!(
+        payload.unresolved.is_empty(),
+        "本地作用域里的名字不应算未解析：{:?}",
+        payload.unresolved
+    );
+    assert_eq!(payload.status, 200);
+
+    let recorded = proxy.last_request();
+    assert_eq!(recorded.header("x-nonce"), Some("abc123"));
+    assert_eq!(recorded.body_text(), "{\"n\":\"abc123\"}");
+}
+
 #[tokio::test]
 async fn secrets_are_masked_in_the_preview_but_used_for_real() {
     let server = TestServer::start(Reply::ok("{}"));
@@ -1697,6 +1734,65 @@ async fn request_headers_report_what_was_actually_sent() {
     assert_eq!(find("Content-Type"), Some("application/json"));
     // 响应带来的头不属于「发出的请求头」
     assert!(find("Set-Cookie").is_none());
+}
+
+#[tokio::test]
+async fn request_body_reports_the_resolved_text_that_was_sent() {
+    let server = TestServer::start(Reply::ok("{}"));
+    let harness = Harness::new("net-request-body");
+    let target = format!("{}/path", server.base_url());
+
+    variables::set_global(
+        &harness.db,
+        &harness.workspace_id,
+        "channel",
+        "1",
+        false,
+        harness.key.as_ref(),
+    )
+    .expect("写入变量");
+
+    let mut request = harness.request("R", "POST", &target);
+    request.body = RequestBody::raw("{\"channelId\":\"{{channel}}\"}", RawLanguage::Json);
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("发送");
+
+    // 后置脚本打印 `pm.request.body.raw` 时读到的必须是这一份：前端手里那份快照是
+    // **脚本执行前**的解析结果，前置脚本刚写入的变量在其中还是旧值
+    assert_eq!(
+        payload.request_body.as_deref(),
+        Some("{\"channelId\":\"1\"}"),
+        "报出的正文应是解析之后、实际发出去的那一份"
+    );
+    assert_eq!(server.request_count(), 1);
+}
+
+#[tokio::test]
+async fn request_body_is_absent_for_non_raw_bodies() {
+    let server = TestServer::start(Reply::ok("{}"));
+    let harness = Harness::new("net-request-body-form");
+    let target = format!("{}/path", server.base_url());
+
+    let mut request = harness.request("R", "POST", &target);
+    request.body = RequestBody {
+        kind: BodyKind::UrlEncoded,
+        urlencoded: vec![KeyValue::new("a", "1")],
+        ..RequestBody::default()
+    };
+    let saved = harness.save(&request);
+
+    let payload = harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("发送");
+
+    // 表单正文不是一段可回灌的文本，报出去只会让后置脚本读到半真半假的东西
+    assert_eq!(payload.request_body, None);
+    assert_eq!(server.request_count(), 1);
 }
 
 #[tokio::test]

@@ -152,6 +152,15 @@ pub struct ResponsePayload {
     /// 前置脚本加的头、认证装配出的 `Authorization` 因此都读得到。更底层的
     /// `Host` / `Content-Length` / `User-Agent` 由网络栈补齐，不在这里。
     pub request_headers: Vec<(String, String)>,
+    /// 本次请求**实际发出**的正文文本，仅 `raw` 形态有值。
+    ///
+    /// 存在的理由与 `request_headers` 相同：后置脚本的 `pm.request.body.raw` 必须以
+    /// 已经解析过的那一份为准。前端手里只有「脚本执行前」的解析快照，前置脚本刚写入的
+    /// 变量在其中还是旧值——照那份打印出来，用户会以为请求用的还是旧值
+    /// （spec: pm-script-runtime「pm.request 的填充」）。
+    ///
+    /// 表单、多段与二进制正文不在这里报：它们的形态不是一段可回灌的文本。
+    pub request_body: Option<String>,
     /// 本次请求是否经由代理发出。
     pub via_proxy: bool,
     /// 本次发送的**代理决定**：直连还是经代理、由哪一层定、为什么。
@@ -614,6 +623,11 @@ pub async fn send_request(
                 headers.push(("Cookie".to_string(), joined));
             }
             headers
+        },
+        // 实际发出的正文：`raw` 形态报解析后的文本，其余形态不报（见字段注释）
+        request_body: match &resolved.body {
+            engine::ResolvedBody::Raw { text, .. } => Some(text.clone()),
+            _ => None,
         },
         via_proxy,
         http_version: negotiated_version,

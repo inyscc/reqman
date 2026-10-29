@@ -138,6 +138,21 @@ export interface ScriptPhaseResult {
   error: string | null;
   /** 被写回后端的变量名，供界面提示与断言使用。 */
   written: string[];
+  /**
+   * 本地作用域（`pm.variables`）在这一阶段结束时的取值。
+   *
+   * 不落库，但必须交给**本次请求**的解析：否则 `pm.variables.set` 写进去的东西在
+   * 请求里引用不到，与 Postman 的行为不一致（spec: variable-engine「本地变量与迭代数据」）。
+   * 阶段被取消时同样返回——那一路不会发出请求，返回值也就不会被用到。
+   */
+  local: Record<string, string>;
+  /**
+   * `local` 里取值来自 secret 明文的名字。
+   *
+   * 这些名字在数据库里没有对应的行，后端无从判断它们是不是 secret；漏掉这个名单，
+   * 经本地作用域参与解析的 secret 明文就会以普通变量的身份进入日志与错误消息。
+   */
+  localSecretNames: string[];
   /** `pm.visualizer.set` 的结果（原始模板与数据，渲染由宿主做，任务 4.6）。 */
   visualizer: VisualizerResult | null;
   /**
@@ -192,8 +207,15 @@ export interface ScriptRuntimeTarget {
   environmentId: string | null;
 }
 
-/** 沙箱 `options.context` 里的作用域名。 */
-type ContextScope = 'globals' | 'environment' | 'collectionVariables';
+/**
+ * 沙箱 `options.context` 里的作用域名。
+ *
+ * `local` 是 `pm.variables` 的落点：它只在**一次执行**期间存在、不落库，但它的取值要
+ * 参与本次请求的解析（Postman 里 `pm.variables.set` 影响当前请求）。因此它和前三个
+ * 作用域一起喂进沙箱、一起回读，区别只在 `persistWrites` 不碰它
+ * （spec: variable-engine「本地变量与迭代数据」）。
+ */
+type ContextScope = 'globals' | 'environment' | 'collectionVariables' | 'local';
 
 type ScopeValues = Record<string, string>;
 
@@ -977,11 +999,13 @@ function executeOne(
               // 脚本写入的新值只在宿主手里（本阶段结束才落库）。带上它们，脚本发起的
               // 请求才解析得出新值（spec: 脚本发起的请求的变量解析）。
               //
-              // 同名时按解析优先级覆盖：environment > collection > global。
+              // 同名时按解析优先级覆盖：local > environment > collection > global
+              // （local 排最后，与 Rust 侧 `load_scope_layers` 的层次顺序一致）。
               local: {
                 ...scopes.globals,
                 ...scopes.collectionVariables,
                 ...scopes.environment,
+                ...scopes.local,
               },
               // 这些取值里有 secret 明文，而它们不在数据库里——后端无从得知哪些是
               // secret，名字必须一并给出，否则日志脱敏会对这条路径失效
@@ -1018,6 +1042,10 @@ function executeOne(
           globals: toScopeInput(scopes.globals),
           environment: toScopeInput(scopes.environment),
           collectionVariables: toScopeInput(scopes.collectionVariables),
+          // `pm.variables` 的落点。沙箱里这个作用域叫 `_variables`（上游约定的名字，
+          // 不是 `local`）：喂错名字等于没喂——写入照常进沙箱，回读出来却是空的。
+          // 它必须显式喂入（哪怕是空的），否则段与段之间的接力也断了。
+          _variables: toScopeInput(scopes.local),
           // `pm.cookies`（当前请求的集合）：与自动附带同一来源（Rust 匹配），
           // 因此脚本读到的就是实际会携带的（spec: 读取当前请求可用的 Cookie）。
           ...(requestCookies.length > 0
@@ -1052,6 +1080,8 @@ function executeOne(
           Record<ContextScope, { values?: unknown }> & {
             return?: { visualizer?: unknown };
             request?: unknown;
+            /** 本地作用域在上游的名字（`pm.variables` 的落点）。 */
+            _variables?: { values?: unknown };
           }
         >;
 
@@ -1067,6 +1097,7 @@ function executeOne(
             globals: readScopeValues(result.globals?.values),
             environment: readScopeValues(result.environment?.values),
             collectionVariables: readScopeValues(result.collectionVariables?.values),
+            local: readScopeValues(result._variables?.values),
           },
           visualizer:
             rawVisualizer && typeof rawVisualizer.template === 'string'
@@ -1299,6 +1330,13 @@ export async function runScriptPhase(
    * 正文与认证仍是快照（design D1 / D2）。
    */
   request: SandboxRequest | null = null,
+  /**
+   * 进入本阶段时本地作用域已有的取值。
+   *
+   * 后置阶段用它接住前置阶段写入的本地变量：同一个请求的一次执行里，`pm.variables`
+   * 在前置写过的东西后置读得到（Postman 的同一语义）。不传则为空。
+   */
+  initialLocal: Record<string, string> = {},
 ): Promise<ScriptPhaseResult> {
   const entries: ConsoleEntry[] = [];
   const assertions: TestAssertion[] = [];
@@ -1314,6 +1352,8 @@ export async function runScriptPhase(
       assertions,
       error: null,
       written: [],
+      local: { ...initialLocal },
+      localSecretNames: [],
       visualizer: null,
       request,
     };
@@ -1337,6 +1377,8 @@ export async function runScriptPhase(
     globals: scopesOf(before.globals),
     environment: scopesOf(before.environment),
     collectionVariables: scopesOf(before.collection),
+    // 本地作用域不落库：它的初始值只可能来自本阶段的调用方（后置阶段接住前置的写入）
+    local: { ...initialLocal },
   };
   // 脚本经 `pm.sendRequest` 发起的请求会把这份内存作用域作为 local 交给后端解析，
   // 而 secret 的判定在后端按名字集合做——名字不跟着过去，脱敏就会失效
@@ -1447,6 +1489,8 @@ export async function runScriptPhase(
         scopes.globals = outcome.next.globals;
         scopes.environment = outcome.next.environment;
         scopes.collectionVariables = outcome.next.collectionVariables;
+        // 本地作用域也接力：集合层 `pm.variables.set` 的值，目录层与请求层要读得到
+        scopes.local = outcome.next.local;
       }
 
       // 可视化模板取最后一段设置的值（后置脚本通常在最后设置）
@@ -1472,11 +1516,20 @@ export async function runScriptPhase(
   //   变量在请求层脚本写坏时仍然保留）。
   const written = cancelled ? [] : await persistWrites(commands, target, before, scopes);
 
+  // 本地取值可能直接抄自 secret（`pm.variables.set('x', pm.environment.get('token'))`），
+  // 而这个名字在数据库里没有对应的行，后端无从判断它是不是 secret。取值比对是唯一
+  // 可用的判据：宁可多标（把明文掩掉）也不能漏标——漏标就是明文进日志。
+  const localSecretNames = Object.keys(scopes.local).filter(
+    (name) => scopes.local[name] !== '' && secretValues.includes(scopes.local[name]),
+  );
+
   return {
     console: entries,
     assertions,
     error,
     written,
+    local: scopes.local,
+    localSecretNames,
     visualizer,
     request: request && currentHeaders ? { ...request, header: currentHeaders } : request,
   };

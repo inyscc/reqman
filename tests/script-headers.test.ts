@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyScriptHeaders,
   diffRequestHeaders,
+  withSentBody,
   withSentHeaders,
 } from '../src/lib/scriptHeaders';
 import { emptyAuth, emptyBody, defaultSettings, type SavedRequest } from '../src/lib/types';
@@ -150,5 +151,39 @@ describe('withSentHeaders', () => {
   it('后端没给这份头时原样返回快照（不清空请求头）', () => {
     expect(withSentHeaders(snapshot, undefined)).toBe(snapshot);
     expect(withSentHeaders(snapshot, [])).toBe(snapshot);
+  });
+});
+
+describe('withSentBody', () => {
+  const snapshot = {
+    url: 'https://api.test/x',
+    method: 'POST',
+    header: [{ key: 'X-Trace', value: 'abc' }],
+    body: { mode: 'raw' as const, raw: '{"channelId":"0"}' },
+  };
+
+  it('用实际发出的正文覆盖快照的正文，其余字段原样保留', () => {
+    // 快照是脚本执行前的解析结果，前置脚本刚写的变量在其中还是旧值
+    expect(withSentBody(snapshot, '{"channelId":"1"}')).toEqual({
+      ...snapshot,
+      body: { mode: 'raw', raw: '{"channelId":"1"}' },
+    });
+  });
+
+  it('快照里没有正文时也照样补上：确实发出了一段正文', () => {
+    const bare = { url: 'https://api.test/x', method: 'POST', header: [] };
+    expect(withSentBody(bare, '{"a":1}')).toEqual({
+      ...bare,
+      body: { mode: 'raw', raw: '{"a":1}' },
+    });
+  });
+
+  it('后端没给正文（表单、多段、二进制）时原样返回快照', () => {
+    expect(withSentBody(snapshot, null)).toBe(snapshot);
+    expect(withSentBody(snapshot, undefined)).toBe(snapshot);
+  });
+
+  it('正文为空串是有效取值：发出去了一个空正文', () => {
+    expect(withSentBody(snapshot, '')).toEqual({ ...snapshot, body: { mode: 'raw', raw: '' } });
   });
 });
