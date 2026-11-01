@@ -366,7 +366,28 @@ main.main {
 }
 
 /* 标签栏（spec: 会话标签栏）：这一行里唯一可收缩、可滚动的元素；
-   环境选择器与窗口控制按钮保持 flex: none，不被标签数量挤出（design D7）。 */
+   环境选择器与窗口控制按钮保持 flex: none，不被标签数量挤出（design D7）。
+
+   shell 是标签栏 + 溢出入口 + 「全部标签」的容器：入口与菜单都挂在它身上，因此它们
+   会跟着标签栏一起被挤、一起消失，而不是钉在会话行的某处。 */
+.session-tabs-shell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 标签区：滚动容器 + 两端入口的定位容器。入口的相对参照必须是**这一段**而不是整条
+   shell——右端入口若按 shell 定位，就会盖住「全部标签」的触发器。 */
+.session-tabs-area {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .session-tabs {
   display: flex;
   align-items: center;
@@ -391,9 +412,9 @@ main.main {
      这里原先是一条 min-width: 96px：它把内容不足的标签撑到 96px，多出来的宽度全落在
      关闭入口之后——短名字的标签凭空空出一段，长名字（方法徽标较长）的标签却不会，
      同一行因此出现两种留白。
-     下限改为 **min-content**（即不再写死数值）：名字可以一路缩到 16px，但关闭入口
-     不会被挤出标签盒。这与原先的 min-width: 0 相反——那个值允许标签被压到内容以下，
-     × 会跑到标签外面（tests-browser 有用例专门盯这件事）。 */
+     下限改为 **min-content**（即不再写死数值）：可读性下限由名称自己的 `min-width`
+     给（见下），标签不会被压到内容以下，× 也跑不到标签盒外面——这与 min-width: 0
+     相反，那个值允许标签被压到内容以下（tests-browser 有用例专门盯这件事）。 */
   min-width: auto;
   max-width: 260px;
   /* 行盒不再由继承的 1.5 撑高：标签内三者的盒高差越小，「按盒居中」越接近
@@ -434,12 +455,22 @@ main.main {
 }
 
 .session-tab .session-tab-name {
-  /* 剩余宽度归名称：关闭入口因此始终贴在标签末尾，名字长了就省略号截断 */
+  /* 剩余宽度归名称：关闭入口因此始终贴在标签末尾，名字长了就省略号截断。
+     `min-width` 是标签的**可读下限**（spec: 会话标签栏）：标签的最小宽度等于
+     「方法徽标 + 这段名称 + 关闭位」，标签多了也不会被压成几像素的残片，超出部分交给
+     标签栏横向滚动。这里不给标签本身写死 min-width——那会让短名字的标签被无端撑开，
+     多出来的宽度全落在关闭入口之后（原先 min-width: 96px 的老问题）。 */
   flex: 1 1 auto;
-  min-width: 16px;
+  min-width: 4.5rem;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* 预览标签：它会被下一次打开顶替（spec: 会话标签栏）。只差一条排版差异——
+   加颜色或徽标会把「会不会跑掉」这件事抬高到与内容同等的注意力上。 */
+.session-tab.preview .session-tab-name {
+  font-style: italic;
 }
 
 /* 标签内的方法徽标与种类图标属于同一视觉级别：给文字型标记一个固定盒高，
@@ -494,6 +525,184 @@ main.main {
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
+}
+
+/* 标签栏两端的溢出入口（spec: 会话标签栏；design D6）。
+   **覆盖**在标签行上，不占布局宽度：占位会让「有没有按钮」改变标签区的可用宽度，
+   于是按钮把自己挤出来又挤回去。渐变底让被盖住的那一小段看起来是被收进去的，
+   而不是被一块实心方块压住。 */
+.tabs-scroll {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tabs-scroll[data-side='left'] {
+  left: 0;
+  background: linear-gradient(to right, var(--panel) 60%, transparent);
+  justify-content: flex-start;
+}
+
+.tabs-scroll[data-side='right'] {
+  right: 0;
+  background: linear-gradient(to left, var(--panel) 60%, transparent);
+  justify-content: flex-end;
+}
+
+.tabs-scroll:hover {
+  color: var(--text);
+  border-color: transparent;
+}
+
+/* 拖动排序：插入线画在标签的左 / 右边缘，落点即最终位置（spec: 会话标签的拖动排序）。
+   用 inset 阴影而不是伪元素：标签已经有圆角与透明边框，阴影贴在盒内不会改变任何尺寸。 */
+.session-tab.drop-before {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.session-tab.drop-after {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+
+.session-tab.dragging {
+  opacity: 0.45;
+}
+
+/* 「全部标签」的触发器（spec: 会话标签栏）：它陈述的是「还有几个、都叫什么」，
+   因此显示数量；数量为 1 时也有意义（还能从这里关掉），只是不占眼力。 */
+.tab-list {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.tab-list-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tab-list-trigger:hover {
+  background: var(--panel-2);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.tab-list-count {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「全部标签」菜单：与下拉菜单 / 行内菜单同一套观感（portal + fixed 定位，
+   z 序高于模态遮罩与变量浮层）。项目多时菜单自身滚动，不把会话行推高。 */
+.tab-menu {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 200px;
+  max-width: 320px;
+  max-height: 60vh;
+  padding: var(--space-2);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  overflow-y: auto;
+}
+
+.tab-menu-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  border-radius: var(--radius-sm);
+}
+
+.tab-menu-row:hover {
+  background: var(--panel-2);
+}
+
+.tab-menu-pick {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  text-align: left;
+}
+
+.tab-menu-pick:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+
+/* 当前激活项：与下拉菜单的当前项同一套表达（直接用强调色，不加对勾——
+   这一行本身没有「选择」语义，点了就走） */
+.tab-menu-pick[aria-current] {
+  color: var(--accent);
+}
+
+.tab-menu-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 关闭入口与标签上的同款：悬停该行才出现，占位不变 */
+.tab-menu-close {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+  visibility: hidden;
+}
+
+.tab-menu-row:hover .tab-menu-close,
+.tab-menu-close:focus-visible {
+  visibility: visible;
+}
+
+.tab-menu-close:hover {
+  background: var(--panel);
+  border-color: transparent;
+  color: var(--text);
 }
 
 /* 会话标签头里标注当前面种类的小图标（集合 / 文件夹）。

@@ -140,6 +140,18 @@ async function openApp(viewport: { width: number; height: number }): Promise<Pag
   return page;
 }
 
+/**
+ * 打开第 `index` 个请求并把它点成常驻（spec: 会话标签的生命周期）。
+ *
+ * 树里的单击只得到**预览标签**，再开一个就会顶替它——要「同时开着很多个标签」的用例
+ * 必须逐个点一下标签本身。新开的标签总排在最后，因此用 `last()` 定位，不必按名字匹配
+ * （`请求 1` 是 `请求 10` 的前缀）。
+ */
+async function openTab(page: Page, index: number): Promise<void> {
+  await page.getByRole('button', { name: `GET 请求 ${index}`, exact: true }).click();
+  await page.getByTestId('session-tab').last().click();
+}
+
 describe('表头吸顶（真实引擎）', () => {
   it('表体滚动时表头钉在容器顶部，且表头表面不透明', async () => {
     const page = await openApp({ width: 1000, height: 420 });
@@ -300,8 +312,9 @@ describe('会话标签行的溢出（真实引擎）', () => {
   it('标签超宽时标签栏自己滚动，环境选择器与窗口按钮完整可见', async () => {
     const page = await openApp({ width: 1000, height: 640 });
     try {
+      // 每个都点成常驻：预览标签会被下一个顶替，凑不出「很多标签」这一前提
       for (let index = 1; index <= REQUEST_COUNT; index += 1) {
-        await page.getByRole('button', { name: `GET 请求 ${index}`, exact: true }).click();
+        await openTab(page, index);
       }
       await page.getByLabel('请求地址').waitFor();
 
@@ -338,11 +351,69 @@ describe('会话标签行的溢出（真实引擎）', () => {
     }
   });
 
-  it('标签被挤到最窄时，关闭按钮仍在标签内（× 不溢出）', async () => {
+  it('溢出时两端出现滚动入口，激活标签自动进入可见范围，全部标签可查', async () => {
     const page = await openApp({ width: 1000, height: 640 });
     try {
       for (let index = 1; index <= REQUEST_COUNT; index += 1) {
-        await page.getByRole('button', { name: `GET 请求 ${index}`, exact: true }).click();
+        await openTab(page, index);
+      }
+      await page.getByLabel('请求地址').waitFor();
+
+      const state = await page.evaluate(() => {
+        const strip = document.querySelector('.session-tabs') as HTMLElement;
+        const active = document.querySelector('.session-tab.active') as HTMLElement;
+        const name = active.querySelector('.session-tab-name') as HTMLElement;
+        const box = strip.getBoundingClientRect();
+        const rect = active.getBoundingClientRect();
+        return {
+          insideLeft: rect.left >= box.left - 1,
+          insideRight: rect.right <= box.right + 1,
+          scrollLeft: Math.round(strip.scrollLeft),
+          // 名称的可读下限（spec: 标签保持可读的最小宽度）
+          nameWidth: Math.round(name.getBoundingClientRect().width),
+          hasLeft: !!document.querySelector('[data-testid="tab-scroll-left"]'),
+          hasRight: !!document.querySelector('[data-testid="tab-scroll-right"]'),
+        };
+      });
+
+      // 刚打开的是最后一个标签：它必须被自动滚进可见范围（design D7）
+      expect(state.insideLeft && state.insideRight, JSON.stringify(state)).toBe(true);
+      // 已经在最右端：左移入口出现，右移入口不再需要
+      expect(state.hasLeft).toBe(true);
+      expect(state.hasRight).toBe(false);
+      expect(state.nameWidth).toBeGreaterThanOrEqual(60);
+
+      // 左移入口真的滚动标签栏（不依赖浏览器手势）
+      const beforeClick = state.scrollLeft;
+      await page.getByTestId('tab-scroll-left').click();
+      await expect
+        .poll(async () =>
+          page.evaluate(
+            () => (document.querySelector('.session-tabs') as HTMLElement).scrollLeft,
+          ),
+        )
+        .toBeLessThan(beforeClick);
+
+      // 「全部标签」把可见范围之外的那几个也列出来（spec: 会话标签栏）
+      await page.getByTestId('tab-list-trigger').click();
+      const menuNames = await page
+        .getByTestId('tab-menu')
+        .locator('.tab-menu-name')
+        .allTextContents();
+      expect(menuNames).toHaveLength(REQUEST_COUNT);
+      expect(menuNames).toContain('请求 1');
+      expect(menuNames).toContain(`请求 ${REQUEST_COUNT}`);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('标签压到最小宽度时，关闭按钮仍在标签内（× 不溢出）', async () => {
+    const page = await openApp({ width: 1000, height: 640 });
+    try {
+      // 每个都点成常驻：预览标签会被下一个顶替，凑不出「很多标签」这一前提
+      for (let index = 1; index <= REQUEST_COUNT; index += 1) {
+        await openTab(page, index);
       }
       await page.getByLabel('请求地址').waitFor();
 
@@ -365,14 +436,42 @@ describe('会话标签行的溢出（真实引擎）', () => {
     }
   });
 
+  it('标签可以拖动换位，窗口位置不受影响（spec: 会话标签的拖动排序）', async () => {
+    const page = await openApp({ width: 1200, height: 640 });
+    try {
+      for (let index = 1; index <= 3; index += 1) {
+        await openTab(page, index);
+      }
+      await page.getByLabel('请求地址').waitFor();
+
+      const names = () =>
+        page.getByTestId('session-tab').locator('.session-tab-name').allTextContents();
+      expect(await names()).toEqual(['请求 1', '请求 2', '请求 3']);
+
+      // 把第一个拖到最后一个的右半区：应落在它之后，而不是被追加到某处
+      const first = page.getByTestId('session-tab').nth(0);
+      const last = page.getByTestId('session-tab').nth(2);
+      const box = await last.boundingBox();
+      await first.dragTo(last, {
+        targetPosition: { x: Math.max(4, (box?.width ?? 100) - 4), y: 8 },
+      });
+
+      await expect.poll(names).toEqual(['请求 2', '请求 3', '请求 1']);
+    } finally {
+      await page.close();
+    }
+  });
+
   it('标签内的种类标记 / 方法徽标与名称垂直中心一致（spec: 会话标签的宽度与内部对齐）', async () => {
     const page = await openApp({ width: 1200, height: 640 });
     try {
       for (let index = 1; index <= 3; index += 1) {
-        await page.getByRole('button', { name: `GET 请求 ${index}`, exact: true }).click();
+        await openTab(page, index);
       }
-      // 再开一个实体标签（种类图标那一类），让两种标记都出现在同一行里
+      // 再开一个实体标签（种类图标那一类），让两种标记都出现在同一行里。
+      // 集合行单击会折叠它，标签本身也只是一瞥——这里点一下标签把它留下来
       await page.getByTestId('workspace-tree').getByText('探针集合', { exact: true }).click();
+      await page.getByTestId('session-tab').last().click();
       await page.getByRole('tab').first().waitFor();
 
       // 量三者的垂直中心：它们由 `align-items: center` 按盒子居中，因此只要盒高不同，

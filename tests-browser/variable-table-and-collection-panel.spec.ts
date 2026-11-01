@@ -342,9 +342,14 @@ describe('变量表格的重复键与拖拽（真实引擎）', () => {
     expect(new Set(inTree).size).toBe(1);
 
     // 三种前导标记各开一个标签。顺序有讲究：点集合行会折叠它，所以最后点集合。
+    // 每开一个都点一下标签本身把它留下来——树单击给的是预览标签，会被下一个顶替
+    // （spec: 会话标签的生命周期）。
     await tree.getByText('探针请求', { exact: true }).click();
+    await page.getByTestId('session-tab').last().click();
     await tree.getByText('子目录', { exact: true }).click();
+    await page.getByTestId('session-tab').last().click();
     await tree.getByText('变量集合', { exact: true }).click();
+    await page.getByTestId('session-tab').last().click();
     expect(await page.getByTestId('session-tab').count()).toBe(3);
 
     const inTabs = (await measure()).tabs;

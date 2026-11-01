@@ -60,7 +60,7 @@ export function isInteractiveSessionBarTarget(event: ReactMouseEvent<HTMLElement
   const target = event.target as HTMLElement | null;
   return Boolean(
     target?.closest(
-      'button, select, input, textarea, .env-select, .dropdown-menu, .window-controls',
+      'button, select, input, textarea, .env-select, .dropdown-menu, .tab-menu, .window-controls',
     ),
   );
 }

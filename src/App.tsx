@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
+import type { CSSProperties, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from 'react';
 import './App.css';
 import { BottomBar, type ModalKind } from './components/BottomBar';
 import { CookiePanel } from './components/CookiePanel';
@@ -10,7 +10,8 @@ import {
   type EntitySaveStatus,
 } from './components/EntityScriptPanel';
 import { EnvironmentsPanel } from './components/EnvironmentsPanel';
-import { applyEnvironmentOrder } from './lib/environmentMoves';
+import { applyEnvironmentOrder, moveIdInOrder, type DropPosition } from './lib/environmentMoves';
+import { TabListMenu, type TabListEntry } from './components/TabListMenu';
 import { CollectionIcon, FolderIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
@@ -139,6 +140,8 @@ interface RequestSessionTab {
   response: ResponsePayload | null;
   innerTab: Tab;
   scriptReport: ScriptReport | null;
+  /** 预览标签：尚未被用户留下来，下一次打开会顶替它（spec: 会话标签的生命周期）。 */
+  preview: boolean;
 }
 
 /**
@@ -157,6 +160,8 @@ interface EntitySessionTab {
   baseline: { pre: string; test: string } | null;
   /** 集合面板的内层页签（变量 / 脚本）；文件夹不使用。 */
   innerTab: EntityInnerTab;
+  /** 预览标签：尚未被用户留下来，下一次打开会顶替它（spec: 会话标签的生命周期）。 */
+  preview: boolean;
 }
 
 type SessionTab = RequestSessionTab | EntitySessionTab;
@@ -195,6 +200,31 @@ function isTabDirty(tab: SessionTab): boolean {
 
 function tabName(tab: SessionTab): string {
   return tab.kind === 'request' ? tab.draft.name : (tab.entity?.name ?? '');
+}
+
+/**
+ * 可被顶替的预览槽位下标；没有则为 -1（spec: 会话标签的生命周期）。
+ *
+ * 脏标签**不算**可顶替：按「改动即转常驻」的规则它本来就不会是预览，但这条判据必须写在
+ * 顶替逻辑自身——它是安全边界，不是「上面已经保证了所以不用查」（design D3）。
+ */
+function previewSlot(tabs: SessionTab[]): number {
+  return tabs.findIndex((item) => item.preview && !isTabDirty(item));
+}
+
+/**
+ * 「全部标签」菜单里一项的识别信息（spec: 会话标签栏）。
+ *
+ * 与标签本身同源：两处各写一份，迟早会长出两种说法（比如一处带方法徽标、一处只剩名字）。
+ */
+function toTabListEntry(tab: SessionTab): Omit<TabListEntry, 'active'> {
+  return {
+    key: tab.id,
+    name: tabName(tab),
+    method: tab.kind === 'request' ? tab.draft.method : null,
+    entityKind: tab.kind === 'entity' ? tab.entityKind : null,
+    dirty: isTabDirty(tab),
+  };
 }
 
 /**
@@ -408,6 +438,19 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [activeTabKey, setActiveTabKey] = useState<string | null>(null);
   /** 标签集合是否已按当前工作区恢复完成；恢复前不写持久化，避免把空集合写回去。 */
   const [tabsHydrated, setTabsHydrated] = useState(false);
+  /**
+   * 标签栏两侧还有没有未显示的标签（spec: 会话标签栏）。
+   *
+   * 只用来决定两端的滚动入口是否出现——入口本身是**覆盖**在标签行上的，不占布局宽度，
+   * 因此这个判定不会反过来改变可用宽度、把自己开关成抖动的（design D6）。
+   */
+  const [tabScrollEnds, setTabScrollEnds] = useState({ left: false, right: false });
+  /** 标签拖动排序的视图态：被拖动项与当前落点；松手才真正重排（design D9）。 */
+  const [dragTabKey, setDragTabKey] = useState<string | null>(null);
+  const [tabDropMark, setTabDropMark] = useState<{ key: string; position: DropPosition } | null>(
+    null,
+  );
+  const tabsViewportRef = useRef<HTMLDivElement>(null);
   const [preview, setPreview] = useState<RequestPreview | null>(null);
   const [busy, setBusy] = useState(false);
   /**
@@ -632,13 +675,57 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   // 唯一的打开入口（design D1）：同一 id 至多一个标签是硬约束。
   // 已在册则只聚焦既有标签，SHALL NOT 重载其草稿。
   // ---------------------------------------------------------------------------
+
+  /**
+   * 把一个新标签放进集合：有预览槽位时**就地顶替**它，否则追加
+   * （spec: 会话标签的生命周期；design D1 / D3）。
+   *
+   * 顶替不改变排列位置，也不留空位——「看一眼不留痕」不该在标签行里留下洞。
+   */
+  const insertTab = useCallback((next: SessionTab) => {
+    const current = tabsRef.current;
+    if (current.some((item) => item.id === next.id)) return;
+
+    const slot = previewSlot(current);
+    // 被顶替的标签若还有在飞的发送，撤销它那一次——与关闭标签同一个出口（design D3）。
+    // 放在更新函数外面：updater 必须是纯的（React 可能重放它）
+    if (slot >= 0) cancelOnRemoveRef.current(current[slot].id);
+
+    setTabs((previous) => {
+      if (previous.some((item) => item.id === next.id)) return previous;
+      const at = previewSlot(previous);
+      // 顶替不改变排列位置，也不留空位——「看一眼不留痕」不该在标签行里留下洞
+      if (at < 0) return [...previous, next];
+      return [...previous.slice(0, at), next, ...previous.slice(at + 1)];
+    });
+  }, []);
+
+  /** 把标签转成常驻：点过、改过、发过之后，它就不再被下一次打开顶替（design D2）。 */
+  const pinTab = useCallback((key: string) => {
+    setTabs((previous) =>
+      previous.some((item) => item.id === key && item.preview)
+        ? previous.map((item) => (item.id === key ? { ...item, preview: false } : item))
+        : previous,
+    );
+  }, []);
+
+  /** 切换激活标签，并把它留下来——点击标签本身就是「我要这一个」（design D2）。 */
+  const activateTab = useCallback(
+    (key: string) => {
+      setActiveTabKey(key);
+      pinTab(key);
+    },
+    [pinTab],
+  );
+
   const openRequest = useCallback(
-    async (id: string) => {
+    async (id: string, options: { pin?: boolean } = {}) => {
       const key = requestTabId(id);
       setError(null);
 
       if (tabsRef.current.some((item) => item.id === key)) {
         setActiveTabKey(key);
+        if (options.pin) pinTab(key);
         return;
       }
 
@@ -656,22 +743,23 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         response: null,
         innerTab: DEFAULT_REQUEST_TAB,
         scriptReport: null,
+        // 树单击 = 看一眼；命名 / 复制 / 新建这类入口传 pin: true 直接常驻
+        preview: !options.pin,
       };
-      setTabs((previous) =>
-        previous.some((item) => item.id === key) ? previous : [...previous, next],
-      );
+      insertTab(next);
       setActiveTabKey(key);
     },
-    [client, requestStore],
+    [client, requestStore, insertTab, pinTab],
   );
 
   const openEntity = useCallback(
-    async (kind: EntityKind, id: string, collectionId: string) => {
+    async (kind: EntityKind, id: string, collectionId: string, options: { pin?: boolean } = {}) => {
       const key = entityTabId(kind, id);
       setError(null);
 
       if (tabsRef.current.some((item) => item.id === key)) {
         setActiveTabKey(key);
+        if (options.pin) pinTab(key);
         return;
       }
 
@@ -688,16 +776,15 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
           baseline: { pre: entityPre(loaded), test: entityTest(loaded) },
           // 集合面板默认停在变量页（spec: 集合面板的变量与脚本站签）
           innerTab: 'variables',
+          preview: !options.pin,
         };
-        setTabs((previous) =>
-          previous.some((item) => item.id === key) ? previous : [...previous, next],
-        );
+        insertTab(next);
         setActiveTabKey(key);
       } catch (caught) {
         setError(describeError(caught).message);
       }
     },
-    [client],
+    [client, insertTab, pinTab],
   );
 
   const loadTree = useCallback(
@@ -867,6 +954,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               response: null,
               innerTab: DEFAULT_REQUEST_TAB,
               scriptReport: null,
+              // 恢复出的一律常驻：预览是这一次会话里的一瞥，不是存档（design D4）
+              preview: false,
             });
             continue;
           }
@@ -886,6 +975,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               entity: loaded,
               baseline: { pre: entityPre(loaded), test: entityTest(loaded) },
               innerTab: entry.innerTab ?? 'variables',
+              preview: false,
             });
           } catch {
             // 取不回的实体按「已删除」处理：丢弃而不是进入错误态
@@ -929,6 +1019,143 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     };
     void writeTabs(client, workspaceId, value);
   }, [client, workspaceId, tabsHydrated, tabs, activeTabKey]);
+
+  // ---------------------------------------------------------------------------
+  // 标签栏的溢出与可见性（spec: 会话标签栏；design D6 / D7）
+  // ---------------------------------------------------------------------------
+
+  /** 量一次两端是否还有未显示的标签；无变化时不触发重渲染。 */
+  const measureTabStrip = useCallback(() => {
+    const element = tabsViewportRef.current;
+    if (!element) return;
+    const rest = element.scrollWidth - element.clientWidth;
+    const next = { left: element.scrollLeft > 1, right: rest - element.scrollLeft > 1 };
+    setTabScrollEnds((previous) =>
+      previous.left === next.left && previous.right === next.right ? previous : next,
+    );
+  }, []);
+
+  useEffect(() => {
+    const element = tabsViewportRef.current;
+    if (!element) return;
+
+    measureTabStrip();
+    element.addEventListener('scroll', measureTabStrip, { passive: true });
+    // 容器尺寸变化（窗口缩放、环境选择器让位）与浏览器原生滚动一样会改变溢出判定
+    const observer =
+      typeof ResizeObserver === 'function' ? new ResizeObserver(measureTabStrip) : null;
+    observer?.observe(element);
+
+    return () => {
+      element.removeEventListener('scroll', measureTabStrip);
+      observer?.disconnect();
+    };
+  }, [measureTabStrip, tabs.length, sidebarTab]);
+
+  // 标签的**内容**变化不会改变容器自身的尺寸（ResizeObserver 量不到），因此每次渲染后
+  // 再量一次；状态相等时不重渲染，不会形成循环。
+  useEffect(() => {
+    measureTabStrip();
+  });
+
+  /**
+   * 激活标签自动进入可见范围（spec: 会话标签栏；design D7）。
+   *
+   * 手算 `scrollLeft` 而不是 `scrollIntoView`：后者会连带滚动所有祖先，表现为「切个标签
+   * 页面跳一下」。这里只动标签栏自己，别处的滚动位置不受影响。
+   */
+  useEffect(() => {
+    if (!activeTabKey) return;
+    const element = tabsViewportRef.current;
+    if (!element) return;
+
+    const tab = element.querySelector<HTMLElement>(`[data-tab-key="${activeTabKey}"]`);
+    if (!tab) return;
+
+    const box = element.getBoundingClientRect();
+    const rect = tab.getBoundingClientRect();
+    if (rect.left < box.left) {
+      element.scrollLeft = Math.max(0, element.scrollLeft - (box.left - rect.left) - 8);
+    } else if (rect.right > box.right) {
+      element.scrollLeft += rect.right - box.right + 8;
+    }
+  }, [activeTabKey, tabs.length]);
+
+  /** 两端滚动入口：按一段可见宽度滚动（不做平滑动画，与「切换标签无过渡」同一口径）。 */
+  const scrollTabsBy = (direction: 1 | -1) => {
+    const element = tabsViewportRef.current;
+    if (!element) return;
+    const step = Math.max(160, Math.round(element.clientWidth * 0.6));
+    element.scrollBy?.({ left: direction * step, top: 0, behavior: 'auto' });
+    if (!element.scrollBy) element.scrollLeft += direction * step;
+    measureTabStrip();
+  };
+
+  // ---------------------------------------------------------------------------
+  // 标签的拖动排序（spec: 会话标签的拖动排序；design D9）
+  // ---------------------------------------------------------------------------
+
+  const endTabDrag = () => {
+    setDragTabKey(null);
+    setTabDropMark(null);
+  };
+
+  /** 指针落在标签的哪一半：前半插到它之前，后半插到它之后（与树 / 环境列表同款）。 */
+  const tabDropPosition = (event: ReactDragEvent<HTMLElement>): DropPosition => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
+    return ratio < 0.5 ? 'before' : 'after';
+  };
+
+  /** 落点解算：真会改变顺序时返回新的 key 顺序，没有变化返回 null（无插入线、不受理放下）。 */
+  const resolveTabDrop = (targetKey: string, position: DropPosition): string[] | null => {
+    if (!dragTabKey) return null;
+    const keys = tabsRef.current.map((item) => item.id);
+    const next = moveIdInOrder(keys, dragTabKey, targetKey, position);
+    return next === keys ? null : next;
+  };
+
+  /** 松手：按新顺序重排；顺序随既有的标签集合持久化一起写出。 */
+  const applyTabDrop = (targetKey: string, position: DropPosition) => {
+    const next = resolveTabDrop(targetKey, position);
+    if (!next) return;
+    const byKey = new Map(tabsRef.current.map((item) => [item.id, item]));
+    setTabs(
+      next
+        .map((key) => byKey.get(key))
+        .filter((item): item is SessionTab => item !== undefined),
+    );
+  };
+
+  /** 单个标签的拖动手势；`draggable` 只在没有模态、没有在拖动别的东西时给。 */
+  const tabDragHandlers = (key: string) => ({
+    draggable: true,
+    onDragStart: (event: ReactDragEvent<HTMLElement>) => {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', key);
+      setDragTabKey(key);
+      // 排位置本身就是「我要它留着」：预览标签因此转常驻
+      pinTab(key);
+    },
+    onDragEnd: endTabDrag,
+    onDragOver: (event: ReactDragEvent<HTMLElement>) => {
+      const position = tabDropPosition(event);
+      const next = resolveTabDrop(key, position);
+      if (next) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+      }
+      setTabDropMark(next ? { key, position } : null);
+    },
+    onDrop: (event: ReactDragEvent<HTMLElement>) => {
+      const position = tabDropPosition(event);
+      const next = resolveTabDrop(key, position);
+      if (!next) return;
+      event.preventDefault();
+      endTabDrag();
+      applyTabDrop(key, position);
+    },
+  });
 
   // 分栏比例：切换工作区时读回该工作区上次调整的值（design D7）。
   // 读不到就回落默认——一条显示偏好不该把界面拖进错误态。
@@ -1138,7 +1365,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const editDraft = (next: SavedRequest) => {
     const key = activeKeyRef.current;
     if (!key) return;
-    patchRequestTab(key, (item) => ({ ...item, draft: next, dirty: true }));
+    // 改动即转常驻：预览标签被顶替时不会丢东西（spec: 会话标签的生命周期）
+    patchRequestTab(key, (item) => ({ ...item, draft: next, dirty: true, preview: false }));
     requestStore.markDirty(next.id);
   };
 
@@ -1622,6 +1850,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     // 发送作用于**这一条**标签：草稿、脏状态、响应与脚本报告都写回它自己
     const draft = tab.draft;
     const dirty = tab.dirty;
+    // 发过的标签不再被顶替：响应与脚本报告是这里最贵的产出（design D2）
+    pinTab(key);
     setError(null);
     setSendError(key, null);
     // 只清掉这一条自己的门禁；并发时别的发送的门禁不受影响
@@ -1885,6 +2115,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 response: null,
                 innerTab: DEFAULT_REQUEST_TAB,
                 scriptReport: null,
+                // 新建是「我要它留着」：常驻，且不顶替当前的预览标签
+                preview: false,
               },
             ],
       );
@@ -2039,13 +2271,14 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
   /** 菜单的「重命名」：打开对应标签并把焦点交给面板头里的名称框（不经过守卫）。 */
   const renameEntity = (entity: EntitySelection) => {
-    void openEntity(entity.kind, entity.id, entity.collectionId).then(() =>
+    // 改名是明确的「留着它」：直接常驻，免得改完名字被下一次打开顶掉
+    void openEntity(entity.kind, entity.id, entity.collectionId, { pin: true }).then(() =>
       setPendingRenameFocus(true),
     );
   };
 
   const renameRequest = (id: string) => {
-    void openRequest(id).then(() => setPendingRenameFocus(true));
+    void openRequest(id, { pin: true }).then(() => setPendingRenameFocus(true));
   };
 
   /** 集合与文件夹的改名落在实体脚本面板的面板头（design D3）。 */
@@ -2126,6 +2359,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 response: null,
                 innerTab: DEFAULT_REQUEST_TAB,
                 scriptReport: null,
+                // 复制与新建同性质：常驻，且不顶替当前的预览标签
+                preview: false,
               },
             ],
       );
@@ -2282,13 +2517,26 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
   /** 树里选中请求：打开/聚焦标签。切换不丢草稿，因此不经过守卫。 */
   const selectRequest = (id: string) => {
-    // 重复点当前已打开的请求：不重载草稿、不动未保存标记
-    if (activeKeyRef.current === requestTabId(id)) return;
+    const key = requestTabId(id);
+    // 已经开着的标签：只聚焦，不重载草稿、不动未保存标记。
+    // 但它同时也是一次「我要这个留着」——预览标签借此转常驻（design D2）
+    if (tabsRef.current.some((item) => item.id === key)) {
+      setActiveTabKey(key);
+      pinTab(key);
+      return;
+    }
     void openRequest(id);
   };
 
   /** 树里选中集合/文件夹：打开/聚焦其脚本标签，同样不经过守卫。 */
   const selectEntity = (entity: EntitySelection) => {
+    const key = entityTabId(entity.kind, entity.id);
+    // 与请求同一套：已开着就聚焦并留下，未开着才新开（预览）
+    if (tabsRef.current.some((item) => item.id === key)) {
+      setActiveTabKey(key);
+      pinTab(key);
+      return;
+    }
     void openEntity(entity.kind, entity.id, entity.collectionId);
   };
 
@@ -2422,77 +2670,142 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             标签本身渲染成 button，自然落在拖拽排除清单里（window-chrome）。 */}
         <div className="session-bar" data-testid="session-bar" onMouseDown={onSessionBarMouseDown}>
           {!showEnvironmentEditor && (
-            <div
-              className="session-tabs"
-              data-testid="session-tabs"
-              role="tablist"
-              aria-label="会话标签"
-              onWheel={(event) => {
-                // 垂直滚轮转成横向滚动（design D7）：滚动条已隐藏，滚轮是唯一的滚动暗示
-                if (event.deltaY === 0) return;
-                event.currentTarget.scrollLeft += event.deltaY;
-              }}
-            >
-              {tabs.length === 0 ? (
-                <span className="muted">没有打开的请求</span>
-              ) : (
-                tabs.map((item) => {
-                  const active = item.id === activeTabKey;
-                  const itemDirty = isTabDirty(item);
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      role="tab"
-                      aria-selected={active}
-                      className={`session-tab ${active ? 'active' : ''}`}
-                      data-testid="session-tab"
-                      data-tab-kind={item.kind}
-                      title={tabName(item)}
-                      onClick={() => setActiveTabKey(item.id)}
-                      onMouseDown={(event) => {
-                        // 中键会触发自动滚动，关掉它让中键专用于关闭标签
-                        if (event.button === 1) event.preventDefault();
-                      }}
-                      onAuxClick={(event) => {
-                        if (event.button !== 1) return;
-                        event.preventDefault();
-                        requestCloseTab(item.id);
-                      }}
-                    >
-                      {item.kind === 'request' ? (
-                        <span className="method-badge" data-method={item.draft.method}>
-                          {item.draft.method}
-                        </span>
-                      ) : item.entityKind === 'collection' ? (
-                        <CollectionIcon className="tab-kind-icon" role="img" aria-label="集合" />
-                      ) : (
-                        <FolderIcon className="tab-kind-icon" role="img" aria-label="文件夹" />
-                      )}
-                      <span className="session-tab-name">{tabName(item)}</span>
-                      <span className="session-tab-close">
-                        {itemDirty && (
-                          <span
-                            className="dirty-dot"
-                            data-testid="tab-unsaved-dot"
-                            aria-hidden="true"
-                          />
+            <div className="session-tabs-shell">
+              {/* 标签栏与它的两端入口在同一个定位容器里：入口的相对参照是**标签区**，
+                  不是整条 shell——否则右端入口会盖住「全部标签」的触发器。 */}
+              <div className="session-tabs-area">
+                <div
+                  className="session-tabs"
+                  data-testid="session-tabs"
+                  role="tablist"
+                  aria-label="会话标签"
+                  ref={tabsViewportRef}
+                  onWheel={(event) => {
+                    // 垂直滚轮转成横向滚动（design D7）：滚动条已隐藏，滚轮是唯一的滚动暗示
+                    if (event.deltaY === 0) return;
+                    event.currentTarget.scrollLeft += event.deltaY;
+                  }}
+                >
+                {tabs.length === 0 ? (
+                  <span className="muted">没有打开的请求</span>
+                ) : (
+                  tabs.map((item) => {
+                    const active = item.id === activeTabKey;
+                    const itemDirty = isTabDirty(item);
+                    const mark =
+                      tabDropMark?.key === item.id ? `drop-${tabDropMark.position}` : '';
+                    const classes = [
+                      'session-tab',
+                      active ? 'active' : '',
+                      // 预览标签：名称斜体——它会被下一次打开顶替（spec: 会话标签栏）
+                      item.preview ? 'preview' : '',
+                      dragTabKey === item.id ? 'dragging' : '',
+                      mark,
+                    ]
+                      .filter(Boolean)
+                      .join(' ');
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        className={classes}
+                        data-testid="session-tab"
+                        data-tab-kind={item.kind}
+                        data-tab-key={item.id}
+                        title={
+                          item.preview
+                            ? `${tabName(item)}（预览标签，点击后保留）`
+                            : tabName(item)
+                        }
+                        onClick={() => activateTab(item.id)}
+                        onMouseDown={(event) => {
+                          // 中键会触发自动滚动，关掉它让中键专用于关闭标签
+                          if (event.button === 1) event.preventDefault();
+                        }}
+                        onAuxClick={(event) => {
+                          if (event.button !== 1) return;
+                          event.preventDefault();
+                          requestCloseTab(item.id);
+                        }}
+                        {...tabDragHandlers(item.id)}
+                      >
+                        {item.kind === 'request' ? (
+                          <span className="method-badge" data-method={item.draft.method}>
+                            {item.draft.method}
+                          </span>
+                        ) : item.entityKind === 'collection' ? (
+                          <CollectionIcon className="tab-kind-icon" role="img" aria-label="集合" />
+                        ) : (
+                          <FolderIcon className="tab-kind-icon" role="img" aria-label="文件夹" />
                         )}
-                        <span
-                          className="session-tab-close-btn"
-                          role="button"
-                          aria-label="关闭标签"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            requestCloseTab(item.id);
-                          }}
-                        >
-                          ×
+                        <span className="session-tab-name">{tabName(item)}</span>
+                        <span className="session-tab-close">
+                          {itemDirty && (
+                            <span
+                              className="dirty-dot"
+                              data-testid="tab-unsaved-dot"
+                              aria-hidden="true"
+                            />
+                          )}
+                          <span
+                            className="session-tab-close-btn"
+                            role="button"
+                            aria-label="关闭标签"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              requestCloseTab(item.id);
+                            }}
+                          >
+                            ×
+                          </span>
                         </span>
-                      </span>
-                    </button>
-                  );
-                })
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* 溢出入口：**覆盖**在标签行两端，不占布局宽度——占位会让按钮把自己
+                  挤出来又挤回去（design D6）。只在对应方向确实还有未显示的标签时出现。 */}
+              {tabScrollEnds.left && (
+                <button
+                  type="button"
+                  className="tabs-scroll"
+                  data-side="left"
+                  data-testid="tab-scroll-left"
+                  aria-label="向前滚动标签"
+                  onClick={() => scrollTabsBy(-1)}
+                >
+                  ‹
+                </button>
+              )}
+              {tabScrollEnds.right && (
+                <button
+                  type="button"
+                  className="tabs-scroll"
+                  data-side="right"
+                  data-testid="tab-scroll-right"
+                  aria-label="向后滚动标签"
+                  onClick={() => scrollTabsBy(1)}
+                >
+                  ›
+                </button>
+              )}
+            </div>
+
+              {/* 全部标签：可见范围之外的那几个叫什么、怎么过去，只有这里查得到
+                  （spec: 会话标签栏「全部标签菜单」） */}
+              {tabs.length > 0 && (
+                <TabListMenu
+                  tabs={tabs.map((item) => ({
+                    ...toTabListEntry(item),
+                    active: item.id === activeTabKey,
+                  }))}
+                  onSelect={activateTab}
+                  onClose={requestCloseTab}
+                />
               )}
             </div>
           )}
@@ -2725,7 +3038,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 />
               }
               onChange={(next) =>
-                patchEntityTab(activeEntityTab.id, (item) => ({ ...item, entity: next }))
+                patchEntityTab(activeEntityTab.id, (item) => ({
+                  ...item,
+                  entity: next,
+                  // 改脚本即转常驻：预览标签被顶替时不会丢东西
+                  preview: false,
+                }))
               }
               onCommitName={() => void commitEntityName()}
               saveStatus={

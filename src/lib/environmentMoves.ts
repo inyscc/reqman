@@ -26,8 +26,12 @@ export type DropPosition = 'before' | 'after';
  *
  * 返回**入参原引用**表示"没有变化"，调用方据此不发起写入：拖回原处（含落在自己行的
  * 上半 / 下半区）、或任一 id 不在列表里（例如拖动途中列表被刷新）。
+ *
+ * 这是**单层列表**拖动重排的通用算法，环境列表与会话标签栏（change:
+ * preview-tabs-and-tab-strip）共用同一份：两处的落点语义必须一致，各写一份等于承诺
+ * 它们会一起漂移（与 `useMenuDismiss` 抽出来时的理由相同）。
  */
-export function moveEnvironmentId(
+export function moveIdInOrder(
   ids: string[],
   dragged: string,
   target: string,
@@ -45,6 +49,9 @@ export function moveEnvironmentId(
 
   return next.every((id, index) => id === ids[index]) ? ids : next;
 }
+
+/** 环境列表的拖动重排：与通用算法同义，只为调用处的可读性保留这个名字。 */
+export const moveEnvironmentId = moveIdInOrder;
 
 /**
  * 按给定顺序重排环境列表。

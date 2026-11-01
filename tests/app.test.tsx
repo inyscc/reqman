@@ -663,6 +663,19 @@ async function openRequest() {
 }
 
 /**
+ * 把标签点成常驻（spec: 会话标签的生命周期；change: preview-tabs-and-tab-strip）。
+ *
+ * 集合树单击打开的是**预览标签**，再打开别的会把它顶替掉；因此凡是需要「两个标签并存」
+ * 的用例，都得先把第一个留下来——点击标签本身就是留用的手势。
+ */
+function pinSessionTab(name: string) {
+  const tab = within(screen.getByTestId('session-tabs'))
+    .getByText(name)
+    .closest('.session-tab') as HTMLElement;
+  fireEvent.click(tab);
+}
+
+/**
  * 切到请求编辑器的 Params 页签。
  *
  * 打开请求的默认页签已是 Body（spec: ui-layout「请求编辑器的默认标签页」），因此凡是
@@ -3546,6 +3559,8 @@ describe('变量表格与集合面板（rework-collection-tree-and-variable-mode
     });
     render(<App client={client} />);
     await openRequest();
+    // 请求标签先留下来，实体面板才是第二个标签（spec: 会话标签的生命周期）
+    pinSessionTab('我的请求');
 
     openNodeMenu('我的集合');
     fireEvent.click(within(menu()).getByText('编辑脚本'));
@@ -4795,6 +4810,8 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     fireEvent.click(tree().getByText('外层请求'));
     await screen.findByLabelText('请求地址');
     expect(screen.getAllByTestId('session-tab')).toHaveLength(1);
+    // 点成常驻：目录面板是「另一个面」，会顶替预览标签（spec: 会话标签的生命周期）
+    pinSessionTab('外层请求');
 
     // 单击目录行 = 打开该实体的面板 + 切换展开：标签因此多一个，请求标签仍在
     fireEvent.click(tree().getByText('外层'));
@@ -5349,6 +5366,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     const { client, collectionSetScript } = harness();
     render(<App client={client} />);
     await openRequest();
+    // 请求标签先留下来：后面的集合脚本面板是第二个标签
+    pinSessionTab('我的请求');
     // 打开集合脚本面板并制造改动（这一处不再有未保存标记：它走自动保存）
     await openEntityPanel('我的集合');
     await screen.findByTestId('entity-script-panel');
@@ -5397,6 +5416,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     expect(reqTab.tagName).toBe('BUTTON');
     expect(within(reqTab).getByText('GET')).toBeTruthy();
 
+    // 请求标签点成常驻，实体标签才会作为第二个标签出现
+    pinSessionTab('我的请求');
     await openEntityPanel('我的集合');
     await screen.findByTestId('entity-script-panel');
     const entityTab = screen.getAllByTestId('session-tab')[1];
@@ -5444,6 +5465,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
     render(<App client={client} />);
     await openRequest();
+    // 第一个标签先点成常驻，否则会被下一次打开顶替（spec: 会话标签的生命周期）
+    pinSessionTab('我的请求');
     fireEvent.click(tree().getByText('另一个请求'));
     await screen.findByLabelText('请求地址');
 
@@ -5457,6 +5480,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
     render(<App client={client} />);
     await openRequest();
+    // 第一个标签先点成常驻，否则会被下一次打开顶替（spec: 会话标签的生命周期）
+    pinSessionTab('我的请求');
     fireEvent.click(tree().getByText('另一个请求'));
     await screen.findByLabelText('请求地址');
 
@@ -5484,6 +5509,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
     render(<App client={client} />);
     await openRequest();
+    // 第一个标签先点成常驻，否则会被下一次打开顶替（spec: 会话标签的生命周期）
+    pinSessionTab('我的请求');
     fireEvent.click(tree().getByText('另一个请求'));
     await screen.findByLabelText('请求地址');
     expect(tabByName('另一个请求').className).toContain('active');
@@ -5519,6 +5546,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     };
     render(<App client={client} />);
     await openRequest();
+    // 第一个标签先点成常驻，否则会被下一次打开顶替（spec: 会话标签的生命周期）
+    pinSessionTab('我的请求');
     fireEvent.click(tree().getByText('另一个请求'));
     await screen.findByLabelText('请求地址');
     expect(screen.getAllByTestId('session-tab')).toHaveLength(2);
@@ -5553,6 +5582,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
     render(<App client={client} />);
     await openRequest();
+    // 第一个标签先点成常驻，否则会被下一次打开顶替（spec: 会话标签的生命周期）
+    pinSessionTab('我的请求');
     fireEvent.click(tree().getByText('另一个请求'));
     await screen.findByLabelText('请求地址');
 
@@ -5567,6 +5598,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
     render(<App client={client} />);
     await openRequest();
+    // 第一个标签先点成常驻，否则会被下一次打开顶替（spec: 会话标签的生命周期）
+    pinSessionTab('我的请求');
     fireEvent.click(tree().getByText('另一个请求'));
     await screen.findByLabelText('请求地址');
 
@@ -5582,6 +5615,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
     render(<App client={client} />);
     await openRequest();
+    // 第一个标签先点成常驻，否则会被下一次打开顶替（spec: 会话标签的生命周期）
+    pinSessionTab('我的请求');
     fireEvent.click(tree().getByText('另一个请求'));
     await screen.findByLabelText('请求地址');
 
@@ -5593,6 +5628,8 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
     render(<App client={client} />);
     await openRequest();
+    // 第一个标签先点成常驻，否则会被下一次打开顶替（spec: 会话标签的生命周期）
+    pinSessionTab('我的请求');
     fireEvent.click(tree().getByText('另一个请求'));
     await screen.findByLabelText('请求地址');
 
@@ -5600,6 +5637,222 @@ describe('多标签会话（add-multi-tab-sessions）', () => {
     await waitFor(() => expect(tabByName('另一个请求').className).toContain('active'));
     fireEvent.keyDown(window, { key: '1', ctrlKey: true });
     await waitFor(() => expect(tabByName('我的请求').className).toContain('active'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 预览标签、标签栏入口与拖动排序（change: preview-tabs-and-tab-strip）
+// ---------------------------------------------------------------------------
+
+/** 按名称取到会话标签按钮（与上面几处同款，这里只在本地用）。 */
+function tabByName(name: string): HTMLElement {
+  return within(screen.getByTestId('session-tabs')).getByText(name).closest('.session-tab') as HTMLElement;
+}
+
+/** 标签栏里各标签的名称，按界面顺序。 */
+function tabNames(): string[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('[data-testid="session-tab"]')).map(
+    (tab) => tab.querySelector('.session-tab-name')?.textContent ?? '',
+  );
+}
+
+/** jsdom 的矩形全是 0；拖动落点要靠**宽度**判断前后半，因此给标签一个 100px 的盒子。 */
+function stubTabRect(element: HTMLElement, width = 100) {
+  element.getBoundingClientRect = () =>
+    ({
+      top: 0,
+      bottom: 20,
+      left: 0,
+      right: width,
+      width,
+      height: 20,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    }) as DOMRect;
+}
+
+/**
+ * 派发一次标签拖拽。
+ *
+ * 与树里的 `fireDrag` 同一套做法：jsdom 没有 DragEvent，`clientX` 只能借 MouseEvent 带上
+ * （落点比例 = 指针横向位置 / 标签宽度）。
+ */
+function fireTabDrag(
+  type: 'dragstart' | 'dragover' | 'drop',
+  element: HTMLElement,
+  ratio: number,
+  transfer: ReturnType<typeof dataTransfer>,
+) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: ratio * 100 });
+  Object.defineProperty(event, 'dataTransfer', { value: transfer });
+  act(() => {
+    element.dispatchEvent(event);
+  });
+}
+
+describe('预览标签与标签栏（preview-tabs-and-tab-strip）', () => {
+  it('单击打开的标签是预览，再打开别的就顶替它（spec: 会话标签的生命周期）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    expect(tabByName('我的请求').className).toContain('preview');
+
+    fireEvent.click(tree().getByText('另一个请求'));
+    await waitFor(() => expect(tabNames()).toEqual(['另一个请求']));
+  });
+
+  it('顶替发生在预览槽位上，不追加到末尾', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    pinSessionTab('我的请求');
+
+    // 集合面板是第二个标签（预览），随后的请求应顶替**它**，而不是排到第三个
+    await openEntityPanel('我的集合');
+    expect(tabNames()).toEqual(['我的请求', '我的集合']);
+
+    fireEvent.click(tree().getByText('另一个请求'));
+    await waitFor(() => expect(tabNames()).toEqual(['我的请求', '另一个请求']));
+  });
+
+  it('点击标签本身把它转成常驻：随后的打开不再顶替它', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    pinSessionTab('我的请求');
+    expect(tabByName('我的请求').className).not.toContain('preview');
+
+    fireEvent.click(tree().getByText('另一个请求'));
+    await waitFor(() => expect(tabNames()).toEqual(['我的请求', '另一个请求']));
+  });
+
+  it('改动内容把它转成常驻：未保存的编辑不会随顶替消失', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/draft' },
+    });
+    await screen.findByText('未保存');
+    expect(tabByName('我的请求').className).not.toContain('preview');
+
+    fireEvent.click(tree().getByText('另一个请求'));
+    await waitFor(() => expect(tabNames()).toEqual(['我的请求', '另一个请求']));
+  });
+
+  it('在树里再次选中同一请求也把它转成常驻', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    // 再点一次同一个节点：不新增标签，但这一次是「我要它留着」
+    fireEvent.click(tree().getByText('我的请求'));
+    await waitFor(() => expect(tabByName('我的请求').className).not.toContain('preview'));
+
+    fireEvent.click(tree().getByText('另一个请求'));
+    await waitFor(() => expect(tabNames()).toEqual(['我的请求', '另一个请求']));
+  });
+
+  it('键盘导航不构成留用：Ctrl+Tab 离开后预览标签仍会被顶替', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    pinSessionTab('我的请求');
+
+    await openEntityPanel('我的集合');
+    expect(tabByName('我的集合').className).toContain('preview');
+
+    // Ctrl+Tab 只是路过：回到第一个标签，集合面板仍是预览
+    fireEvent.keyDown(window, { key: 'Tab', ctrlKey: true });
+    await waitFor(() => expect(tabByName('我的请求').className).toContain('active'));
+
+    fireEvent.click(tree().getByText('另一个请求'));
+    await waitFor(() => expect(tabNames()).toEqual(['我的请求', '另一个请求']));
+  });
+
+  it('恢复出来的标签一律常驻：新单击的请求不被顶替（spec: 会话标签集合的持久化）', async () => {
+    const harnessed = harness();
+    const client = {
+      ...harnessed.client,
+      settingsGet: async (scope: string) => {
+        if (scope === 'ui_tabs') {
+          return JSON.stringify({ tabs: [{ kind: 'request', id: 'r1' }], activeId: 'r1' });
+        }
+        if (scope === 'script_gate') return 'allowed';
+        return null;
+      },
+    };
+    render(<App client={client} />);
+    await screen.findByLabelText('请求地址');
+    expect(tabByName('我的请求').className).not.toContain('preview');
+
+    await openEntityPanel('我的集合');
+    await waitFor(() => expect(screen.getAllByTestId('session-tab')).toHaveLength(2));
+  });
+
+  it('全部标签菜单列出所有标签，可跳转也可关闭（spec: 会话标签栏）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    pinSessionTab('我的请求');
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+
+    fireEvent.click(screen.getByTestId('tab-list-trigger'));
+    const menu = await screen.findByTestId('tab-menu');
+    const items = within(menu).getAllByTestId('tab-menu-item');
+    expect(items.map((item) => item.textContent)).toEqual(['GET我的请求', 'GET另一个请求']);
+
+    // 点选跳转：回到第一个标签，并把它留下来
+    fireEvent.click(items[0]);
+    await waitFor(() => expect(tabByName('我的请求').className).toContain('active'));
+
+    // 关掉第二个标签
+    fireEvent.click(screen.getByTestId('tab-list-trigger'));
+    fireEvent.click(await screen.findByLabelText('关闭 另一个请求'));
+    await waitFor(() => expect(tabNames()).toEqual(['我的请求']));
+  });
+
+  it('拖动标签改变顺序，插入线指示落点（spec: 会话标签的拖动排序）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    pinSessionTab('我的请求');
+    await openEntityPanel('我的集合');
+    pinSessionTab('我的集合');
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+    expect(tabNames()).toEqual(['我的请求', '我的集合', '另一个请求']);
+
+    // 把最后一个拖到第一个的前半：落点画在它的左边缘
+    const source = tabByName('另一个请求');
+    const target = tabByName('我的请求');
+    stubTabRect(target);
+    const transfer = dataTransfer();
+    fireTabDrag('dragstart', source, 0, transfer);
+    fireTabDrag('dragover', target, 0.2, transfer);
+    expect(tabByName('我的请求').className).toContain('drop-before');
+
+    fireTabDrag('drop', target, 0.2, transfer);
+    await waitFor(() => expect(tabNames()).toEqual(['另一个请求', '我的请求', '我的集合']));
+  });
+
+  it('拖回原处不产生变化：没有插入线，顺序不动', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    pinSessionTab('我的请求');
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+
+    const source = tabByName('我的请求');
+    stubTabRect(source);
+    const transfer = dataTransfer();
+    fireTabDrag('dragstart', source, 0, transfer);
+    fireTabDrag('dragover', source, 0.5, transfer);
+    expect(tabByName('我的请求').className).not.toContain('drop-');
+    fireTabDrag('drop', source, 0.5, transfer);
+    expect(tabNames()).toEqual(['我的请求', '另一个请求']);
   });
 });
 
@@ -6751,7 +7004,8 @@ describe('请求编辑器的默认标签页（trim-response-header-and-default-b
     openParamsTab();
     expect(activeInnerTab()).toBe('Params');
 
-    // 切到另一个标签：它按默认值落在 Body
+    // 切到另一个标签：它按默认值落在 Body。先把第一个点成常驻，否则会被顶替
+    pinSessionTab('我的请求');
     fireEvent.click(tree().getByText('另一个请求'));
     await waitFor(() => expect(activeInnerTab()).toBe('Body'));
 
