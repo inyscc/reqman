@@ -2129,6 +2129,23 @@ input.switch.switch-danger {
   font-weight: 500;
 }
 
+/* 页签上的状态点：请求编辑器的 Scripts 页签（绿＝已有脚本）与响应区的脚本页签
+   （绿＝断言全通过、红＝至少一条失败或脚本报错）。与集合面板页签的 .tab-dot 是
+   同一个观感：小尺寸圆点直接当指示灯读，绿色沿用比 --ok 更亮的信号绿。 */
+.tab .tab-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: var(--space-3);
+  border-radius: 50%;
+  background: #2ea44f;
+  vertical-align: 0;
+}
+
+.tab .tab-dot.fail {
+  background: var(--danger);
+}
+
 /* 集合树（change: rework-collection-tree-and-scripts）：紧凑、小字号，
  * 形态对齐 Postman。样式收在 .tree 作用域内，不动侧栏其它面板。 */
 .tree {
@@ -2634,6 +2651,22 @@ select.method-select[data-method='OPTIONS'] {
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
+}
+
+/* 脚本 console 输出（spec: 脚本 console 输出的收集与呈现）：一句话可能就是多行文本，
+   因此按原文保留换行与缩进；超长的单行在容器内折行，不用横向滚动去读。
+   输出按等宽呈现——多行 JSON 的缩进靠等宽才对得齐，与旁边的前缀标注也是同一个字体。 */
+.script-console {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.script-console li {
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* 缩进 JSON 与手写对齐都靠空格；`\t` 按 8 列排会跳得太远，跟相邻行对不上 */
+  tab-size: 2;
 }
 
 .script-pane-editor {

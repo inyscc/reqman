@@ -52,7 +52,9 @@ export function ScriptReport({ console: entries, assertions, error }: ScriptRepo
       )}
 
       {entries.length > 0 && (
-        <ul data-testid="script-console">
+        // 输出的换行与缩进按原文呈现（见 App.css 的 .script-console）：`console.log`
+        // 打印的多行文本、以及对象 JSON 的缩进，折叠成一行就没法读了。
+        <ul className="script-console" data-testid="script-console">
           {entries.map((entry, index) => (
             <li key={index} data-level={entry.level} data-phase={entry.phase}>
               <span className="mono muted">

@@ -583,6 +583,13 @@ export function RequestEditor({
   const isRawJson = draft.body.kind === 'raw' && (draft.body.raw_language ?? 'json') === 'json';
   const rawEmpty = (draft.body.raw ?? '').trim() === '';
 
+  /**
+   * Scripts 页签上的绿点：请求已写了前置或后置脚本（与实体面板页签同一套提示——
+   * 页签里的内容不点开就看不见，圆点负责说「这里面有东西」）。
+   */
+  const hasScripts =
+    (draft.pre_request_script ?? '').trim() !== '' || (draft.test_script ?? '').trim() !== '';
+
   const applyFormat = (mode: RawFormatMode) => {
     try {
       // 缩进取应用级的「缩进数 + 缩进类型」——与响应的格式化输出同一份值，不再固定 2 空格
@@ -618,6 +625,15 @@ export function RequestEditor({
             onClick={() => onTab(entry.value)}
           >
             {entry.label}
+            {entry.value === 'scripts' && hasScripts && (
+              <span
+                className="tab-dot"
+                role="img"
+                aria-label="已定义脚本"
+                title="该请求已定义脚本"
+                data-testid="request-scripts-dot"
+              />
+            )}
           </button>
         ))}
       </div>

@@ -197,6 +197,54 @@ describe('桥的消息校验（3.6）', () => {
     expect(result.console[0].args).toEqual(['{"a":1,"nested":{"b":[1,2]}}', '[1,2]', '42']);
   }, 30_000);
 
+  /**
+   * console 输出里的换行（spec: pm-script-runtime「脚本 console 输出的收集与呈现」）。
+   *
+   * 呈现层靠 `pre-wrap` 按原文排版，前提是文本里真的有 `\n`：字符串的换行要原样留下，
+   * `\r\n` 与孤立的 `\r` 要归一，长对象要摊成多行——任何一处漏了，日志就挤成一行。
+   */
+  describe('console 输出的换行', () => {
+    /** 让假沙箱把给定的参数当作**一条** console 输出发出来。 */
+    async function capture(...args: unknown[]): Promise<string[]> {
+      const { commands } = fakeCommands();
+
+      state.execute = (_target, _options, callback) => {
+        state.handlers.get(BRIDGE_EVENTS.console)?.[0]?.({}, 'log', ...args);
+        callback(null, {});
+      };
+
+      const result = await runScriptPhase(commands, target, 'prerequest', ['1;']);
+      return result.console[0].args;
+    }
+
+    it('字符串里的换行原样保留', async () => {
+      expect(await capture('第一行\n第二行\n  缩进')).toEqual(['第一行\n第二行\n  缩进']);
+    });
+
+    it('\\r\\n 与孤立的 \\r 都折成 \\n', async () => {
+      // 界面只认 `\n`：`\r` 在 HTML 里是普通空白，只带 `\r` 的文本会整段挤成一行
+      expect(await capture('a\r\nb\rc')).toEqual(['a\nb\nc']);
+    });
+
+    it('超出可读长度的对象摊成缩进 JSON', async () => {
+      const [text] = await capture({ name: '张三', tags: ['a', 'b'], note: 'x'.repeat(60) });
+
+      // 紧凑形态一行几百字符，读不出层级；摊开之后每个字段占一行
+      expect(text).toContain('\n  "name": "张三"');
+      expect(text.split('\n').length).toBeGreaterThan(3);
+    });
+
+    it('短对象仍是一行，不为一两个字段摊成四行', async () => {
+      expect(await capture({ a: 1 })).toEqual(['{"a":1}']);
+    });
+
+    it('截断提示独占一行，不去啃半行残句', async () => {
+      const [text] = await capture({ body: 'x'.repeat(5000) });
+
+      expect(text.endsWith('\n…（已截断）')).toBe(true);
+    });
+  });
+
   it('后端失败时交给脚本的是可读原因，而不是 [object Object]（10.4 实机发现）', async () => {
     // Tauri 命令失败时拒绝给的是**普通对象** `{ code, message }`，不是 Error 实例。
     // 桥的错误出口若只认 `instanceof Error`，脚本侧 `err.message` 会拿到 `[object Object]`

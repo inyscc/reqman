@@ -1105,6 +1105,79 @@ describe('pm.request 的填充', () => {
     expect(result.error).toBeNull();
     expect(result.request?.header).toEqual([{ key: 'X-Trace', value: 'abc' }]);
   }, 30_000);
+
+  it('前置脚本改写的请求体逐段接力，改动可从结果里读回（spec: pm.request 的填充）', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'prerequest',
+      [
+        `pm.request.body.raw = JSON.stringify({ stage: 'new' });`,
+        `console.log('next=', pm.request.body.raw);
+         pm.request.body.raw += '+';`,
+      ],
+      null,
+      null,
+      undefined,
+      null,
+      sandboxRequest,
+    );
+
+    expect(result.error).toBeNull();
+
+    // 集合层改的正文，目录 / 请求层读得到
+    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    expect(printed).toContain('next= {"stage":"new"}');
+
+    // 最终形态回传给宿主，据此合并进待发请求
+    expect(result.request?.body).toEqual({ mode: 'raw', raw: '{"stage":"new"}+' });
+  }, 30_000);
+
+  it('空正文的请求也能在脚本里写入正文', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'prerequest',
+      [`pm.request.body.raw = 'from-script';`],
+      null,
+      null,
+      undefined,
+      null,
+      {
+        url: 'https://api.test/users',
+        method: 'POST',
+        header: [],
+        body: { mode: 'raw', raw: '' },
+      },
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.request?.body).toEqual({ mode: 'raw', raw: 'from-script' });
+  }, 30_000);
+
+  it('后置阶段不回传请求体的改动（请求早已发出）', async () => {
+    const { commands } = fakeCommands();
+
+    const result = await runScriptPhase(
+      commands,
+      target,
+      'test',
+      [`pm.request.body.raw = 'too-late';`],
+      sentResponse(),
+      null,
+      undefined,
+      null,
+      sandboxRequest,
+    );
+
+    expect(result.error).toBeNull();
+    // 结果里的请求仍是发出前那一份，不会声称一个根本没发出去的正文
+    expect(result.request?.body).toEqual({ mode: 'raw', raw: '{"a":1}' });
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------

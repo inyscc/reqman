@@ -18,9 +18,9 @@
  * 收成 `unknown` 会让这些成员之后的补全整体消失——`unknown` 上不允许访问任何属性。
  *
  * 一处刻意的"少声明"：
- * - `pm.request` 里**除请求头之外**的写面（`url = ...`、`method = ...`、`body`）**不声明**：
- *   那些字段仍是快照，脚本对它们的改动既不跨段可见、也不影响实际发出的请求（design D1）。
- *   声明了会让人以为改得动。请求头的写方法则是真能力，照实声明。
+ * - `pm.request` 里**除请求头与请求体之外**的写面（`url = ...`、`method = ...`）**不声明**：
+ *   那两个字段仍是快照，脚本对它们的改动既不跨段可见、也不影响实际发出的请求（design D1）。
+ *   声明了会让人以为改得动。请求头的写方法与 `body.raw` 则是真能力，照实声明。
  * - `pm.require` 的返回仍是 `unknown`：内置库有九个，逐个声明不划算。
  *
  * **同步**：升级 `postman-sandbox`（版本见 package.json，当前 6.7.4）时须按新的
@@ -118,21 +118,22 @@ declare namespace pm {
 
   interface RequestBody {
     mode: string;
-    raw?: string;
+    /** 正文文本。改写它会让**实际发出的请求**用上新的正文（spec: pm.request 的填充）。 */
+    raw: string;
   }
 
   /**
    * 脚本执行时刻的请求（spec: pm-script-runtime「pm.request 的填充」）。
    *
-   * **请求头可改写**：对 \`headers\` 的改动会落到实际发出的请求上，并在同一阶段的后续
-   * 脚本与后置脚本中可见（design D1/D2）。**其余字段仍是快照**：改写 \`url\` / \`method\` /
-   * \`body\` 不影响实际发出的请求，也不跨段可见，所以这里只给它们的读取面。
+   * **请求头与请求体可改写**：对 \`headers\` 与 \`body.raw\` 的改动会落到实际发出的请求上，
+   * 并在同一阶段的后续脚本与后置脚本中可见（design D1/D2）。**其余字段仍是快照**：
+   * 改写 \`url\` / \`method\` 不影响实际发出的请求，也不跨段可见，所以这里只给它们的读取面。
    */
   interface Request {
     url: RequestUrl;
     method: string;
     headers: HeaderList;
-    body?: RequestBody;
+    body: RequestBody;
     /** 认证**只暴露方式**，不含凭据。 */
     auth?: { type: string };
   }

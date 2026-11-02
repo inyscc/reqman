@@ -94,31 +94,64 @@ export interface ConsoleEntry {
 const CONSOLE_ARG_LIMIT = 4000;
 
 /**
+ * 结构化参数改用缩进 JSON 的阈值（**紧凑形态**的字符数）。
+ *
+ * 短对象/短数组一行看完最省地方（`{a:1}` 摊成四行反而难扫）；一旦超出一行的可读范围，
+ * 换成缩进形态——每个字段一行，长正文、嵌套结构、整份响应体才读得下去。
+ */
+const CONSOLE_INLINE_LIMIT = 80;
+
+/**
+ * 统一换行符：`\r\n` 与单独的 `\r` 都折成 `\n`。
+ *
+ * 界面上只有 `\n` 稳定断行——`\r` 在 HTML 里按空白处理，只带 `\r` 的文本（老式 Mac 换行、
+ * 部分手工拼接的日志）会整段挤成一行。这里先归一，呈现层就只需管 `\n` 一种。
+ */
+function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * 超长输出的截断：截断提示单独占一行，不去啃半行残句。
+ */
+function truncateConsoleText(text: string): string {
+  if (text.length <= CONSOLE_ARG_LIMIT) return text;
+  return `${text.slice(0, CONSOLE_ARG_LIMIT)}\n…（已截断）`;
+}
+
+/**
  * 把 console 的一个参数文本化（6.2 的呈现 / 10.4 的实机观察）。
  *
  * 沙箱把参数**结构化**地送过来——实测（Node 后端）：`console.log({a:1})` 到达宿主时是真正的
  * 对象 `{a:1}`，不是字符串。因此不能一律 `String(value)`：那会把对象变成 `[object Object]`、
  * 把数组的结构丢掉（`[1,2]` → `1,2`），用户看到的与 Postman 差得远。这里字符串按原样、
  * 其它值取 JSON 形态；序列化不了（循环引用）或过长时退回 String / 截断，保证这一条输出不丢。
+ *
+ * 字符串里的换行**原样保留**（呈现层用 `pre-wrap` 按原文排版）；对象与数组则在超出
+ * `CONSOLE_INLINE_LIMIT` 时改用缩进 JSON——`console.log(pm.response.json())` 这种整份
+ * 响应体，紧凑形态会挤成一行几百字符、内层换行还全被转义成 `\n` 两个字面字符。
  */
 function formatConsoleArg(value: unknown): string {
-  if (typeof value === 'string') return value;
+  if (typeof value === 'string') return normalizeNewlines(value);
 
   if (typeof value === 'object' && value !== null) {
     try {
-      const json = JSON.stringify(value);
+      const compact = JSON.stringify(value);
 
-      if (typeof json === 'string') {
-        return json.length > CONSOLE_ARG_LIMIT
-          ? `${json.slice(0, CONSOLE_ARG_LIMIT)}…（已截断）`
-          : json;
+      if (typeof compact === 'string') {
+        if (compact.length > CONSOLE_ARG_LIMIT) return truncateConsoleText(compact);
+        if (compact.length <= CONSOLE_INLINE_LIMIT) return compact;
+
+        // 缩进形态会变长，截断按缩进后的文本算，才不至于多吐出一截
+        const indented = JSON.stringify(value, null, 2);
+        return truncateConsoleText(typeof indented === 'string' ? indented : compact);
       }
     } catch {
       // 循环引用等：退回字符串化，至少不丢这一条输出
     }
   }
 
-  return String(value);
+  return normalizeNewlines(String(value));
 }
 
 export interface TestAssertion {
@@ -156,10 +189,10 @@ export interface ScriptPhaseResult {
   /** `pm.visualizer.set` 的结果（原始模板与数据，渲染由宿主做，任务 4.6）。 */
   visualizer: VisualizerResult | null;
   /**
-   * 该阶段结束时 `pm.request` 的形态（请求头已并入脚本的改动）。
+   * 该阶段结束时 `pm.request` 的形态（请求头与请求体已并入脚本的改动）。
    *
-   * 调用方据此把前置脚本对请求头的改动合并进待发请求（design D3）；未喂入请求时为
-   * `null`，此时脚本看到的是一份空请求，也就没有可合并的东西。
+   * 调用方据此把前置脚本对请求头与请求体的改动合并进待发请求（design D3）；未喂入
+   * 请求时为 `null`，此时脚本看到的是一份空请求，也就没有可合并的东西。
    */
   request: SandboxRequest | null;
 }
@@ -552,12 +585,18 @@ export interface SandboxHeader {
   disabled?: boolean;
 }
 
+/** 喂给沙箱的请求体：只建模 `raw` 形态（表单与二进制不参与脚本改写）。 */
+export interface SandboxBody {
+  mode: 'raw';
+  raw: string;
+}
+
 /** 喂给沙箱的请求形态：postman-collection `Request` 的 JSON 形状。 */
 export interface SandboxRequest {
   url: string;
   method: string;
   header: SandboxHeader[];
-  body?: { mode: 'raw'; raw: string };
+  body?: SandboxBody;
   auth?: { type: string };
 }
 
@@ -567,17 +606,21 @@ export interface SandboxRequest {
  * 取值来自**解析之后**的结果，脚本因此读得出本次请求要到达的目标与内容。认证只给方式、
  * 不给凭据——凭据本就不参与变量解析（后端的解析结果里没有它），spec 也只要求暴露方式。
  *
- * 已知限制：请求体一律以 `raw` 模式给出（解析结果只提供文本形态），表单类正文因此不会
- * 带上它原本的模式；正文内容本身与实际一致。
+ * 正文**一律给一个 `body`**，哪怕它是空串：没有 `body` 时脚本里
+ * `pm.request.body.raw = …` 会撞上「Cannot set properties of undefined」，而"给一个
+ * 没有正文的请求在脚本里补上正文"正是这个能力的一半用途。
+ *
+ * 已知限制：表单类正文在沙箱里仍以 `raw` 的文本投影呈现（解析结果只提供文本形态），
+ * 脚本改不动它们；`scriptBody.ts` 会拒绝把这种改动写回草稿。
  */
 export function toSandboxRequest(preview: RequestPreview): SandboxRequest {
   const request: SandboxRequest = {
     url: preview.url,
     method: preview.method,
     header: preview.headers.map(([key, value]) => ({ key, value })),
+    body: { mode: 'raw', raw: preview.body_text ?? '' },
   };
 
-  if (preview.body_text) request.body = { mode: 'raw', raw: preview.body_text };
   if (preview.auth_kind && preview.auth_kind !== 'none' && preview.auth_kind !== 'inherit') {
     request.auth = { type: preview.auth_kind };
   }
@@ -620,6 +663,25 @@ function readSandboxHeaders(raw: unknown): SandboxHeader[] | null {
   }
 
   return headers;
+}
+
+/**
+ * 从沙箱回传的 `execution.request` 里读出**执行后**的请求体。
+ *
+ * 与请求头同一条路：沙箱为每段脚本新建一个 `sdk.Request`，脚本的改动落在它身上，
+ * 只能由宿主读回（design D2）。只认 `raw` 形态——表单与二进制的字段形态不在沙箱的
+ * 建模范围内，回读到 `null` 时调用方保留上一份快照，也就不会被"改成了空正文"骗到。
+ */
+function readSandboxBody(raw: unknown): SandboxBody | null {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const body = (raw as { body?: unknown }).body;
+  if (!body || typeof body !== 'object') return null;
+
+  const entry = body as { mode?: unknown; raw?: unknown };
+  if (entry.mode !== 'raw') return null;
+
+  return { mode: 'raw', raw: typeof entry.raw === 'string' ? entry.raw : String(entry.raw ?? '') };
 }
 
 /**
@@ -914,6 +976,8 @@ function executeOne(
   visualizer: VisualizerResult | null;
   /** 执行后回读的请求头；未喂入请求或回读失败时为 `null`。 */
   headers: SandboxHeader[] | null;
+  /** 执行后回读的请求体；未喂入请求、形态不是 raw 或回读失败时为 `null`。 */
+  body: SandboxBody | null;
 }> {
   return new Promise((resolve) => {
     context.on(
@@ -1106,6 +1170,7 @@ function executeOne(
           // 只有在**这一段正常结束**时回读才有意义：被超时强杀的那一段没有
           // `execution.request`，读回 `null` 正好让调用方保留上一份快照
           headers: error ? null : readSandboxHeaders(result.request),
+          body: error ? null : readSandboxBody(result.request),
         });
       },
     );
@@ -1325,9 +1390,9 @@ export async function runScriptPhase(
   /**
    * 本次请求的形态，喂给 `pm.request`（spec: pm.request 的填充）。
    *
-   * 一个阶段里的各段脚本**共用同一份快照的请求头接力**：每段执行完就把 `pm.request` 的
-   * 请求头读回，作为下一段的输入，因此集合层加的头目录层与请求层都读得到；方法、URL、
-   * 正文与认证仍是快照（design D1 / D2）。
+   * 一个阶段里的各段脚本**共用同一份快照的请求头与请求体接力**：每段执行完就把
+   * `pm.request` 的这两样读回，作为下一段的输入，因此集合层改过的正文与头，目录层与
+   * 请求层都读得到；方法、URL 与认证仍是快照（design D1 / D2）。
    */
   request: SandboxRequest | null = null,
   /**
@@ -1398,6 +1463,8 @@ export async function runScriptPhase(
   let cancelled = false;
   // 请求头的接力状态（design D2）：每段结束后由回读结果更新，喂给下一段
   let currentHeaders: SandboxHeader[] | null = request ? request.header : null;
+  // 请求体的接力状态：与请求头同一条路——集合层改过的正文，目录层与请求层读得到
+  let currentBody: SandboxBody | null = request?.body ?? null;
 
   try {
     // 沙箱派发 execution.console，宿主转译后重发为 'console'
@@ -1464,7 +1531,13 @@ export async function runScriptPhase(
           listen,
           code,
           scopes,
-          request && currentHeaders ? { ...request, header: currentHeaders } : request,
+          request
+            ? {
+                ...request,
+                header: currentHeaders ?? request.header,
+                ...(currentBody ? { body: currentBody } : {}),
+              }
+            : request,
           requestCookies,
           secretNames,
           timeoutMs,
@@ -1499,6 +1572,7 @@ export async function runScriptPhase(
       // 接力请求头**只在前置阶段**：请求发出之后脚本再改「请求」没有任何东西可影响，
       // 若在后置阶段也接力，结果里那份 `request` 就会声称一份根本没发出去的头
       if (listen === 'prerequest' && outcome.headers) currentHeaders = outcome.headers;
+      if (listen === 'prerequest' && outcome.body) currentBody = outcome.body;
 
       if (outcome.error) {
         error = formatScriptError(listen, label, outcome.error, lineOffset);
@@ -1531,6 +1605,12 @@ export async function runScriptPhase(
     local: scopes.local,
     localSecretNames,
     visualizer,
-    request: request && currentHeaders ? { ...request, header: currentHeaders } : request,
+    request: request
+      ? {
+          ...request,
+          header: currentHeaders ?? request.header,
+          ...(currentBody ? { body: currentBody } : {}),
+        }
+      : request,
   };
 }

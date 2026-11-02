@@ -189,6 +189,24 @@ export function ResponsePanel({
     (scriptAssertions?.length ?? 0) > 0 ||
     Boolean(scriptError);
 
+  /**
+   * 「脚本」标签页上的结果点：有断言才点，全通过是绿点、任一失败是红点
+   * （spec: pm-script-runtime「断言的逐条回传」）。
+   *
+   * 脚本抛未捕获错误也按失败处理——那一段没跑完，它后面的断言根本没机会注册，
+   * 一片安静看起来像「没写测试」，与事实相反。跳过的断言不算失败。
+   */
+  const failedAssertions = (scriptAssertions ?? []).some(
+    (assertion) => !assertion.passed && !assertion.skipped,
+  );
+  const scriptDot: 'pass' | 'fail' | null = scriptError
+    ? 'fail'
+    : (scriptAssertions?.length ?? 0) > 0
+      ? failedAssertions
+        ? 'fail'
+        : 'pass'
+      : null;
+
   // 上一次发送有脚本输出、这一次没有时「脚本」标签会消失；把选中态收回 Body，
   // 否则面板会停在一个不存在的标签上，看上去像「什么都没渲染」
   useEffect(() => {
@@ -323,6 +341,15 @@ export function ResponsePanel({
                 onClick={() => setTab('script')}
               >
                 脚本
+                {scriptDot && (
+                  <span
+                    className={`tab-dot ${scriptDot === 'fail' ? 'fail' : ''}`}
+                    role="img"
+                    aria-label={scriptDot === 'fail' ? '存在失败的断言' : '断言全部通过'}
+                    title={scriptDot === 'fail' ? '存在失败的断言' : '断言全部通过'}
+                    data-testid={`script-tab-dot-${scriptDot}`}
+                  />
+                )}
               </button>
             )}
           </span>

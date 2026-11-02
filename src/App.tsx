@@ -75,6 +75,7 @@ import type {
   VisualizerResult,
 } from './lib/scriptRuntime';
 import { applyScriptHeaders, diffRequestHeaders, withSentBody, withSentHeaders } from './lib/scriptHeaders';
+import { applyScriptBody, diffRequestBody } from './lib/scriptBody';
 
 /**
  * 取消的稳定错误码（与 Rust 侧 `ErrorCode::Cancelled` 一致）。
@@ -1891,12 +1892,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       : null;
     let phases: { pre: ScriptSegment[]; test: ScriptSegment[] } | null = null;
     let requestUrl: string | null = null;
-    // 喂给沙箱的请求形态：一个阶段里的各段脚本共用这份快照，**请求头例外**——每段
-    // 执行完的改动都会接力给下一段（design D2）。
+    // 喂给沙箱的请求形态：一个阶段里的各段脚本共用这份快照，**请求头与请求体例外**——
+    // 每段执行完的改动都会接力给下一段（design D2）。
     const sandboxRequest = toSandboxRequest(resolved);
-    // 前置脚本结束时的请求形态：后置阶段据此看到脚本改过的头；没有前置脚本时就是快照
+    // 前置脚本结束时的请求形态：后置阶段据此看到脚本改过的头与正文；没有前置脚本时就是快照
     let scriptedRequest: SandboxRequest = sandboxRequest;
-    // 待发请求与「请求头是否被脚本改过」。未改动时完全走原路径（design D3）
+    // 待发请求与「请求头或请求体是否被脚本改过」。未改动时完全走原路径（design D3）
     let outgoing: { request: SavedRequest; changed: boolean } = {
       request: inlineDraft,
       changed: false,
@@ -1989,10 +1990,28 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         // 前置脚本对请求头的改动落到**真正发出去的那一份**上（spec: pm.request 的填充）。
         // 按差异合并：脚本没碰的头仍保持 `{{var}}` 原样，交给后端解析（design D3）。
         scriptedRequest = pre.request ?? sandboxRequest;
-        outgoing = applyScriptHeaders(
+        const withHeaders = applyScriptHeaders(
           inlineDraft,
           diffRequestHeaders(sandboxRequest.header, scriptedRequest.header),
         );
+
+        // 请求体同理（spec: pm.request 的填充）：只有 raw 形态能被改写；表单 / 二进制的
+        // 正文在沙箱里只是文本投影，改了也写不回去，这时明说一句，而不是静默吞掉。
+        const withBody = applyScriptBody(
+          withHeaders.request,
+          diffRequestBody(sandboxRequest.body, scriptedRequest.body),
+        );
+        outgoing = {
+          request: withBody.request,
+          changed: withHeaders.changed || withBody.changed,
+        };
+        if (withBody.ignored) {
+          scriptConsole.push({
+            level: 'warn',
+            phase: 'prerequest',
+            args: ['请求体不是 raw 形态（表单 / 二进制），脚本对请求体的改动未生效。'],
+          });
+        }
         scriptLocal = pre.local;
         scriptLocalSecretNames = pre.localSecretNames;
 
@@ -2005,7 +2024,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       }
 
       const payload = await client.sendRequest({
-        // 请求头被脚本改过时必须走内联路径：后端 `saved_id` 优先于 `inline`，带着
+        // 请求头或请求体被脚本改过时必须走内联路径：后端 `saved_id` 优先于 `inline`，带着
         // `saved_id` 发过去，合并结果会被整份忽略——这正是「改了没用」的老毛病（design D3）
         saved_id: outgoing.changed ? null : sendInput.saved_id,
         inline: outgoing.request,

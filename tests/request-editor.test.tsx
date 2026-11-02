@@ -1203,3 +1203,32 @@ describe('参数表与请求头表的占位符命中（任务 2.2）', () => {
     expect(document.querySelectorAll('.table-scroll .var')).toHaveLength(0);
   });
 });
+
+describe('Scripts 页签的已配置标记', () => {
+  it('请求没有脚本时页签不出现圆点', () => {
+    harness(draft());
+
+    expect(screen.queryByTestId('request-scripts-dot')).toBeNull();
+  });
+
+  it('任一相位写了脚本，Scripts 页签就带一个绿点', () => {
+    harness(draft({ test_script: "pm.test('状态码为 200', () => pm.expect(pm.response.code).to.eql(200));" }));
+
+    const dot = screen.getByTestId('request-scripts-dot');
+    expect(dot.getAttribute('aria-label')).toBe('已定义脚本');
+    // 页签本身仍以文字呈现，圆点只是附加状态
+    expect(screen.getByText('Scripts')).toBeTruthy();
+  });
+
+  it('前置脚本同样点亮页签', () => {
+    harness(draft({ pre_request_script: "pm.environment.set('token', 'x');" }));
+
+    expect(screen.getByTestId('request-scripts-dot')).toBeTruthy();
+  });
+
+  it('只有空白内容不算已配置', () => {
+    harness(draft({ pre_request_script: '  \n\t ' }));
+
+    expect(screen.queryByTestId('request-scripts-dot')).toBeNull();
+  });
+});

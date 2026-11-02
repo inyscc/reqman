@@ -21,7 +21,7 @@ describe('pm 补全声明与实现不漂移', () => {
       'url: RequestUrl',
       'method: string',
       'headers: HeaderList',
-      'body?: RequestBody',
+      'body: RequestBody',
       'auth?: { type: string }',
     ]) {
       expect(PM_DTS, `补全声明缺少 ${member}`).toContain(member);
@@ -45,6 +45,13 @@ describe('pm 补全声明与实现不漂移', () => {
     for (const member of ['add(header', 'upsert(header', 'remove(name', 'members:']) {
       expect(PM_DTS, `补全声明缺少 ${member}`).toContain(member);
     }
+  });
+
+  it('请求体可改写：raw 是可赋值的 string', () => {
+    // 脚本改写的正文会落到实际发出的请求上（spec: pm.request 的填充），因此 raw
+    // 必须声明成可写、且不是 `string | undefined`——否则编辑器里每次赋值都要先判空
+    expect(PM_DTS).toContain('interface RequestBody');
+    expect(PM_DTS).toMatch(/interface RequestBody \{[^}]*raw: string;/);
   });
 
   it('其余字段仍是快照：只声明读取面', () => {

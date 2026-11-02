@@ -1017,6 +1017,106 @@ describe('前端数据流骨架', () => {
     ]);
   }, 60_000);
 
+  it('前置脚本改写的请求体随请求发出，后置脚本读到的是实际发出的正文（spec: pm.request 的填充）', async () => {
+    const { client, sendRequest } = harness({
+      request: makeRequest({
+        method: 'POST',
+        body: { ...emptyBody(), kind: 'raw', raw: '{"stage":"old"}', raw_language: 'json' },
+        pre_request_script: `pm.request.body.raw = JSON.stringify({ stage: 'new' });`,
+        test_script:
+          "pm.test('后置读到改后的正文', function () { pm.expect(pm.request.body.raw).to.eql('{\"stage\":\"new\"}'); });",
+      }),
+      // 喂进沙箱的是**脚本执行前**的解析结果
+      previewResult: preview({ method: 'POST', body_text: '{"stage":"old"}' }),
+      // 后端回报实际发出的正文
+      sendResult: response({ request_body: '{"stage":"new"}' }),
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1), { timeout: 20_000 });
+
+    const input = sendRequest.mock.calls[0][0] as {
+      saved_id: string | null;
+      inline: SavedRequest;
+    };
+    // 正文被改过 → 必须走内联路径，否则后端会拿 saved_id 的那一份覆盖掉
+    expect(input.saved_id).toBeNull();
+    expect(input.inline.body.kind).toBe('raw');
+    expect(input.inline.body.raw).toBe('{"stage":"new"}');
+
+    // 后置脚本读到的是实际发出的正文，断言通过
+    fireEvent.click(await screen.findByText('脚本'));
+    await screen.findByTestId('script-report');
+    expect(screen.getAllByTestId('assertion-pass')).toHaveLength(1);
+  }, 60_000);
+
+  it('脚本没碰请求体时仍按 saved_id 发送（不回归）', async () => {
+    const { client, sendRequest } = harness({
+      request: makeRequest({
+        method: 'POST',
+        body: { ...emptyBody(), kind: 'raw', raw: '{"a":1}', raw_language: 'json' },
+        // 脚本跑了，但正文一个字都没改
+        pre_request_script: "console.log('只读脚本');",
+      }),
+      previewResult: preview({ method: 'POST', body_text: '{"a":1}' }),
+      variables: [],
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1), { timeout: 20_000 });
+
+    const input = sendRequest.mock.calls[0][0] as {
+      saved_id: string | null;
+      inline: SavedRequest;
+    };
+    // 跑过脚本不等于改过正文：这个区分决定了发送路径，也决定了脚本没碰的内容
+    // 还能不能走后端的解析与掩码
+    expect(input.saved_id).toBe('r1');
+    expect(input.inline.body.raw).toBe('{"a":1}');
+  }, 60_000);
+
+  it('表单正文不接受脚本改写：改动被拒并明说（spec: pm.request 的填充）', async () => {
+    const { client, sendRequest } = harness({
+      request: makeRequest({
+        method: 'POST',
+        body: {
+          ...emptyBody(),
+          kind: 'url_encoded',
+          urlencoded: [{ key: 'a', value: '1', enabled: true, description: null }],
+        },
+        // 表单在沙箱里只是文本投影，改它写不回去
+        pre_request_script: `pm.request.body.raw = 'a=2';`,
+      }),
+      previewResult: preview({ method: 'POST', body_text: 'a\t1' }),
+      variables: [],
+    });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1), { timeout: 20_000 });
+
+    const input = sendRequest.mock.calls[0][0] as {
+      saved_id: string | null;
+      inline: SavedRequest;
+    };
+    // 正文没变 → 没有理由改走内联路径，表单的行也没有被压成一段文本
+    expect(input.saved_id).toBe('r1');
+    expect(input.inline.body.kind).toBe('url_encoded');
+    expect(input.inline.body.urlencoded).toEqual([
+      { key: 'a', value: '1', enabled: true, description: null },
+    ]);
+
+    // 不静默：脚本输出里有一句「未生效」，用户不会以为改成功了
+    fireEvent.click(await screen.findByText('脚本'));
+    const consoleText = (await screen.findByTestId('script-console')).textContent ?? '';
+    expect(consoleText).toContain('未生效');
+  }, 60_000);
+
   it('面包屑并入会话标签行，身份在这一行而请求级操作不在（rework-visual-system-and-app-chrome）', async () => {
     const { client } = harness();
     render(<App client={client} />);
