@@ -30,6 +30,13 @@ export interface EntityScriptPanelProps {
   variablesPane?: ReactNode;
   /** 该集合已定义的变量条数；大于 0 时变量页签带绿点（Postman 的「有内容」提示）。 */
   variablesCount?: number;
+  /**
+   * 打开运行器（spec: ui-layout「集合与目录的运行器」）。
+   *
+   * 放在面板头右上角：运行的是「这个集合 / 这个目录下的请求」，入口就该长在它们的名字旁边，
+   * 而不是混进单条请求的发送按钮里。
+   */
+  onRun?: () => void;
 }
 
 /**
@@ -52,6 +59,7 @@ export function EntityScriptPanel({
   onTab,
   variablesPane,
   variablesCount = 0,
+  onRun,
 }: EntityScriptPanelProps) {
   const label = kind === 'collection' ? '集合' : '文件夹';
   // 文件夹没有变量作用域，给出一个空页签只会制造无内容的界面（spec: 集合面板的变量与脚本站签）
@@ -78,6 +86,17 @@ export function EntityScriptPanel({
           onBlur={onCommitName}
         />
         <span className="grow" />
+        {onRun && (
+          <button
+            type="button"
+            className="entity-run"
+            title={`运行${label}下的全部请求`}
+            data-testid="entity-run"
+            onClick={onRun}
+          >
+            运行
+          </button>
+        )}
       </div>
       {hasTabs && (
         // Postman 式的页签行：独立于名称行、左对齐的纯文字页签，激活项是浅灰圆角块

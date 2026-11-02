@@ -7118,3 +7118,69 @@ describe('请求编辑器的默认标签页（trim-response-header-and-default-b
     await waitFor(() => expect(activeInnerTab()).toBe('Params'));
   });
 });
+
+/**
+ * 集合 / 目录的运行器（spec: ui-layout「集合与目录的运行器」）。
+ *
+ * 这里验的是接线：入口在实体面板头、名单来自树、执行走的是与发送同一条流水线。
+ * 顺序、间隔与结果折算是纯逻辑，由 tests/request-runner.test.ts 与
+ * tests/runner-panel.test.tsx 各自覆盖。
+ */
+describe('集合与目录的运行器（collection-runner）', () => {
+  it('面板头右上角的「运行」打开运行器，名单默认全选为子树里的全部请求', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+
+    fireEvent.click(await tree().findByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.click(screen.getByTestId('entity-run'));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain('运行「我的集合」');
+    // 两个请求都在名单里，且默认全选
+    expect(within(dialog).getByText('我的请求')).toBeTruthy();
+    expect(within(dialog).getByText('另一个请求')).toBeTruthy();
+    expect(within(dialog).getByTestId('runner-selection').textContent).toContain('已选 2 / 2');
+  });
+
+  it('点运行后逐条发出，并按断言结果给出通过 / 失败', async () => {
+    const { client, sendRequest } = harness({
+      extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }),
+    });
+    render(<App client={client} />);
+
+    fireEvent.click(await tree().findByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.click(screen.getByTestId('entity-run'));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByTestId('runner-start'));
+
+    // 两条都发出去（运行器直接调流水线，不经过标签的发送按钮）
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(within(dialog).getAllByTestId('runner-row-meta')).toHaveLength(2),
+    );
+
+    for (const row of within(dialog).getAllByTestId('runner-row')) {
+      expect(row.getAttribute('data-status')).toBe('pass');
+    }
+  });
+
+  it('只勾一条时另一条不发', async () => {
+    const { client, sendRequest } = harness({
+      extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }),
+    });
+    render(<App client={client} />);
+
+    fireEvent.click(await tree().findByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.click(screen.getByTestId('entity-run'));
+    const dialog = await screen.findByRole('dialog');
+
+    fireEvent.click(within(dialog).getByLabelText('选择 另一个请求'));
+    fireEvent.click(within(dialog).getByTestId('runner-start'));
+
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1));
+    expect(sendRequest.mock.calls[0][0]).toMatchObject({ saved_id: 'r1' });
+  });
+});

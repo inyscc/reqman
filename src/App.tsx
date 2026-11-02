@@ -20,6 +20,7 @@ import { ProxyConfigRows } from './components/ProxyConfigRows';
 import type { ProxyConfig, ProxyDecisionView } from './lib/types';
 import { RequestBand, RequestEditor, type Tab } from './components/RequestEditor';
 import { ResizeStrips, isInteractiveSessionBarTarget } from './components/ResizeStrips';
+import { RunnerPanel } from './components/RunnerPanel';
 import { ResponsePanel } from './components/ResponsePanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { SplitHandle } from './components/SplitHandle';
@@ -34,7 +35,6 @@ import {
 import { commands as defaultCommands, describeError, type Commands } from './lib/commands';
 import { createEditingRegistry, SURFACE_PRIORITY } from './lib/editing';
 import { applyTreeMove, type TreeMove } from './lib/treeMoves';
-import { folderSegments, loadRequestFolderChain } from './lib/folderChain';
 import { readSplitRatio, SPLIT_DEFAULT, writeSplitRatio } from './lib/layout';
 import {
   DEFAULT_EDITOR_APPEARANCE,
@@ -59,31 +59,18 @@ import {
 } from './lib/responsePresentation';
 import { readTabs, writeTabs } from './lib/sessionTabs';
 import {
-  SCRIPT_TIMEOUT_MS,
   allowScriptExecution,
   isScriptExecutionAllowed,
   renderVisualizer,
-  runScriptPhase,
-  toSandboxRequest,
 } from './lib/scriptRuntime';
 import type {
   ConsoleEntry,
   PhaseCancellation,
-  SandboxRequest,
-  ScriptSegment,
   TestAssertion,
   VisualizerResult,
 } from './lib/scriptRuntime';
-import { applyScriptHeaders, diffRequestHeaders, withSentBody, withSentHeaders } from './lib/scriptHeaders';
-import { applyScriptBody, diffRequestBody } from './lib/scriptBody';
-
-/**
- * 取消的稳定错误码（与 Rust 侧 `ErrorCode::Cancelled` 一致）。
- *
- * 取消**不是失败**：它要单独处理，不能与超时、离线等失败走同一条呈现——那条路会清空
- * 响应区并弹出红色错误条（spec: http-engine「请求取消」）。
- */
-const CANCELLED_CODE = 'cancelled';
+import { executeRequest } from './lib/requestExecution';
+import { collectRunRequests, type RunRequest } from './lib/requestRunner';
 
 /**
  * 变量未能解析，请求没有发出去（spec: variable-engine「未解析变量提示」）。
@@ -533,6 +520,21 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [sidebarTab, setSidebarTab] = useState<'collections' | 'environments'>('collections');
   /** 低频面板的单例模态（design D5）：非空时打开对应弹窗，同一时间至多一个。 */
   const [modal, setModal] = useState<ModalKind | null>(null);
+  /**
+   * 集合 / 目录运行器的目标（spec: ui-layout「集合与目录的运行器」）。
+   *
+   * 打开时就把「跑哪些」算好并冻结：运行期间树被改动（拖动、删除）不该让这一轮跑到
+   * 半截换了一份名单——名单是**按下运行那一刻**的事实。
+   */
+  const [runner, setRunner] = useState<{
+    title: string;
+    collectionId: string;
+    items: RunRequest[];
+    /** 集合的脚本还没获准执行时给出它的名字，运行前先让人选一次。 */
+    gate: { name: string } | null;
+  } | null>(null);
+  /** 运行器当前那一条的取消出口：停止按钮据此撤掉在飞的请求与脚本。 */
+  const runnerAttemptRef = useRef<SendAttempt | null>(null);
   /**
    * 复制被未保存改动挡下时要点名的对象。它只是那个模态的**数据**——开关仍在 `modal`
    * 里（`'copy-blocked'`），因此不存在两个遮罩并存的可能（design D9）。
@@ -1858,248 +1860,125 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     // 只清掉这一条自己的门禁；并发时别的发送的门禁不受影响
     clearScriptGate(key);
 
-    // 解析一次请求，供脚本构造 `pm.request` 与前置阶段的 Cookie 目标使用。
-    //
-    // 用**揭示模式**：脚本要读到真实取值来组装请求（掩码那一份是给界面浮层看的）。
-    //
-    // 未解析变量的拦截**不在这里**——它在后端的建连之前完成（spec: 未解析变量提示）。
-    // 拦在这一步会让「前置脚本写入变量 + 请求体引用它」这条 Postman 里的常规用法永远
-    // 发不出去：脚本是唯一会创建该变量的东西，却因为该变量不存在而跑不到。
-    // 待发的那一份草稿只算一次：前置脚本改过请求头时要在这上面合并（design D3）
-    const inlineDraft = cleanForSend(draft);
-    const sendInput = {
-      saved_id: dirty ? null : draft.id,
-      inline: inlineDraft,
-      environment_id: environmentId,
-    };
-    let resolved: RequestPreview;
-    try {
-      resolved = await client.variablesPreview(sendInput, true);
-    } catch (caught) {
-      setSendError(key, describeError(caught).message);
-      return;
-    }
-
     const attempt = openAttempt();
     // 只登记这一条会话；`busy` 不再由发送置位（它留给保存与改名）
     setSending((previous) => ({ ...previous, [key]: attempt }));
     patchRequestTab(key, (item) => ({ ...item, scriptReport: null }));
 
-    // 脚本层级：集合 → 目录链（递归祖先，由外到内）→ 请求（任务 2.4）。集合与目录的脚本
-    // 挂在实体上，树形接口不给，因此单独取回（任务 2.5）。
-    const target = workspaceId
-      ? { workspaceId, collectionId: draft.collection_id, environmentId }
-      : null;
-    let phases: { pre: ScriptSegment[]; test: ScriptSegment[] } | null = null;
-    let requestUrl: string | null = null;
-    // 喂给沙箱的请求形态：一个阶段里的各段脚本共用这份快照，**请求头与请求体例外**——
-    // 每段执行完的改动都会接力给下一段（design D2）。
-    const sandboxRequest = toSandboxRequest(resolved);
-    // 前置脚本结束时的请求形态：后置阶段据此看到脚本改过的头与正文；没有前置脚本时就是快照
-    let scriptedRequest: SandboxRequest = sandboxRequest;
-    // 待发请求与「请求头或请求体是否被脚本改过」。未改动时完全走原路径（design D3）
-    let outgoing: { request: SavedRequest; changed: boolean } = {
-      request: inlineDraft,
-      changed: false,
-    };
-    // 前置脚本写入的**本地**作用域（`pm.variables`）：不落库，但要交给本次请求的解析，
-    // 否则「脚本里算一个值、请求里引用它」这条最常用的写法就只在别的三个作用域里成立
-    let scriptLocal: Record<string, string> = {};
-    let scriptLocalSecretNames: string[] = [];
-    let scriptError: string | null = null;
-    let scriptVisualizer: VisualizerResult | null = null;
-    const scriptConsole: ConsoleEntry[] = [];
-    const scriptAssertions: TestAssertion[] = [];
+    // 一次执行的全部实情（解析、脚本、合并、发送、后置）都在这里，界面只负责留痕：
+    // 响应到达即写回标签（后置脚本可能还要跑一会儿），收尾时补上脚本报告与错误
+    const outcome = await executeRequest(
+      { client, workspaceId, environmentId },
+      {
+        request: draft,
+        dirty,
+        skipScripts,
+        attempt,
+        onResponse: (payload) =>
+          patchRequestTab(key, (item) => ({ ...item, response: payload })),
+      },
+    );
 
-    /**
-     * 把本次发送已经产生的脚本输出写回标签（三条出口共用：正常、失败、取消）。
-     */
-    const writeScriptReport = () => {
-      patchRequestTab(key, (item) => ({
-        ...item,
-        scriptReport: {
-          console: scriptConsole,
-          assertions: scriptAssertions,
-          error: scriptError,
-          visualizer: scriptVisualizer,
-        },
-      }));
-    };
-
-    try {
-      if (target && !skipScripts) {
-        const collection = await client.collectionGet(draft.collection_id);
-
-        // 门禁：脚本可能来自导入的集合，执行前必须确认（任务 9.3 / design D6）。
-        // 门禁按标签存——并发时两条各自的门禁互不覆盖。
-        if (!(await isScriptExecutionAllowed(client, draft.collection_id))) {
-          setScriptGates((current) => ({
-            ...current,
-            [key]: { collectionId: draft.collection_id, name: collection.name },
-          }));
-          finishSend(key);
-          return;
-        }
-
-        // 目录层取**请求当前的归属**并上溯成整条链，而不是用草稿里那份可能陈旧的
-        // `folder_id`：拖拽改变归属后草稿不会跟着变，旧代码因此连直接父级都取不到
-        // （design D1）。链在这里算一次，后置阶段复用同一份 `phases`——请求在飞行途中
-        // 可能被拖动，重算会让前置与后置跑在不同的链上（design D4）。
-        const chain = await loadRequestFolderChain(client, draft.id);
-        if (chain.error) {
-          // 链异常（成环或超深）说明本次编排少了若干层。它进 console 而不是 error：
-          // error 那个位置归脚本自己（首个未捕获错误），会被 pre.error 覆盖掉，
-          // 而这个异常与某一段脚本无关，埋掉就再也看不见了。
-          scriptConsole.push({ level: 'error', args: [chain.error], phase: 'prerequest' });
-        }
-
-        phases = {
-          pre: [
-            { label: '集合层', code: collection.pre_request_script ?? null },
-            ...folderSegments(chain.folders, (folder) => folder.pre_request_script),
-            { label: '请求层', code: draft.pre_request_script ?? null },
-          ],
-          test: [
-            { label: '集合层', code: collection.test_script ?? null },
-            ...folderSegments(chain.folders, (folder) => folder.test_script),
-            { label: '请求层', code: draft.test_script ?? null },
-          ],
-        };
-
-        // `pm.cookies` 在前置阶段以**脚本执行前解析出的目标**为准（spec: pm.cookies 的
-        // 当前请求目标）。这次解析走揭示模式，因此不再有「URL 里引用 secret 会以掩码
-        // 形态出现」那条旧限制。
-        requestUrl = resolved.url || null;
-
-        const pre = await runScriptPhase(
-          client,
-          target,
-          'prerequest',
-          phases.pre,
-          null,
-          requestUrl,
-          SCRIPT_TIMEOUT_MS,
-          attempt,
-          sandboxRequest,
-        );
-
-        scriptError = pre.error;
-        scriptConsole.push(...pre.console);
-        scriptAssertions.push(...pre.assertions);
-
-        // 前置脚本对请求头的改动落到**真正发出去的那一份**上（spec: pm.request 的填充）。
-        // 按差异合并：脚本没碰的头仍保持 `{{var}}` 原样，交给后端解析（design D3）。
-        scriptedRequest = pre.request ?? sandboxRequest;
-        const withHeaders = applyScriptHeaders(
-          inlineDraft,
-          diffRequestHeaders(sandboxRequest.header, scriptedRequest.header),
-        );
-
-        // 请求体同理（spec: pm.request 的填充）：只有 raw 形态能被改写；表单 / 二进制的
-        // 正文在沙箱里只是文本投影，改了也写不回去，这时明说一句，而不是静默吞掉。
-        const withBody = applyScriptBody(
-          withHeaders.request,
-          diffRequestBody(sandboxRequest.body, scriptedRequest.body),
-        );
-        outgoing = {
-          request: withBody.request,
-          changed: withHeaders.changed || withBody.changed,
-        };
-        if (withBody.ignored) {
-          scriptConsole.push({
-            level: 'warn',
-            phase: 'prerequest',
-            args: ['请求体不是 raw 形态（表单 / 二进制），脚本对请求体的改动未生效。'],
-          });
-        }
-        scriptLocal = pre.local;
-        scriptLocalSecretNames = pre.localSecretNames;
-
-        // 取消发生在脚本段：不再往后走，已经产生的输出照常写回
-        if (attempt.isCancelled()) {
-          writeScriptReport();
-          finishSend(key);
-          return;
-        }
-      }
-
-      const payload = await client.sendRequest({
-        // 请求头或请求体被脚本改过时必须走内联路径：后端 `saved_id` 优先于 `inline`，带着
-        // `saved_id` 发过去，合并结果会被整份忽略——这正是「改了没用」的老毛病（design D3）
-        saved_id: outgoing.changed ? null : sendInput.saved_id,
-        inline: outgoing.request,
-        environment_id: environmentId,
-        // 前置脚本经 `pm.variables.set` 写入的本地作用域：只在本次执行期间有效，
-        // 因此不能指望数据库里查得到，必须随这次发送一起交给解析（本地作用域优先级最高）
-        local: scriptLocal,
-        local_secret_names: scriptLocalSecretNames,
-        // 会话标识：主请求与脚本内的请求归同一组，取消时一并撤销
-        attempt_id: attempt.attemptId,
-      });
-      patchRequestTab(key, (item) => ({ ...item, response: payload }));
-
-      if (target && !skipScripts && phases) {
-        const post = await runScriptPhase(
-          client,
-          target,
-          'test',
-          phases.test,
-          payload,
-          // 后置阶段的 `pm.cookies` 以**实际发出的请求目标**为准（spec: pm.cookies 的
-          // 当前请求目标）。它取自后端回带的发送目标，而不是重定向之后的 `final_url`：
-          // 前置脚本改写过目标变量时，两者并不是一回事。
-          payload.request_url || requestUrl,
-          SCRIPT_TIMEOUT_MS,
-          attempt,
-          // 后置脚本读到的是**实际发出的那一份**：认证落成的头、正文的 `Content-Type`
-          // 只有后端知道；正文同理，喂进沙箱的快照是脚本执行前的解析结果，前置脚本刚写
-          // 入的变量在其中还是旧值（spec: pm.request 的填充 / design D4）
-          withSentBody(
-            withSentHeaders(scriptedRequest, payload.request_headers),
-            payload.request_body,
-          ),
-          // 本地作用域在一个请求的一次执行里连续：前置 `pm.variables.set` 的值后置读得到
-          scriptLocal,
-        );
-
-        scriptError = scriptError ?? post.error;
-        scriptConsole.push(...post.console);
-        scriptAssertions.push(...post.assertions);
-        scriptVisualizer = post.visualizer;
-      }
-    } catch (caught) {
-      const described = describeError(caught);
-
-      // 取消不是失败（spec: http-engine「请求取消」）：不弹红条、**不动响应区**。响应区里
-      // 谁在里面就留着——可能是上一次的，也可能是本次已经到达的那一份（取消发生在后置
-      // 脚本阶段时，响应早就写回了）。
-      //
-      // 未解析变量同属「请求没有出去」：响应区不该被清空，但错误要报出来
-      // （spec: variable-engine「未解析变量提示」）。
-      if (described.code !== CANCELLED_CODE) {
-        if (described.code !== UNRESOLVED_CODE) {
-          patchRequestTab(key, (item) => ({ ...item, response: null }));
-        }
-        // 错误按标签归属：并发时不会串到别的请求的界面上。
-        // 决定一并带上——失败时响应区要有它（spec: ui-layout「响应区的代理决定」）。
-        setSendError(key, described.message, described.proxy_decision);
-      }
-
-      // 请求本身失败（离线、DNS、证书…）不该连带丢掉前置脚本已经产生的输出与断言：
-      // console 的呈现要求没有「仅当请求成功」这一限定条件
-      writeScriptReport();
+    // 门禁未获准：本次没发请求，提示挂在这条标签上（spec: 脚本来源的可执行性门禁）
+    if (outcome.gated) {
+      setScriptGates((current) => ({ ...current, [key]: outcome.gated! }));
       finishSend(key);
       return;
     }
 
-    writeScriptReport();
+    if (outcome.error) {
+      const described = outcome.error;
+
+      // 取消不是失败（spec: http-engine「请求取消」）——那一路 `error` 为空，走不到这里。
+      // 未解析变量同属「请求没有出去」：响应区不该被清空，但错误要报出来
+      // （spec: variable-engine「未解析变量提示」）。
+      if (described.code !== UNRESOLVED_CODE) {
+        patchRequestTab(key, (item) => ({ ...item, response: null }));
+      }
+      // 错误按标签归属：并发时不会串到别的请求的界面上。决定一并带上——失败时响应区
+      // 要有它（spec: ui-layout「响应区的代理决定」）。
+      setSendError(key, described.message, described.proxy_decision);
+    }
+
+    // 请求本身失败（离线、DNS、证书…）或取消，都不该连带丢掉前置脚本已经产生的输出与
+    // 断言：console 的呈现要求没有「仅当请求成功」这一限定条件
+    patchRequestTab(key, (item) => ({
+      ...item,
+      scriptReport: {
+        console: outcome.console,
+        assertions: outcome.assertions,
+        error: outcome.scriptError,
+        visualizer: outcome.visualizer,
+      },
+    }));
+
     finishSend(key);
+
     // 脚本出错不阻断：请求已发出、响应已可查看，脚本的错误另行呈现
-    // （spec: 脚本超时与错误处置）。
-    if (scriptError) setSendError(key, scriptError);
+    // （spec: 脚本超时与错误处置）。失败与取消那两条不覆盖已经报出的错。
+    if (outcome.scriptError && !outcome.error && !outcome.cancelled) {
+      setSendError(key, outcome.scriptError);
+    }
   };
 
   const send = () => performSend(false, activeKeyRef.current);
+
+  /**
+   * 打开集合 / 目录的运行器（spec: ui-layout「集合与目录的运行器」）。
+   *
+   * 名单在打开时就拍平并冻结：运行期间树被拖动或删改，这一轮仍按按下运行那一刻的名单走。
+   * 门禁与发送路径用同一个口径（spec: 脚本来源的可执行性门禁）——没获准就先问一次，
+   * 而不是跑到第一条才发现。
+   */
+  const openRunner = async (entity: EntitySelection) => {
+    const name = findEntityName(treesRef.current, entity) ?? '未命名';
+    const items = collectRunRequests(treesRef.current, { kind: entity.kind, id: entity.id });
+    const collectionName =
+      treesRef.current.find((tree) => tree.collection.id === entity.collectionId)?.collection.name ??
+      name;
+    const allowed = await isScriptExecutionAllowed(client, entity.collectionId);
+
+    setRunner({
+      title: name,
+      collectionId: entity.collectionId,
+      items,
+      gate: allowed ? null : { name: collectionName },
+    });
+  };
+
+  /** 运行器中跑一条：与「发送」共用同一条流水线，但结果只回给运行器，不落到标签上。 */
+  const executeRunRequest = async (
+    request: SavedRequest,
+    options: { skipScripts: boolean },
+  ) => {
+    const attempt = openAttempt();
+    runnerAttemptRef.current = attempt;
+    try {
+      return await executeRequest(
+        { client, workspaceId, environmentId },
+        { request, dirty: false, skipScripts: options.skipScripts, attempt },
+      );
+    } finally {
+      if (runnerAttemptRef.current === attempt) runnerAttemptRef.current = null;
+    }
+  };
+
+  /** 停止运行器里正在跑的那一条：脚本段立刻收手，网络段由后端撤销。 */
+  const cancelRunRequest = () => {
+    const attempt = runnerAttemptRef.current;
+    if (!attempt) return;
+
+    attempt.cancel();
+    void client.cancelSend(attempt.attemptId).catch(() => {
+      // 有意静默：撤销失败时那一条仍会以自己的结果收场，只是晚一点
+    });
+  };
+
+  /** 关掉运行器：还在跑就先停，别让执行留在关掉的界面背后继续跑。 */
+  const closeRunner = () => {
+    cancelRunRequest();
+    setRunner(null);
+  };
 
   const newCollection = async () => {
     if (!workspaceId) return;
@@ -3065,6 +2944,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 }))
               }
               onCommitName={() => void commitEntityName()}
+              onRun={() =>
+                void openRunner({
+                  kind: activeEntityTab.entityKind,
+                  id: activeEntityTab.entityId,
+                  collectionId: activeEntityTab.collectionId,
+                })
+              }
               saveStatus={
                 entitySave?.key === activeEntityTab.id
                   ? { status: entitySave.status, message: entitySave.message }
@@ -3158,6 +3044,23 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             ))}
           </ul>
           <p className="muted">先保存（Ctrl+S）再复制。</p>
+        </Modal>
+      )}
+
+      {runner && (
+        <Modal
+          title={`运行「${runner.title}」`}
+          onClose={closeRunner}
+          className="modal-runner"
+        >
+          <RunnerPanel
+            items={runner.items}
+            gate={runner.gate}
+            onAllow={() => allowScriptExecution(client, runner.collectionId)}
+            execute={executeRunRequest}
+            cancelCurrent={cancelRunRequest}
+            onClose={closeRunner}
+          />
         </Modal>
       )}
 
