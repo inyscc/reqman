@@ -1,7 +1,14 @@
 import type { ConsoleEntry, TestAssertion } from '../lib/scriptRuntime';
 
 export interface ScriptReportProps {
-  console: ConsoleEntry[];
+  /**
+   * console 输出。**只有运行器的请求明细会传**：响应区的「脚本」页签不再承载输出——
+   * 它只有全局 Console 一个去处，同一条输出不该在两个面板里各抄一遍。
+   *
+   * 运行器是模态，开着时看不到底部抽屉，所以明细里仍随断言列一份，否则跑集合时
+   * 某一条为什么失败会无从查起。
+   */
+  console?: ConsoleEntry[];
   assertions: TestAssertion[];
   error: string | null;
 }
@@ -12,7 +19,7 @@ export interface ScriptReportProps {
  * 这里只做呈现，不做判断：断言的成功失败由沙箱给出，输出是否含明文由运行时的脱敏
  * 处理（取值匹配，挡得住原样打印、挡不住编码变换，详见 design D15）。
  */
-export function ScriptReport({ console: entries, assertions, error }: ScriptReportProps) {
+export function ScriptReport({ console: entries = [], assertions, error }: ScriptReportProps) {
   return (
     <div className="stack" data-testid="script-report">
       {error && (
@@ -52,15 +59,17 @@ export function ScriptReport({ console: entries, assertions, error }: ScriptRepo
       )}
 
       {entries.length > 0 && (
-        // 输出的换行与缩进按原文呈现（见 App.css 的 .script-console）：`console.log`
-        // 打印的多行文本、以及对象 JSON 的缩进，折叠成一行就没法读了。
+        // 输出的换行与缩进按原文呈现（见 App.css 的 .script-console）：脚本自己写的多行文本
+        // 折叠成一行就没法读了。对象是紧凑 JSON 一行——要格式化的脚本自己 JSON.stringify。
+        // 文本取自 `values[].text`——结构与文本在收集时一起算好，这里只挑文本那一半。
         <ul className="script-console" data-testid="script-console">
           {entries.map((entry, index) => (
             <li key={index} data-level={entry.level} data-phase={entry.phase}>
               <span className="mono muted">
-                [{entry.phase === 'prerequest' ? '前置' : '后置'} · {entry.level}]
+                [{entry.phase === 'prerequest' ? '前置' : '后置'}
+                {entry.segment ? ` · ${entry.segment}` : ''} · {entry.level}]
               </span>{' '}
-              {entry.args.join(' ')}
+              {entry.values.map((value) => value.text).join(' ')}
             </li>
           ))}
         </ul>

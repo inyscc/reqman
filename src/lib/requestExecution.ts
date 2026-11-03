@@ -33,6 +33,7 @@ import type {
   TestAssertion,
   VisualizerResult,
 } from './scriptRuntime';
+import type { ConsoleResult, NetworkStart, RequestTrace } from './consoleLog';
 import type { AppError, RequestPreview, ResponsePayload, SavedRequest } from './types';
 
 /** 流水线要的宿主能力：后端命令 + 当前工作区/环境的上下文。 */
@@ -58,6 +59,13 @@ export interface RequestExecutionInput {
   attempt: PhaseCancellation;
   /** 响应一到达就通知调用方：后置脚本可能还要跑一会儿，界面不必等它。 */
   onResponse?: (payload: ResponsePayload) => void;
+  /**
+   * 请求即将发出（目标 URL 已解析）：调用方据此在全局 Console 里占位。
+   *
+   * 放在这里而不是由调用方自己造，是因为「解析后的 URL」只有本函数拿得到；占位必须在
+   * 网络往返**之前**完成，时间线的顺序才等于发起顺序（design D2）。
+   */
+  onBegin?: (pending: NetworkStart) => void;
 }
 
 /**
@@ -80,10 +88,23 @@ export interface RequestExecutionOutcome {
   gated: { collectionId: string; name: string } | null;
   /** 本次执行被取消（前端脚本段或后端网络段）。 */
   cancelled: boolean;
+  /**
+   * 交给全局 Console 的一份事实。
+   *
+   * 所有出口都带它——包括失败、取消与未发出：那些恰恰是最需要回看的情形。
+   */
+  trace: RequestTrace;
 }
 
 /** 取消的判定只认这一条：后端以 `cancelled` 收场时前端不把它当失败。 */
 const CANCELLED_CODE = 'cancelled';
+
+/**
+ * 未解析变量：请求根本没出去，所以时间线上算「未发出」而不是失败。
+ *
+ * 与 `App.tsx` 里那条提示共用同一个码——分类由后端给出，不是这里自造的。
+ */
+export const UNRESOLVED_CODE = 'unresolved_variables';
 
 export async function executeRequest(
   deps: RequestExecutionDeps,
@@ -93,25 +114,87 @@ export async function executeRequest(
   const { request, attempt } = input;
   const skipScripts = Boolean(input.skipScripts);
 
+  // 发起时刻：时间线按它排序，而不是等结果回来再插一条（design D2）
+  const startedAt = Date.now();
   const console_: ConsoleEntry[] = [];
   const assertions: TestAssertion[] = [];
   let response: ResponsePayload | null = null;
   let scriptError: string | null = null;
   let visualizer: VisualizerResult | null = null;
+  /** 解析后的请求目标；解析都没走到时为 null。 */
+  let resolvedUrl: string | null = null;
+  let phaseLabels: { prerequest: string[]; test: string[] } = { prerequest: [], test: [] };
 
   /** 统一出口：把散在函数体里的临时状态收敛成结果对象。 */
   const finish = (
     outcome: Partial<RequestExecutionOutcome> & Pick<RequestExecutionOutcome, 'cancelled'>,
-  ): RequestExecutionOutcome => ({
-    response,
-    error: null,
-    console: console_,
-    assertions,
-    scriptError,
-    visualizer,
-    gated: null,
-    ...outcome,
-  });
+  ): RequestExecutionOutcome => {
+    const merged = {
+      response,
+      error: null,
+      console: console_,
+      assertions,
+      scriptError,
+      visualizer,
+      gated: null,
+      ...outcome,
+    } as RequestExecutionOutcome;
+
+    return {
+      ...merged,
+      trace: {
+        sendId: attempt.attemptId,
+        requestId: request.id,
+        method: request.method,
+        // 优先用后端回带的「实际发送目标」：前置脚本可能改写过去向
+        url: response?.request_url || resolvedUrl || request.url,
+        startedAt,
+        requestHeaders: sentHeaders(),
+        result: traceResult(merged),
+        responseHeaders: response?.headers ?? null,
+        body: response?.body_text ?? null,
+        // 后端已经因为体积上限截断时，条目的展开内容要如实标出来
+        bodyTruncated: Boolean(response?.truncated),
+        outputs: console_,
+        segments: phaseLabels,
+      },
+    };
+  };
+
+  /**
+   * 本次**实际带出去的**请求头。
+   *
+   * 成功时以后端回带的为准（认证头、正文的 Content-Type、Cookie 只有它知道）；失败时没有
+   * 这份东西，退回解析快照——它至少是「脚本改完之后、认证之前」的那一份，比空白有用。
+   */
+  const sentHeaders = (): [string, string][] => {
+    if (response?.request_headers) return response.request_headers;
+    return sandboxRequest.header
+      .filter((header) => !header.disabled)
+      .map((header): [string, string] => [header.key, header.value]);
+  };
+
+  const traceResult = (merged: RequestExecutionOutcome): ConsoleResult => {
+    if (merged.cancelled) return { kind: 'cancelled' };
+    if (merged.gated) {
+      return { kind: 'not-sent', reason: `脚本执行未获准：${merged.gated.name}` };
+    }
+    if (merged.error) {
+      // 未解析变量同样属于「没有出去」，与失败分开记：失败是对方/网络的问题
+      return merged.error.code === UNRESOLVED_CODE
+        ? { kind: 'not-sent', reason: merged.error.message }
+        : { kind: 'failed', message: merged.error.message };
+    }
+    if (response) {
+      return {
+        kind: 'response',
+        status: response.status,
+        statusText: response.status_text,
+        elapsedMs: response.elapsed_ms,
+      };
+    }
+    return { kind: 'not-sent', reason: '请求未发出' };
+  };
 
   // 待发的那一份草稿只算一次：前置脚本改过请求头/正文时要在这上面合并（design D3）
   const inlineDraft = cleanForSend(request);
@@ -141,6 +224,19 @@ export async function executeRequest(
   // 喂给沙箱的请求形态：一个阶段里的各段脚本共用这份快照，**请求头与请求体例外**——
   // 每段执行完的改动都会接力给下一段（design D2）。
   const sandboxRequest = toSandboxRequest(resolved);
+  resolvedUrl = resolved.url || null;
+
+  // 目标定了，时间线可以占位了：赶在门禁、前置脚本与网络往返之前，顺序才等于发起顺序
+  input.onBegin?.({
+    sendId: attempt.attemptId,
+    requestId: request.id,
+    method: request.method,
+    url: resolvedUrl || request.url,
+    requestHeaders: sandboxRequest.header
+      .filter((header) => !header.disabled)
+      .map((header): [string, string] => [header.key, header.value]),
+    at: startedAt,
+  });
   // 前置脚本结束时的请求形态：后置阶段据此看到脚本改过的头与正文；没有前置脚本时就是快照
   let scriptedRequest: SandboxRequest = sandboxRequest;
   // 待发请求与「请求头或请求体是否被脚本改过」。未改动时完全走原路径（design D3）
@@ -174,7 +270,12 @@ export async function executeRequest(
         // 链异常（成环或超深）说明本次编排少了若干层。它进 console 而不是 error：
         // error 那个位置归脚本自己（首个未捕获错误），会被 pre.error 覆盖掉，
         // 而这个异常与某一段脚本无关，埋掉就再也看不见了。
-        console_.push({ level: 'error', args: [chain.error], phase: 'prerequest' });
+        console_.push({
+          level: 'error',
+          phase: 'prerequest',
+          segment: null,
+          values: [{ text: chain.error }],
+        });
       }
 
       phases = {
@@ -188,6 +289,12 @@ export async function executeRequest(
           ...folderSegments(chain.folders, (folder) => folder.test_script),
           { label: '请求层', code: request.test_script ?? null },
         ],
+      };
+
+      // 本次真正配了脚本的层级：时间线据此说明「这次跑了哪些段」，空段不算
+      phaseLabels = {
+        prerequest: phases.pre.filter((segment) => segment.code?.trim()).map((s) => s.label),
+        test: phases.test.filter((segment) => segment.code?.trim()).map((s) => s.label),
       };
 
       // `pm.cookies` 在前置阶段以**脚本执行前解析出的目标**为准（spec: pm.cookies 的
@@ -233,7 +340,8 @@ export async function executeRequest(
         console_.push({
           level: 'warn',
           phase: 'prerequest',
-          args: ['请求体不是 raw 形态（表单 / 二进制），脚本对请求体的改动未生效。'],
+          segment: null,
+          values: [{ text: '请求体不是 raw 形态（表单 / 二进制），脚本对请求体的改动未生效。' }],
         });
       }
       scriptLocal = pre.local;

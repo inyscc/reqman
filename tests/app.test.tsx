@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
+import { consoleLog, type ConsoleOutputEntry } from '../src/lib/consoleLog';
 import { filterTrees, WorkspaceTree } from '../src/components/WorkspaceTree';
 import type { Commands } from '../src/lib/commands';
 import { applyTreeMove } from '../src/lib/treeMoves';
@@ -27,6 +28,26 @@ import {
 } from '../src/lib/types';
 
 const workspace: Workspace = { id: 'w1', name: '默认工作区' };
+
+/**
+ * 全局 Console 里的输出条目。
+ *
+ * 脚本 console 输出只有一个去处：全局 Console（响应区的「脚本」页签只剩断言与脚本错误）。
+ * `since` 是发送前记下的条数——单例在用例之间不清，靠它把范围收窄到本次发送。
+ */
+function consoleOutputs(since = 0): ConsoleOutputEntry[] {
+  return consoleLog
+    .snapshot()
+    .slice(since)
+    .filter((entry): entry is ConsoleOutputEntry => entry.kind === 'output');
+}
+
+/** 把输出条目拼成一段文本，省得每处都写 join。 */
+function consoleOutputText(since = 0): string {
+  return consoleOutputs(since)
+    .map((entry) => entry.values.map((value) => value.text).join(' '))
+    .join('\n');
+}
 
 const collection: Collection = {
   id: 'c1',
@@ -1111,10 +1132,8 @@ describe('前端数据流骨架', () => {
       { key: 'a', value: '1', enabled: true, description: null },
     ]);
 
-    // 不静默：脚本输出里有一句「未生效」，用户不会以为改成功了
-    fireEvent.click(await screen.findByText('脚本'));
-    const consoleText = (await screen.findByTestId('script-console')).textContent ?? '';
-    expect(consoleText).toContain('未生效');
+    // 不静默：全局 Console 的输出里有一句「未生效」，用户不会以为改成功了
+    await waitFor(() => expect(consoleOutputText()).toContain('未生效'));
   }, 60_000);
 
   it('面包屑并入会话标签行，身份在这一行而请求级操作不在（rework-visual-system-and-app-chrome）', async () => {
@@ -2144,7 +2163,7 @@ describe('脚本错误不丢失响应（9.5）', () => {
     expect(await screen.findByText(/后置脚本/)).toBeTruthy();
   }, 30_000);
 
-  it('请求本身失败时，前置脚本已经产生的输出仍然可见', async () => {
+  it('请求本身失败时，前置脚本已经产生的输出仍然留在 Console', async () => {
     const scripted = makeRequest({
       pre_request_script: 'console.log("前置输出：请求还没发");',
     });
@@ -2154,15 +2173,13 @@ describe('脚本错误不丢失响应（9.5）', () => {
 
     render(<App client={client} />);
     await openRequest();
+    const before = consoleLog.snapshot().length;
     fireEvent.click(screen.getByText('发送'));
 
     expect((await screen.findByTestId('app-error')).textContent).toContain('连接失败');
 
-    // 「脚本」标签在**没有响应**时也要出现，否则前置输出无处可见
-    fireEvent.click(await screen.findByText('脚本'));
-    expect((await screen.findByTestId('script-console')).textContent).toContain(
-      '前置输出：请求还没发',
-    );
+    // 输出不依赖响应：没有响应时它照样留在全局 Console 里
+    await waitFor(() => expect(consoleOutputText(before)).toContain('前置输出：请求还没发'));
   }, 30_000);
 });
 
@@ -2488,13 +2505,11 @@ describe('端到端串联（10.1）', () => {
     expect(failed.querySelectorAll('td')[2].textContent).not.toBe('');
     expect(screen.getByTestId('script-report').textContent).toContain('失败不阻断后续断言');
 
-    // console 输出可见，且能区分来自前置还是后置
-    const consoleText = screen.getByTestId('script-console').textContent ?? '';
-    expect(consoleText).toContain('请求层前置');
-    expect(consoleText).toContain('请求层后置');
-    const phases = [...screen.getByTestId('script-console').querySelectorAll('li')].map((item) =>
-      item.getAttribute('data-phase'),
-    );
+    // console 输出留在全局 Console，且能区分来自前置还是后置
+    const outputs = consoleOutputs();
+    expect(consoleOutputText()).toContain('请求层前置');
+    expect(consoleOutputText()).toContain('请求层后置');
+    const phases = outputs.map((entry) => entry.phase);
     expect(phases).toContain('prerequest');
     expect(phases).toContain('test');
   }, 60_000);
@@ -2578,14 +2593,13 @@ describe('目录链编排（run-ancestor-folder-scripts）', () => {
     dropOn(target, 0.5, transfer);
     await waitFor(() => expect(requestMove).toHaveBeenCalledWith('r-moved', folder.id, null));
 
+    const before = consoleLog.snapshot().length;
     fireEvent.click(screen.getByText('发送'));
     await waitFor(() => expect(sendRequest).toHaveBeenCalled());
 
-    fireEvent.click(await screen.findByText('脚本'));
-    const consoleText = (await screen.findByTestId('script-console')).textContent ?? '';
-    expect(consoleText).toContain('目录前置');
-    expect(consoleText).toContain('目录后置');
-  }, 60_000);
+    // 目录层的脚本输出落在全局 Console 里（脚本页签只剩断言）
+    await waitFor(() => expect(consoleOutputText(before)).toContain('目录前置'));
+    expect(consoleOutputText(before)).toContain('目录后置');  }, 60_000);
 
   it('链只算一次：响应前改归属不影响后置所跑的那条链（3.1）', async () => {
     const first = folderWith('F1', '目录一', "console.log('目录一前置');", "console.log('目录一后置');");
@@ -2619,15 +2633,15 @@ describe('目录链编排（run-ancestor-folder-scripts）', () => {
 
     fireEvent.click(await tree().findByText('被拖的请求'));
     await screen.findByLabelText('请求地址');
+    const before = consoleLog.snapshot().length;
     fireEvent.click(screen.getByText('发送'));
     await waitFor(() => expect(sendRequest).toHaveBeenCalled());
 
-    fireEvent.click(await screen.findByText('脚本'));
-    const consoleText = (await screen.findByTestId('script-console')).textContent ?? '';
-    expect(consoleText).toContain('目录一前置');
-    expect(consoleText).toContain('目录一后置');
-    expect(consoleText).not.toContain('目录二前置');
-    expect(consoleText).not.toContain('目录二后置');
+    // 跑的是拖动**之后**那条链：输出里只有目录一，目录二一个字都不该有
+    await waitFor(() => expect(consoleOutputText(before)).toContain('目录一前置'));
+    expect(consoleOutputText(before)).toContain('目录一后置');
+    expect(consoleOutputText(before)).not.toContain('目录二前置');
+    expect(consoleOutputText(before)).not.toContain('目录二后置');
   }, 60_000);
 
   it('拖进目录只同步归属、不重载草稿：编辑内容与未保存改动都还在（4.1）', async () => {
@@ -2709,10 +2723,9 @@ describe('安全演练（10.3）', () => {
     expect(screen.queryByTestId('assertion-fail')).toBeNull();
     expect(screen.getAllByTestId('assertion-pass')).toHaveLength(4);
 
-    // 外发：策略允许的目标照常发出，策略外的目标被拒
-    const consoleText = screen.getByTestId('script-console').textContent ?? '';
-    expect(consoleText).toContain('外发 evil.test: 被拒绝');
-    expect(consoleText).toContain('外发 api.test: 已发出');
+    // 外发：策略允许的目标照常发出，策略外的目标被拒（输出在全局 Console）
+    await waitFor(() => expect(consoleOutputText()).toContain('外发 evil.test: 被拒绝'));
+    expect(consoleOutputText()).toContain('外发 api.test: 已发出');
 
     // 关键断言：被拒的外发**没有触达后端发送命令**——拒绝发生在桥的出口，不是发出去再失败
     const scriptCalls = sendRequest.mock.calls.map((call) => call[0] as {
@@ -7183,4 +7196,89 @@ describe('集合与目录的运行器（collection-runner）', () => {
     await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1));
     expect(sendRequest.mock.calls[0][0]).toMatchObject({ saved_id: 'r1' });
   });
+});
+
+// ---------------------------------------------------------------------------
+// 全局 Console 的时间线（change: add-console-panel）
+//
+// 这两条锁的是「有没有接上」：手工发送与运行器走的是同一条流水线，任何一处漏接，
+// 用户就会在 Console 里看不到自己刚发的那条。终态分类由 request-execution.test.ts 覆盖。
+// ---------------------------------------------------------------------------
+
+describe('全局 Console 的时间线（add-console-panel）', () => {
+  // 应用用的是模块级单例：用例之间不清，断言就会看到上一条用例的日志
+  beforeEach(() => consoleLog.clear());
+
+  it('手工发送后，时间线上留下本次请求的日志', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+
+    await waitFor(() => expect(consoleLog.snapshot()).toHaveLength(1));
+    const [entry] = consoleLog.snapshot();
+    expect(entry.kind).toBe('network');
+    if (entry.kind !== 'network') throw new Error('应当是网络条目');
+    expect(entry.method).toBe('GET');
+    expect(entry.result).toMatchObject({
+      kind: 'response',
+      status: 200,
+      statusText: 'OK',
+    });
+    // 耗时也记下来了：console 里那一行 `200 12 ms` 的后半截
+    expect(
+      entry.result?.kind === 'response' ? entry.result.elapsedMs : null,
+      '耗时应当有值',
+    ).not.toBeNull();
+  }, 30_000);
+
+  it('门禁拦下的发送也留一条「未发出」的日志', async () => {
+    const { client } = harness({ scriptGateAllowed: false });
+    render(<App client={client} />);
+    await openRequest();
+
+    fireEvent.click(screen.getByText('发送'));
+    await screen.findByTestId('script-gate');
+
+    await waitFor(() => expect(consoleLog.snapshot()).toHaveLength(1));
+    const [entry] = consoleLog.snapshot();
+    if (entry.kind !== 'network') throw new Error('应当是网络条目');
+    // 请求根本没出去：不算失败，但必须留痕
+    expect(entry.result).toMatchObject({ kind: 'not-sent' });
+  }, 30_000);
+
+  it('后端以未解析变量拒绝时记成「未发出」，不是失败', async () => {
+    const { client, sendRequest } = harness();
+    render(<App client={client} />);
+    await openRequest();
+
+    sendRequest.mockRejectedValueOnce({
+      code: 'unresolved_variables',
+      message: '以下变量未能解析，请求没有发出：missing',
+    });
+    fireEvent.click(screen.getByText('发送'));
+
+    await waitFor(() => expect(consoleLog.snapshot()).toHaveLength(1));
+    const [entry] = consoleLog.snapshot();
+    if (entry.kind !== 'network') throw new Error('应当是网络条目');
+    expect(entry.result).toMatchObject({ kind: 'not-sent' });
+  }, 30_000);
+
+  it('运行器的请求同样进时间线', async () => {
+    const { client, sendRequest } = harness({
+      extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }),
+    });
+    render(<App client={client} />);
+
+    fireEvent.click(await tree().findByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.click(screen.getByTestId('entity-run'));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByTestId('runner-start'));
+
+    await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(consoleLog.snapshot()).toHaveLength(2));
+    expect(consoleLog.snapshot().every((entry) => entry.kind === 'network')).toBe(true);
+  }, 60_000);
 });

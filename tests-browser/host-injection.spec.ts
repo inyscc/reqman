@@ -139,7 +139,9 @@ async function runScriptInPage(page: Page, script: string): Promise<SandboxOutco
 
         return {
           error: result.error,
-          console: result.console.map((entry) => entry.args.join(' ')),
+          console: result.console.map((entry) =>
+            entry.values.map((value) => value.text).join(' '),
+          ),
         };
       } catch (error) {
         return { thrown: String(error && (error as Error).message) };

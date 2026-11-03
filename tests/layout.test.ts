@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import type { Commands } from '../src/lib/commands';
 import {
+  clampConsoleHeight,
   clampSplit,
+  CONSOLE_DEFAULT,
+  CONSOLE_MAX,
+  CONSOLE_MIN,
+  CONSOLE_SCOPE,
+  readConsoleHeight,
   readSplitRatio,
   SPLIT_DEFAULT,
   SPLIT_MAX,
   SPLIT_MIN,
   SPLIT_SCOPE,
+  writeConsoleHeight,
   writeSplitRatio,
 } from '../src/lib/layout';
 
@@ -63,5 +70,38 @@ describe('分栏比例（spec: 主区左右分栏与可调比例）', () => {
     } as unknown as Commands;
 
     await expect(writeSplitRatio(client, 'w1', 0.6)).resolves.toBeUndefined();
+  });
+});
+
+describe('Console 抽屉高度（spec: ui-layout「底部 Console 抽屉占位」）', () => {
+  it('越界与读不懂的值收敛到区间内，主区与状态条都不会被挤没', () => {
+    expect(clampConsoleHeight(0.9)).toBe(CONSOLE_MAX);
+    expect(clampConsoleHeight(0)).toBe(CONSOLE_MIN);
+    expect(clampConsoleHeight(-1)).toBe(CONSOLE_MIN);
+    expect(clampConsoleHeight(Number.NaN)).toBe(CONSOLE_DEFAULT);
+  });
+
+  it('从未调整过时用默认高度', async () => {
+    const { client } = fakeClient();
+    expect(await readConsoleHeight(client, 'w1')).toBe(CONSOLE_DEFAULT);
+  });
+
+  it('读写往返，且按工作区各自记住', async () => {
+    const { client } = fakeClient();
+    await writeConsoleHeight(client, 'w1', 0.45);
+    await writeConsoleHeight(client, 'w2', 0.2);
+
+    expect(await readConsoleHeight(client, 'w1')).toBe(0.45);
+    expect(await readConsoleHeight(client, 'w2')).toBe(0.2);
+  });
+
+  it('与分栏比例各存各的键，调一个不会顺手改掉另一个', async () => {
+    const { client, store } = fakeClient();
+    await writeSplitRatio(client, 'w1', 0.7);
+    await writeConsoleHeight(client, 'w1', 0.4);
+
+    // 同一个工作区里两条偏好互不牵连
+    expect(store.get(`${SPLIT_SCOPE}:w1`)).toBe('0.7');
+    expect(store.get(`${CONSOLE_SCOPE}:w1`)).toBe('0.4');
   });
 });

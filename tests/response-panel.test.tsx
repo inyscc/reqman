@@ -1,7 +1,7 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { ResponsePanel } from '../src/components/ResponsePanel';
-import type { ConsoleEntry, TestAssertion } from '../src/lib/scriptRuntime';
+import type { TestAssertion } from '../src/lib/scriptRuntime';
 import type { ResponsePayload } from '../src/lib/types';
 
 function response(overrides: Partial<ResponsePayload> = {}): ResponsePayload {
@@ -91,38 +91,11 @@ describe('响应区脚本页签的结果点', () => {
     expect(screen.getByTestId('script-tab-dot-fail')).toBeTruthy();
   });
 
-  it('只有 console 输出、没有断言时不点', () => {
-    render(
-      <ResponsePanel
-        response={response()}
-        error={null}
-        scriptConsole={[{ level: 'log', args: ['随便看看'], phase: 'test' }]}
-      />,
-    );
+  it('只有 console 输出时不出现「脚本」页签——输出归全局 Console', () => {
+    render(<ResponsePanel response={response()} error={null} />);
 
-    // 页签照常出现（有输出可看），但"有没有测试通过"这件事无从谈起
-    expect(screen.getByText('脚本')).toBeTruthy();
-    expect(document.querySelector('[data-testid^="script-tab-dot"]')).toBeNull();
-  });
-});
-
-/**
- * console 的多行输出。
- *
- * 换行由 CSS（`.script-console` 的 white-space: pre-wrap）保住，happy-dom 不加载
- * 样式表，因此这里两侧各验一半：文本本身带换行没被拆掉，且容器挂着那个样式钩子。
- */
-describe('脚本 console 的多行输出', () => {
-  it('一条输出里的换行原样保留，容器带按原文呈现的样式钩子', () => {
-    const entries: ConsoleEntry[] = [
-      { level: 'log', args: ['第一行\n第二行\n  缩进'], phase: 'prerequest' },
-    ];
-
-    render(<ResponsePanel response={response()} error={null} scriptConsole={entries} />);
-    fireEvent.click(screen.getByText('脚本'));
-
-    const list = screen.getByTestId('script-console');
-    expect(list.classList.contains('script-console')).toBe(true);
-    expect(list.textContent).toContain('第一行\n第二行\n  缩进');
+    // console 输出不再由这里承载：既没有断言也没有脚本错误，页签就不该出现
+    expect(screen.queryByText('脚本')).toBeNull();
+    expect(screen.queryByTestId('script-console')).toBeNull();
   });
 });

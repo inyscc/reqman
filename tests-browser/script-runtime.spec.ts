@@ -145,13 +145,16 @@ async function runInBrowser(
         null,
         payload.request ?? null,
       );
-      const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+      // 每条输出是一组 `{text, json}`，取文本那一半拼成一行
+      const line = (entry: { values: { text: string }[] }) =>
+        entry.values.map((value) => value.text).join(' ');
+      const printed = result.console.map(line).join('\n');
       const raw = /ESCAPE-PROBE (\{.*\})/.exec(printed);
 
       return {
         ok: true,
         error: result.error,
-        console: result.console.map((entry) => entry.args.join(' ')),
+        console: result.console.map(line),
         report: raw ? (JSON.parse(raw[1]) as Record<string, unknown>) : undefined,
         assertions: result.assertions.map((item) => ({
           name: item.name,

@@ -83,23 +83,42 @@ export const BRIDGE_EVENTS = Object.freeze({
   cookies: (executionId: string) => `execution.cookies.${executionId}`,
 } as const);
 
+/**
+ * 一条输出里的一个参数值。
+ *
+ * **结构与文本都要留**：`text` 给响应区的脚本页签按原文呈现（换行、缩进、紧凑/摊开都在
+ * 收集侧算好）；`json` 只在值本来有结构、且能安全序列化时存在，全局 Console 靠它做可展开
+ * 的树。两份都由同一份脱敏后的结构产出，所以不会出现「文本里掩了、树里没掩」。
+ */
+export interface ConsoleValue {
+  text: string;
+  /** 保留结构的值；不可序列化（循环引用）或超出体积上限时不存在这个字段。 */
+  json?: unknown;
+}
+
 export interface ConsoleEntry {
   level: string;
-  args: string[];
+  values: ConsoleValue[];
   /** 输出来自哪一段脚本，界面据此区分来源（spec: 脚本 console 输出的收集与呈现）。 */
   phase: ScriptListen;
+  /**
+   * 产生这条输出的脚本层级标签（`集合层` / `目录层: X` / `请求层`）。
+   *
+   * 宿主自己造的条目（弃用提示、目录链异常）没有归属层级，为 `null`。
+   */
+  segment: string | null;
 }
 
 /** console 单个参数的呈现上限；超长的仍要能看见，但不能把面板撑爆。 */
 const CONSOLE_ARG_LIMIT = 4000;
 
 /**
- * 结构化参数改用缩进 JSON 的阈值（**紧凑形态**的字符数）。
+ * 结构化参数**保留结构**的体积上限（紧凑形态的字符数，32 KiB）。
  *
- * 短对象/短数组一行看完最省地方（`{a:1}` 摊成四行反而难扫）；一旦超出一行的可读范围，
- * 换成缩进形态——每个字段一行，长正文、嵌套结构、整份响应体才读得下去。
+ * 全局 Console 要能展开对象，所以结构不能再像以前那样在收集阶段就丢掉；但 500 条时间线
+ * 每条都揣一份整响应体会把内存吃穿。超限的只留文本，展开退化为不可用——能读，不占地方。
  */
-const CONSOLE_INLINE_LIMIT = 80;
+const CONSOLE_STRUCT_LIMIT = 32 * 1024;
 
 /**
  * 统一换行符：`\r\n` 与单独的 `\r` 都折成 `\n`。
@@ -120,38 +139,74 @@ function truncateConsoleText(text: string): string {
 }
 
 /**
- * 把 console 的一个参数文本化（6.2 的呈现 / 10.4 的实机观察）。
+ * 逐叶子脱敏一份结构。
+ *
+ * 顺序很关键：**先脱敏结构、再序列化**。反过来（先序列化再整体匹配）挡得住原样打印，
+ * 但值被 JSON 转义过之后就匹配不上了。循环引用直接抛出，由调用方退回纯文本——递归下去
+ * 只会栈溢出。
+ */
+function maskStructure(
+  value: unknown,
+  secretValues: string[],
+  seen: WeakSet<object> = new WeakSet(),
+): unknown {
+  if (typeof value === 'string') return maskSecrets(normalizeNewlines(value), secretValues);
+  if (value === null || typeof value !== 'object') return value;
+
+  // 同一个对象被两处引用（DAG）不是环：递归返回后要放开，否则兄弟节点会被误判成环
+  if (seen.has(value)) throw new Error('console 参数存在循环引用');
+  seen.add(value);
+
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => maskStructure(item, secretValues, seen));
+    }
+
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = maskStructure(item, secretValues, seen);
+    }
+    return out;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+/**
+ * 把 console 的一个参数收成「文本 + 结构」（6.2 的呈现 / 全局 Console 的展开）。
  *
  * 沙箱把参数**结构化**地送过来——实测（Node 后端）：`console.log({a:1})` 到达宿主时是真正的
  * 对象 `{a:1}`，不是字符串。因此不能一律 `String(value)`：那会把对象变成 `[object Object]`、
- * 把数组的结构丢掉（`[1,2]` → `1,2`），用户看到的与 Postman 差得远。这里字符串按原样、
- * 其它值取 JSON 形态；序列化不了（循环引用）或过长时退回 String / 截断，保证这一条输出不丢。
+ * 把数组的结构丢掉（`[1,2]` → `1,2`），用户看到的与 Postman 差得远。
  *
- * 字符串里的换行**原样保留**（呈现层用 `pre-wrap` 按原文排版）；对象与数组则在超出
- * `CONSOLE_INLINE_LIMIT` 时改用缩进 JSON——`console.log(pm.response.json())` 这种整份
- * 响应体，紧凑形态会挤成一行几百字符、内层换行还全被转义成 `\n` 两个字面字符。
+ * 字符串原样保留换行（呈现层用 `pre-wrap` 按原文排版）；对象与数组在体积上限内额外留一份
+ * 脱敏后的结构，供全局 Console 逐层展开；序列化不了（循环引用）或过大时只留文本，保证这一条
+ * 输出永远不丢。
+ *
+ * 文本形态就是紧凑 JSON 一行，**不自动缩进**：要缩进的脚本自己会写
+ * `JSON.stringify(value, null, 2)`，那样文本自然带换行、按原文呈现即可。长对象的可读性由
+ * 全局 Console 的展开树承担，不靠宿主悄悄把一行摊成几十行。
  */
-function formatConsoleArg(value: unknown): string {
-  if (typeof value === 'string') return normalizeNewlines(value);
+function toConsoleValue(value: unknown, secretValues: string[]): ConsoleValue {
+  if (typeof value === 'string') {
+    return { text: maskSecrets(normalizeNewlines(value), secretValues) };
+  }
 
   if (typeof value === 'object' && value !== null) {
     try {
-      const compact = JSON.stringify(value);
+      const masked = maskStructure(value, secretValues);
+      const compact = JSON.stringify(masked);
 
       if (typeof compact === 'string') {
-        if (compact.length > CONSOLE_ARG_LIMIT) return truncateConsoleText(compact);
-        if (compact.length <= CONSOLE_INLINE_LIMIT) return compact;
-
-        // 缩进形态会变长，截断按缩进后的文本算，才不至于多吐出一截
-        const indented = JSON.stringify(value, null, 2);
-        return truncateConsoleText(typeof indented === 'string' ? indented : compact);
+        const text = truncateConsoleText(compact);
+        return compact.length <= CONSOLE_STRUCT_LIMIT ? { text, json: masked } : { text };
       }
     } catch {
       // 循环引用等：退回字符串化，至少不丢这一条输出
     }
   }
 
-  return normalizeNewlines(String(value));
+  return { text: maskSecrets(normalizeNewlines(String(value)), secretValues) };
 }
 
 export interface TestAssertion {
@@ -1465,6 +1520,8 @@ export async function runScriptPhase(
   let currentHeaders: SandboxHeader[] | null = request ? request.header : null;
   // 请求体的接力状态：与请求头同一条路——集合层改过的正文，目录层与请求层读得到
   let currentBody: SandboxBody | null = request?.body ?? null;
+  // 正在执行的脚本层级。console 事件不带「哪一段」的信息，只能由宿主在每段执行前记下
+  let currentSegment: string | null = null;
 
   try {
     // 沙箱派发 execution.console，宿主转译后重发为 'console'
@@ -1472,7 +1529,8 @@ export async function runScriptPhase(
       entries.push({
         level: String(level),
         phase: listen,
-        args: args.map((value) => maskSecrets(formatConsoleArg(value), secretValues)),
+        segment: currentSegment,
+        values: args.map((value) => toConsoleValue(value, secretValues)),
       });
     });
 
@@ -1512,7 +1570,10 @@ export async function runScriptPhase(
           entries.push({
             level: 'warn',
             phase: listen,
-            args: [maskSecrets(`[弃用提示] ${library} 已弃用：${alternative}`, secretValues)],
+            segment: null,
+            values: [
+              { text: maskSecrets(`[弃用提示] ${library} 已弃用：${alternative}`, secretValues) },
+            ],
           });
         }
       }
@@ -1520,6 +1581,8 @@ export async function runScriptPhase(
 
     for (const [index, { label, code }] of codes.entries()) {
       const executionId = `exec-${index}-${Math.random().toString(36).slice(2, 10)}`;
+      // 这一段脚本执行期间的 console 输出都归到它名下
+      currentSegment = label;
       const outcome = await raceWithCancellation(
         executeOne(
           context,

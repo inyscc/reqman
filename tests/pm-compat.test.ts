@@ -108,7 +108,7 @@ async function run(code: string, listen: 'prerequest' | 'test' = 'prerequest') {
   const result = await runScriptPhase(commands, target, listen, [code]);
   expect(result.error, `脚本不应失败：${result.error}`).toBeNull();
 
-  return result.console.map((entry) => entry.args.join(' '));
+  return result.console.map((entry) => entry.values.map((value) => value.text).join(' '));
 }
 
 describe('pm 对象成员（4.1）', () => {
@@ -218,7 +218,7 @@ describe('pm.require 内置库（4.2）', () => {
     ]);
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     // 三个在线注册表方向的 require 全部抛错（「Cannot find module」）
     expect(printed).toContain('rejected= 3');
     // 拒绝路径上没有发生任何网络请求（sendRequest 桥未被触碰）
@@ -333,12 +333,12 @@ describe('弃用库（4.3）', () => {
     ]);
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     expect(printed).toContain('libs= function function');
 
     // 上游沙箱对弃用库零提示（实测）——提示由宿主静态扫描生成
     const warns = result.console.filter((entry) => entry.level === 'warn');
-    const warnText = warns.map((entry) => entry.args.join(' ')).join(' | ');
+    const warnText = warns.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' | ');
     expect(warnText).toContain('crypto-js');
     expect(warnText).toContain('Web Crypto');
     expect(warnText).toContain('tv4');

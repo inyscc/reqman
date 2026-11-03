@@ -25,7 +25,7 @@ import { ScriptReport } from './ScriptReport';
 import { CodeSurface } from './CodeSurface';
 import { WrapIcon } from './icons';
 import { CODE_SURFACE_MAX_BYTES } from '../lib/codeSurface';
-import type { ConsoleEntry, TestAssertion } from '../lib/scriptRuntime';
+import type { TestAssertion } from '../lib/scriptRuntime';
 import type { ProxyDecisionView, ResponsePayload } from '../lib/types';
 import { proxyDecisionLabel } from '../lib/proxyDecision';
 
@@ -60,8 +60,12 @@ export interface ResponsePanelProps {
    * 而决定在那时同样要出现——失败恰恰是最需要看它的时候。
    */
   proxyDecision?: ProxyDecisionView | null;
-  /** 脚本 console 输出；为空时「脚本」标签页不出现（任务 6.4）。 */
-  scriptConsole?: ConsoleEntry[];
+  /**
+   * 脚本断言与错误；两者都为空时「脚本」标签页不出现（任务 6.4）。
+   *
+   * console 输出不在这里：它只有全局 Console 一个去处（spec: pm-script-runtime
+   * 「脚本 console 输出的收集与呈现」），否则同一条输出会在两个面板里各抄一遍。
+   */
   scriptAssertions?: TestAssertion[];
   scriptError?: string | null;
   /** 可视化结果（已渲染的 HTML）；由 sandbox="" 的 iframe 隔离承载（任务 4.6）。 */
@@ -150,7 +154,6 @@ export function ResponsePanel({
   sending = false,
   error,
   proxyDecision = null,
-  scriptConsole,
   scriptAssertions,
   scriptError,
   visualizerHtml,
@@ -183,11 +186,9 @@ export function ResponsePanel({
     setPreview(true);
   }, [responseId]);
 
-  // 没有输出也没有断言时不产生噪声：连标签页都不出现
-  const hasScript =
-    (scriptConsole?.length ?? 0) > 0 ||
-    (scriptAssertions?.length ?? 0) > 0 ||
-    Boolean(scriptError);
+  // 没有断言也没有脚本错误时不产生噪声：连标签页都不出现。
+  // console 输出不参与这个判定——它归全局 Console，不该凭空造出一个空页签。
+  const hasScript = (scriptAssertions?.length ?? 0) > 0 || Boolean(scriptError);
 
   /**
    * 「脚本」标签页上的结果点：有断言才点，全通过是绿点、任一失败是红点
@@ -368,13 +369,10 @@ export function ResponsePanel({
           </div>
         )}
 
-        {/* 脚本输出不依赖响应：请求失败时前置脚本的输出同样要能看见 */}
+        {/* 脚本结果不依赖响应：请求失败时前置脚本注册的断言与抛出的错误同样要能看见。
+            console 输出不在这儿——看全局 Console（底栏入口）。 */}
         {tab === 'script' && (
-          <ScriptReport
-            console={scriptConsole ?? []}
-            assertions={scriptAssertions ?? []}
-            error={scriptError ?? null}
-          />
+          <ScriptReport assertions={scriptAssertions ?? []} error={scriptError ?? null} />
         )}
 
         {/* 可视化结果：模板已由宿主渲染，内容进 sandbox="" 的 iframe——脚本不执行、

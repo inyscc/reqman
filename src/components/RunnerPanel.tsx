@@ -83,7 +83,8 @@ function Info({ title }: { title: string }) {
  * "怎么跑"是两件事，各自的控件该有自己的位置；主按钮落在右列底部，与设置同在一处。
  *
  * 这里只呈现结果，不做判定：通过/失败由 `statusOfOutcome` 从执行结果里折出来，断言明细
- * 交给 `ScriptReport`——与响应区的「脚本」页签是同一个组件，两处口径不会分叉。
+ * 交给 `ScriptReport`——与响应区的「脚本」页签是同一个组件，两处口径不会分叉。唯一的差别
+ * 是这里还要列出 console 输出：运行器是模态，开着时看不到底部的 Console 抽屉。
  */
 export function RunnerPanel({
   items,

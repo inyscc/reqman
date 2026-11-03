@@ -444,14 +444,18 @@ describe('占位符悬浮值提示（真实应用）', () => {
       expect(await hoverTip(page, secretPoint!, 'real-secret')).toContain('real-secret');
 
       await page.getByRole('button', { name: '发送', exact: true }).click();
-      await page.getByRole('button', { name: '脚本', exact: true }).waitFor();
-      await page.getByRole('button', { name: '脚本', exact: true }).click();
 
-      const consoleText = await page.evaluate(
-        () =>
-          (
-            document.querySelector('[data-testid="script-console"]') as HTMLElement | null
-          )?.innerText ?? '',
+      // 输出只进全局 Console：打开抽屉读回来（响应区的「脚本」页签只剩断言与脚本错误）
+      await page.getByTestId('console-toggle-closed').click();
+      await page.getByTestId('console-panel').waitFor();
+      await page.waitForFunction(
+        () => document.querySelectorAll('[data-testid="console-output-text"]').length > 0,
+      );
+
+      const consoleText = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid="console-output-text"]'))
+          .map((node) => node.textContent ?? '')
+          .join('\n'),
       );
       expect(consoleText, '脚本应真的跑过').toContain('前置跑过了');
       expect(consoleText, 'secret 明文不该进入脚本输出').not.toContain('real-secret');

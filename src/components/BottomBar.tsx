@@ -21,6 +21,9 @@ export interface BottomBarProps {
   onOpenModal: (kind: ModalKind) => void;
   /** 工作区就绪前导入导出不可用（与改造前一致）。 */
   importExportDisabled: boolean;
+  /** Console 抽屉是否开着：入口要能看出这一点。 */
+  consoleOpen: boolean;
+  onToggleConsole: () => void;
 }
 
 /** 底部状态条（design D7）：左侧状态，右侧低频面板入口。 */
@@ -31,6 +34,8 @@ export function BottomBar({
   onShowOptimisticErrors,
   onOpenModal,
   importExportDisabled,
+  consoleOpen,
+  onToggleConsole,
 }: BottomBarProps) {
   const status = sending ? '发送中…' : error ? '有错误，详见请求区' : '就绪';
 
@@ -40,11 +45,21 @@ export function BottomBar({
         {status}
       </span>
       {optimisticErrors > 0 && (
-        <button className="ghost" onClick={onShowOptimisticErrors}>
+        <button className="ghost status-action" onClick={onShowOptimisticErrors}>
           查看 {optimisticErrors} 个提交失败
         </button>
       )}
       <span className="grow" />
+      {/* Console 与右边三个不同：它是抽屉，不是模态。开合状态直接反映在入口上，
+          否则用户看不出「我上次到底把它关掉了没有」 */}
+      <button
+        className={`ghost ${consoleOpen ? 'active' : ''}`}
+        aria-pressed={consoleOpen}
+        data-testid={consoleOpen ? 'console-toggle-open' : 'console-toggle-closed'}
+        onClick={onToggleConsole}
+      >
+        Console
+      </button>
       <button className="ghost" onClick={() => onOpenModal('cookies')}>
         Cookie
       </button>

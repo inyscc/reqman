@@ -180,7 +180,7 @@ describe('脚本执行编排', () => {
 
     expect(result.error).toBeNull();
     // 最后一段读到的是请求层写入的值，而不是集合层或文件夹层的
-    expect(result.console.map((entry) => entry.args)).toEqual([['x=', '2']]);
+    expect(result.console.map((entry) => entry.values.map((value) => value.text))).toEqual([['x=', '2']]);
   }, 30_000);
 
   it('按名写入落在生效的那一条，被禁用的条目读不到（spec: 脚本对变量的读写）', async () => {
@@ -204,7 +204,7 @@ describe('脚本执行编排', () => {
 
     expect(result.error).toBeNull();
     // 读到的是生效条的值
-    expect(result.console.map((entry) => entry.args)).toEqual([['host=', 'second']]);
+    expect(result.console.map((entry) => entry.values.map((value) => value.text))).toEqual([['host=', 'second']]);
 
     const byName = new Map(variableSetCalls.map((call) => [String(call.name), call]));
     // 禁用条目不进作用域：读出来是 undefined
@@ -245,7 +245,7 @@ describe('脚本执行编排', () => {
     ]);
 
     expect(result.error).toContain('中段炸了');
-    const args = result.console.map((entry) => entry.args);
+    const args = result.console.map((entry) => entry.values.map((value) => value.text));
     expect(args).toContainEqual(['第一段']);
     expect(args).not.toContainEqual(['不该出现']);
   }, 30_000);
@@ -321,7 +321,7 @@ describe('脚本执行编排', () => {
 
     expect(result.error).toBeNull();
     // 本地写入在脚本内生效且覆盖持久化值，但没有任何一条写回命令被触发
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     expect(printed).toContain('before= persisted');
     expect(printed).toContain('after= local-value');
     // 覆盖只发生在本地：pm.environment 看到的仍是持久化值
@@ -408,7 +408,7 @@ describe('脚本执行编排', () => {
     expect(input.inline?.headers).toEqual([{ key: 'X-Trace', value: 'abc', enabled: true }]);
     expect(input.inline?.body.kind).toBe('raw');
 
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     expect(printed).toContain('code= 201');
     expect(printed).toContain('{"ok":true}');
   }, 30_000);
@@ -455,7 +455,7 @@ describe('脚本执行编排', () => {
 
     // 立刻收手：不等沙箱回调（那条路可能永不兑现），也不把后面的语句跑掉
     expect(result.error, '取消不是失败').toBeNull();
-    expect(result.console.map((entry) => entry.args.join(' '))).toEqual(['第一段']);
+    expect(result.console.map((entry) => entry.values.map((value) => value.text).join(' '))).toEqual(['第一段']);
   }, 30_000);
 
   it('未配置策略时 pm.sendRequest 不限制目标（与 Postman 一致）', async () => {
@@ -487,7 +487,7 @@ describe('脚本执行编排', () => {
     ]);
 
     expect(sendRequest, '策略外的目标不应到达后端').not.toHaveBeenCalled();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     expect(printed).toContain('不在允许范围内');
     expect(printed).toContain('evil.example');
   }, 30_000);
@@ -540,7 +540,7 @@ describe('脚本执行编排', () => {
     );
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     expect(printed).toContain('code= 201');
     expect(printed).toContain('{"ok":true}');
   }, 30_000);
@@ -556,7 +556,7 @@ describe('脚本执行编排', () => {
       sentResponse(),
     );
 
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     expect(printed).toContain('response= undefined');
   }, 30_000);
 
@@ -568,6 +568,19 @@ describe('脚本执行编排', () => {
 
     expect(pre.console[0]?.phase).toBe('prerequest');
     expect(post.console[0]?.phase).toBe('test');
+  }, 30_000);
+
+  it('每条输出还标明产生它的脚本层级', async () => {
+    const { commands } = fakeCommands();
+
+    // 集合层与请求层各输出一行：阶段相同，靠层级分辨是谁说的
+    const result = await runScriptPhase(commands, target, 'prerequest', [
+      'console.log("来自集合");',
+      null,
+      'console.log("来自请求");',
+    ]);
+
+    expect(result.console.map((entry) => entry.segment)).toEqual(['集合层', '请求层']);
   }, 30_000);
 
   it('console 输出里的 secret 明文被掩码', async () => {
@@ -591,7 +604,7 @@ describe('脚本执行编排', () => {
       'console.log("token=", pm.environment.get("token"));',
     ]);
 
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('');
     // 脚本拿到的是明文（spec 7.3），呈现时才被掩码
     expect(printed).toContain('******');
     expect(printed).not.toContain('SECRET123456');
@@ -637,7 +650,7 @@ describe('pm.cookies 出口', () => {
     );
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     expect(printed).toContain('c= abc123');
   }, 30_000);
 
@@ -649,7 +662,7 @@ describe('pm.cookies 出口', () => {
     ]);
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     // pm.cookies 存在（沙箱始终提供），只是集合为空
     expect(printed).toContain('cookies= object');
   }, 30_000);
@@ -724,7 +737,7 @@ describe('pm.cookies 出口', () => {
     );
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     expect(printed).toContain('got= null roundtrip');
   }, 30_000);
 
@@ -751,7 +764,7 @@ describe('pm.cookies 出口', () => {
 
     expect(result.error).toBeNull();
     expect(cookieJar).toHaveLength(0);
-    const printed = result.console.map((entry) => entry.args.join(' ')).join(' ');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join(' ');
     expect(printed).toContain('after= EMPTY');
   }, 30_000);
 });
@@ -837,7 +850,7 @@ describe('目录链编排（run-ancestor-folder-scripts）', () => {
     ]);
 
     expect(result.error).toBeNull();
-    expect(result.console.map((entry) => entry.args[0])).toEqual(['C', '1', '2', '3', 'R']);
+    expect(result.console.map((entry) => entry.values[0].text)).toEqual(['C', '1', '2', '3', 'R']);
   }, 30_000);
 
   it('未归属目录时不编排目录层：只有集合与请求两段', async () => {
@@ -852,7 +865,7 @@ describe('目录链编排（run-ancestor-folder-scripts）', () => {
 
     expect(segments).toHaveLength(2);
     expect(result.error).toBeNull();
-    expect(result.console.map((entry) => entry.args[0])).toEqual(['C', 'R']);
+    expect(result.console.map((entry) => entry.values[0].text)).toEqual(['C', 'R']);
   }, 30_000);
 
   it('链长到五段时，报错指明是哪一个目录（2.1）', async () => {
@@ -869,7 +882,7 @@ describe('目录链编排（run-ancestor-folder-scripts）', () => {
     expect(result.error).toContain('前置脚本');
     expect(result.error).toContain('目录第 2 层「中间层」');
     // 抛错之后不再往下执行：这一层之后的目录层与请求层都不该跑
-    expect(result.console.map((entry) => entry.args[0])).toEqual(['C', '1']);
+    expect(result.console.map((entry) => entry.values[0].text)).toEqual(['C', '1']);
   }, 30_000);
 
   it('同名目录按链上位置区分（2.2）', async () => {
@@ -932,7 +945,7 @@ describe('实机探针自检（1.4）', () => {
     // 探针本身不能抛错：否则用户在界面上看到的是一段报错，而不是他的逃逸报告
     expect(result.error).toBeNull();
 
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     expect(printed).toContain('ESCAPE-PROBE');
     // 报告是可解析的 JSON（否则用户贴回来的东西没法落档）
     const raw = /ESCAPE-PROBE (\{.*\})/.exec(printed);
@@ -973,7 +986,7 @@ describe('pm.require（spec: pm 兼容面）', () => {
     ]);
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     // 上游在未提供 resolvedPackages 时会摘掉 pm.require（实测 `pm.require is not a function`），
     // 宿主补的别名应让它与 require 完全一致
     expect(printed).toContain('same= true');
@@ -1018,7 +1031,7 @@ describe('pm.request 的填充', () => {
     );
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     // 上游在没有 request 时会造一个空 Request（method 回落 GET、url 空串），
     // 因此这几条断言同时覆盖了「确实喂进去了」这件事
     expect(printed).toContain('method= POST');
@@ -1043,7 +1056,7 @@ describe('pm.request 的填充', () => {
     );
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     expect(printed).toContain('auth= bearer');
   }, 30_000);
 
@@ -1078,7 +1091,7 @@ describe('pm.request 的填充', () => {
     ]);
 
     // 改动跨段可见：第二段读到的是第一段改过的值
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     expect(printed).toContain('injected= 1');
     expect(printed).toContain('trace= zzz');
 
@@ -1128,7 +1141,7 @@ describe('pm.request 的填充', () => {
     expect(result.error).toBeNull();
 
     // 集合层改的正文，目录 / 请求层读得到
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     expect(printed).toContain('next= {"stage":"new"}');
 
     // 最终形态回传给宿主，据此合并进待发请求
@@ -1203,7 +1216,7 @@ describe('pm.response 的填充', () => {
     );
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     // 二进制正文不该退化成空串或损坏的内容
     expect(printed).toContain('len= 3');
     expect(printed).toContain('code= 201');
@@ -1236,7 +1249,7 @@ describe('pm.response 的填充', () => {
     );
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     // 大小取自后端回带的实际字节数：responseSize 是 stream 派生的，字符串形态下拿不到
     expect(printed).toContain('size= 4096');
     expect(printed).toContain('cookies= 2');
@@ -1263,7 +1276,7 @@ describe('pm.response 的填充', () => {
     );
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     expect(printed).toContain('orig= POST https://api.test/echo');
   }, 30_000);
 });
@@ -1320,7 +1333,7 @@ describe('连带修复', () => {
     ]);
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     expect(printed).toContain('orig= POST');
     expect(sendRequest).toHaveBeenCalled();
   }, 30_000);
@@ -1455,7 +1468,7 @@ describe('本地作用域', () => {
     ]);
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     expect(printed).toContain('seen= abc');
     expect(result.local).toMatchObject({ nonce: 'abc' });
   }, 30_000);
@@ -1492,7 +1505,7 @@ describe('本地作用域', () => {
     );
 
     expect(result.error).toBeNull();
-    const printed = result.console.map((entry) => entry.args.join(' ')).join('\n');
+    const printed = result.console.map((entry) => entry.values.map((value) => value.text).join(' ')).join('\n');
     expect(printed).toContain('seen= abc');
   }, 30_000);
 

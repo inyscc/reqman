@@ -133,7 +133,9 @@ describe('运行中的结果与明细', () => {
     const execute = vi.fn(async () =>
       outcome({
         assertions: [{ name: '状态码 200', passed: true, skipped: false, error: null }],
-        console: [{ level: 'log', phase: 'test', args: ['第一行\n第二行'] }],
+        console: [
+          { level: 'log', phase: 'test', segment: null, values: [{ text: '第一行\n第二行' }] },
+        ],
       }),
     );
     renderPanel({ execute });
@@ -144,7 +146,12 @@ describe('运行中的结果与明细', () => {
     fireEvent.click(screen.getByRole('button', { name: '列表' }));
 
     expect(screen.getByTestId('script-assertions').textContent).toContain('状态码 200');
-    expect(screen.getByTestId('script-console').textContent).toContain('第一行\n第二行');
+
+    // 换行由 CSS（`.script-console` 的 white-space: pre-wrap）保住，happy-dom 不加载样式表，
+    // 所以两侧各验一半：文本本身带换行没被拆掉，且容器挂着那个样式钩子
+    const list = screen.getByTestId('script-console');
+    expect(list.classList.contains('script-console')).toBe(true);
+    expect(list.textContent).toContain('第一行\n第二行');
   });
 
   it('请求失败时明细给出原因，不冒充"没有断言"', async () => {

@@ -194,7 +194,83 @@ describe('桥的消息校验（3.6）', () => {
 
     const result = await runScriptPhase(commands, target, 'prerequest', ['1;']);
 
-    expect(result.console[0].args).toEqual(['{"a":1,"nested":{"b":[1,2]}}', '[1,2]', '42']);
+    expect(result.console[0].values.map((value) => value.text)).toEqual([
+      '{"a":1,"nested":{"b":[1,2]}}',
+      '[1,2]',
+      '42',
+    ]);
+  }, 30_000);
+
+  it('结构化参数同时留下可展开的结构（全局 Console 用）', async () => {
+    const { commands } = fakeCommands();
+
+    state.execute = (_target, _options, callback) => {
+      state.handlers.get(BRIDGE_EVENTS.console)?.[0]?.({}, 'log', { a: 1, nested: { b: [1, 2] } });
+      callback(null, {});
+    };
+
+    const result = await runScriptPhase(commands, target, 'prerequest', ['1;']);
+    const [value] = result.console[0].values;
+
+    // 文本与结构各一份：前者给脚本页签，后者给面板逐层展开
+    expect(value.text).toBe('{"a":1,"nested":{"b":[1,2]}}');
+    expect(value.json).toEqual({ a: 1, nested: { b: [1, 2] } });
+    // 这一条输出属于哪一段脚本，也一并记下
+    expect(result.console[0].segment).toBe('第 1 段');
+  }, 30_000);
+
+  it('结构里的 secret 取值被掩掉，文本与结构同一份事实', async () => {
+    const { commands: base } = fakeCommands();
+    const secret = {
+      id: 'v1',
+      scope: 'collection',
+      owner_id: 'c1',
+      name: 'token',
+      is_secret: true,
+      enabled: true,
+      sort_order: 0,
+      initial: { state: 'value' as const, value: 'plain-secret-value' },
+      current: { state: 'unreadable' as const },
+    };
+    const commands = {
+      ...base,
+      variableList: async (scope: string) => (scope === 'collection' ? [secret] : []),
+      secretReveal: async () => ({
+        ...secret,
+        current: { state: 'value' as const, value: 'plain-secret-value' },
+      }),
+    } as unknown as Commands;
+
+    state.execute = (_target, _options, callback) => {
+      state.handlers
+        .get(BRIDGE_EVENTS.console)?.[0]?.({}, 'log', { token: 'plain-secret-value' });
+      callback(null, {});
+    };
+
+    const result = await runScriptPhase(commands, target, 'prerequest', ['1;']);
+    const [value] = result.console[0].values;
+
+    // 文本与结构来自同一份脱敏后的数据：两处都不该出现明文
+    expect(value.text).not.toContain('plain-secret-value');
+    expect(JSON.stringify(value.json)).not.toContain('plain-secret-value');
+  }, 30_000);
+
+  it('循环引用的参数只留文本，不崩也不无限递归', async () => {
+    const { commands } = fakeCommands();
+    const cyclic: Record<string, unknown> = { name: '环' };
+    cyclic.self = cyclic;
+
+    state.execute = (_target, _options, callback) => {
+      state.handlers.get(BRIDGE_EVENTS.console)?.[0]?.({}, 'log', cyclic);
+      callback(null, {});
+    };
+
+    const result = await runScriptPhase(commands, target, 'prerequest', ['1;']);
+    const [value] = result.console[0].values;
+
+    // 这条输出仍然在，只是没有可展开的结构
+    expect(value.text).toBe('[object Object]');
+    expect(value.json).toBeUndefined();
   }, 30_000);
 
   /**
@@ -214,7 +290,7 @@ describe('桥的消息校验（3.6）', () => {
       };
 
       const result = await runScriptPhase(commands, target, 'prerequest', ['1;']);
-      return result.console[0].args;
+      return result.console[0].values.map((value) => value.text);
     }
 
     it('字符串里的换行原样保留', async () => {
@@ -226,12 +302,18 @@ describe('桥的消息校验（3.6）', () => {
       expect(await capture('a\r\nb\rc')).toEqual(['a\nb\nc']);
     });
 
-    it('超出可读长度的对象摊成缩进 JSON', async () => {
-      const [text] = await capture({ name: '张三', tags: ['a', 'b'], note: 'x'.repeat(60) });
+    it('长对象也保持紧凑单行，宿主不自动缩进', async () => {
+      const value = { name: '张三', tags: ['a', 'b'], note: 'x'.repeat(60) };
+      const [text] = await capture(value);
 
-      // 紧凑形态一行几百字符，读不出层级；摊开之后每个字段占一行
-      expect(text).toContain('\n  "name": "张三"');
-      expect(text.split('\n').length).toBeGreaterThan(3);
+      // 要缩进时由脚本自己 JSON.stringify(value, null, 2)，宿主不代劳
+      expect(text).toBe(JSON.stringify(value));
+      expect(text).not.toContain('\n');
+    });
+
+    it('脚本自己格式化的多行 JSON 原样呈现', async () => {
+      const formatted = JSON.stringify({ a: 1, b: [2, 3] }, null, 2);
+      expect(await capture(formatted)).toEqual([formatted]);
     });
 
     it('短对象仍是一行，不为一两个字段摊成四行', async () => {

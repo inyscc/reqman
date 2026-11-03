@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from 'react';
 import './App.css';
 import { BottomBar, type ModalKind } from './components/BottomBar';
+import { ConsolePanel } from './components/ConsolePanel';
+import { ConsoleHandle } from './components/ConsoleHandle';
 import { CookiePanel } from './components/CookiePanel';
 import { Dropdown } from './components/Dropdown';
 import {
@@ -35,7 +37,14 @@ import {
 import { commands as defaultCommands, describeError, type Commands } from './lib/commands';
 import { createEditingRegistry, SURFACE_PRIORITY } from './lib/editing';
 import { applyTreeMove, type TreeMove } from './lib/treeMoves';
-import { readSplitRatio, SPLIT_DEFAULT, writeSplitRatio } from './lib/layout';
+import {
+  readSplitRatio,
+  SPLIT_DEFAULT,
+  writeSplitRatio,
+  CONSOLE_DEFAULT,
+  readConsoleHeight,
+  writeConsoleHeight,
+} from './lib/layout';
 import {
   DEFAULT_EDITOR_APPEARANCE,
   applyEditorAppearance,
@@ -64,22 +73,22 @@ import {
   renderVisualizer,
 } from './lib/scriptRuntime';
 import type {
-  ConsoleEntry,
   PhaseCancellation,
   TestAssertion,
   VisualizerResult,
 } from './lib/scriptRuntime';
-import { executeRequest } from './lib/requestExecution';
+import { executeRequest, UNRESOLVED_CODE } from './lib/requestExecution';
 import { collectRunRequests, type RunRequest } from './lib/requestRunner';
+import { consoleLog } from './lib/consoleLog';
 
 /**
  * 变量未能解析，请求没有发出去（spec: variable-engine「未解析变量提示」）。
  *
  * 与取消同属「请求没出去」：响应区不该被清空。但它**要**报错误——用户得知道是哪个
  * 变量没解析出来。判定在后端的建连之前完成，因此这个错误来自 sendRequest 而不是
- * 这里的预检查。
+ * 这里的预检查。码值定义在 `requestExecution`：那边也要用它把时间线的终态分成
+ * 「未发出」与「失败」。
  */
-const UNRESOLVED_CODE = 'unresolved_variables';
 import { withoutEmptyRows, cleanForSend } from './lib/rows';
 import { alignUrlAndParams } from './lib/url';
 import { createEntityStore } from './lib/store';
@@ -108,7 +117,6 @@ type EntityKind = 'collection' | 'folder';
 const ENTITY_AUTOSAVE_DELAY_MS = 500;
 
 interface ScriptReport {
-  console: ConsoleEntry[];
   assertions: TestAssertion[];
   error: string | null;
   visualizer?: VisualizerResult | null;
@@ -498,6 +506,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const [variables, setVariables] = useState<Variable[]>([]);
   /** 请求区与响应区的分栏比例（design D7）；以工作区为单位持久化。 */
   const [splitRatio, setSplitRatio] = useState(SPLIT_DEFAULT);
+  /**
+   * Console 抽屉的开合与高度（spec: ui-layout「底部 Console 抽屉占位」）。
+   *
+   * 高度按工作区记住，**开合不记住**：它是排查工具，每次启动都占掉三分之一屏会很讨厌。
+   */
+  const [consoleOpen, setConsoleOpen] = useState(false);
+  const [consoleRatio, setConsoleRatio] = useState(CONSOLE_DEFAULT);
   /**
    * 应用级响应呈现配置（spec: ui-layout「设置模态的响应呈现配置」）。
    *
@@ -1172,6 +1187,24 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       })
       .catch(() => {
         if (!cancelled) setSplitRatio(SPLIT_DEFAULT);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceId]);
+
+  // Console 抽屉高度：与分栏比例同一套读写，但各存各的键——两条显示偏好互不牵连
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+
+    void readConsoleHeight(client, workspaceId)
+      .then((value) => {
+        if (!cancelled) setConsoleRatio(value);
+      })
+      .catch(() => {
+        if (!cancelled) setConsoleRatio(CONSOLE_DEFAULT);
       });
 
     return () => {
@@ -1876,8 +1909,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         attempt,
         onResponse: (payload) =>
           patchRequestTab(key, (item) => ({ ...item, response: payload })),
+        // 请求一出去就在时间线上占位：慢的那一条不会因为它回来得晚而排到后面
+        onBegin: (pending) => consoleLog.beginNetwork(pending),
       },
     );
+
+    // 时间线先结算：门禁、失败、取消、未发出每条出口都要留痕，所以放在任何 return 之前
+    consoleLog.recordOutcome(outcome.trace);
 
     // 门禁未获准：本次没发请求，提示挂在这条标签上（spec: 脚本来源的可执行性门禁）
     if (outcome.gated) {
@@ -1901,11 +1939,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     }
 
     // 请求本身失败（离线、DNS、证书…）或取消，都不该连带丢掉前置脚本已经产生的输出与
-    // 断言：console 的呈现要求没有「仅当请求成功」这一限定条件
+    // 断言：console 的呈现要求没有「仅当请求成功」这一限定条件。
+    // console 输出不再落在这里——它只有全局 Console 一个去处（trace.outputs 已收走）；
+    // 标签上留的是断言、脚本错误与可视化结果。
     patchRequestTab(key, (item) => ({
       ...item,
       scriptReport: {
-        console: outcome.console,
         assertions: outcome.assertions,
         error: outcome.scriptError,
         visualizer: outcome.visualizer,
@@ -1954,10 +1993,21 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     const attempt = openAttempt();
     runnerAttemptRef.current = attempt;
     try {
-      return await executeRequest(
+      const outcome = await executeRequest(
         { client, workspaceId, environmentId },
-        { request, dirty: false, skipScripts: options.skipScripts, attempt },
+        {
+          request,
+          dirty: false,
+          skipScripts: options.skipScripts,
+          attempt,
+          // 运行器的每一条同样进时间线：它和手工发送走的是同一条流水线，
+          // 只是结果回给运行器面板而不是标签
+          onBegin: (pending) => consoleLog.beginNetwork(pending),
+        },
       );
+
+      consoleLog.recordOutcome(outcome.trace);
+      return outcome;
     } finally {
       if (runnerAttemptRef.current === attempt) runnerAttemptRef.current = null;
     }
@@ -2475,6 +2525,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const commitSplit = (ratio: number) => {
     if (!workspaceId) return;
     void writeSplitRatio(client, workspaceId, ratio);
+  };
+
+  /** 同上：Console 抽屉的高度也在松手时落库。 */
+  const commitConsoleHeight = (ratio: number) => {
+    if (!workspaceId) return;
+    void writeConsoleHeight(client, workspaceId, ratio);
   };
 
   /**
@@ -3008,7 +3064,6 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                 onWrapLinesChange={setWrapLines}
                 sending={activeSending}
                 requestFormat={draft.settings.response_format}
-                scriptConsole={scriptReport?.console}
                 scriptAssertions={scriptReport?.assertions}
                 scriptError={scriptReport?.error ?? null}
                 visualizerHtml={
@@ -3020,6 +3075,24 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         )}
       </main>
 
+      {/* Console 抽屉：占自己的高度带，主区随之收缩——不覆盖响应区正文，
+          排查时才能一边看响应一边看日志（spec: ui-layout「底部 Console 抽屉占位」） */}
+      {consoleOpen && (
+        <section
+          className="console-drawer"
+          data-testid="console-drawer"
+          aria-label="Console"
+          style={{ '--console-ratio': consoleRatio } as CSSProperties}
+        >
+          <ConsoleHandle
+            ratio={consoleRatio}
+            onRatio={setConsoleRatio}
+            onCommit={commitConsoleHeight}
+          />
+          <ConsolePanel onClose={() => setConsoleOpen(false)} />
+        </section>
+      )}
+
       <BottomBar
         sending={Object.keys(sending).length > 0}
         error={error}
@@ -3030,6 +3103,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
         }}
         onOpenModal={setModal}
         importExportDisabled={!workspaceId}
+        consoleOpen={consoleOpen}
+        onToggleConsole={() => setConsoleOpen((open) => !open)}
       />
 
       {/* 自绘边缘缩放边条（design D6）：贴窗口内沿的透明窄条 */}

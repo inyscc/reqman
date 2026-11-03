@@ -202,29 +202,38 @@ async function sendAndApprove(page: Page): Promise<void> {
   }
 }
 
+/**
+ * 打开全局 Console 抽屉并清空时间线。
+ *
+ * 脚本的 console 输出只有一个去处：全局 Console（响应区的「脚本」页签只剩断言与脚本错误）。
+ * 先清空，稍后读回来的就只是这一轮产生的输出。
+ */
+async function openConsole(page: Page): Promise<void> {
+  const closed = page.getByTestId('console-toggle-closed');
+  if (await closed.isVisible().catch(() => false)) await closed.click();
+  await page.getByTestId('console-panel').waitFor();
+  await page.getByTestId('console-clear').click();
+}
+
 interface ConsoleLine {
   phase: string;
   text: string;
 }
 
-/**
- * 切到响应区的「脚本」标签，读回 console 的每条输出（顺序即执行顺序）。
- *
- * 这个标签**只在本次发送产生了脚本输出时才存在**（见 ResponsePanel）：它的出现本身就是
- * 「脚本确实跑了」的信号，因此先等它、再点。
- */
+/** 读回 Console 时间线上的每条输出（顺序即执行顺序）。 */
 async function readConsole(page: Page): Promise<ConsoleLine[]> {
-  const tab = page.getByRole('button', { name: '脚本', exact: true });
-  await tab.waitFor();
-  await tab.click();
-  const list = page.getByTestId('script-console');
-  await list.waitFor();
+  // 至少等到一条输出：发送是异步的，抽屉里的时间线要等脚本跑完才长出来
+  await page.waitForFunction(
+    () =>
+      document.querySelectorAll('[data-testid="console-entry"][data-kind="output"]').length > 0,
+  );
 
   return page.evaluate(() =>
-    Array.from(document.querySelectorAll('[data-testid="script-console"] li')).map((item) => ({
+    Array.from(
+      document.querySelectorAll('[data-testid="console-entry"][data-kind="output"]'),
+    ).map((item) => ({
       phase: item.getAttribute('data-phase') ?? '',
-      // 行首的 `[前置 · log]` 是来源标记，去掉它才拿到脚本自己打印的内容
-      text: (item.textContent ?? '').replace(/^\[[^\]]*\]\s*/, ''),
+      text: item.querySelector('[data-testid="console-output-text"]')?.textContent ?? '',
     })),
   );
 }
@@ -237,6 +246,7 @@ describe('目录链脚本编排（真实引擎）', () => {
     const page = await openApp();
     try {
       await openDeepRequest(page);
+      await openConsole(page);
       await sendAndApprove(page);
 
       const lines = await readConsole(page);
@@ -275,6 +285,7 @@ describe('目录链脚本编排（真实引擎）', () => {
         () => (window as unknown as Record<string, unknown>).__requestFolder === 'f-target',
       );
 
+      await openConsole(page);
       await sendAndApprove(page);
       const lines = await readConsole(page);
 

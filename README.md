@@ -5,6 +5,23 @@
 - 需求书：`rodemap`
 - 已交付能力的规格：`openspec/specs/`；进行中的变更：`openspec/changes/add-postman-io/`（已归档的在 `openspec/changes/archive/`）
 
+## 能力概览
+
+每一条都对应一份规格（已归档的在 `openspec/specs/`，尚未归档的在 `openspec/changes/`）；规格是行为契约，实现可以变，承诺不变。
+
+- **http-engine** — 请求方法、URL 与查询参数、请求头、正文类型、三级代理、认证、响应元数据与大响应保护
+- **pm-script-runtime** — 三级脚本（集合 / 目录 / 请求）的编排、`pm.*` 兼容面、宿主桥出口、断言与 console 输出的收集
+- **variable-engine** — 全局 / 环境 / 集合 / 本地四个作用域的解析与优先级
+- **request-console** — 全局 Console：跨请求累积的请求日志与脚本输出，可按类型过滤、按文本搜索，对象可展开
+- **collection-runner** — 集合与目录的顺序执行、请求间隔、失败处理与结果明细
+- **cookie-jar** — Cookie 的自动携带、匹配规则与手动管理
+- **storage-foundation** — SQLite 存储、迁移与乐观提交
+- **postman-interchange** — Postman 集合与环境的导入导出
+- **ui-layout** — 侧栏、主区分栏、会话标签、低层面板与底部状态条（含 Console 抽屉）
+- **ui-polish** — 密度、配色与动效基线
+- **code-editors** — Monaco 编辑器的配置、快捷键与折行
+- **window-chrome** — 自绘标题栏、窗口控制与边缘缩放
+
 ## 环境要求
 
 - Rust 工具链与 Cargo（SQLite 以 bundled 方式编译，需要 C 编译器）
