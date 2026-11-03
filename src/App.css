@@ -3515,6 +3515,12 @@ iframe.visualizer-frame {
   text-align: right;
 }
 
+/* 提前收手后没轮到的那些：写明白"未执行"，空白看起来像还在排队 */
+.runner-skip {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
 /* 状态点：灰=未跑、蓝=进行中（呼吸）、绿=通过、红=失败/出错、深灰=被停止 */
 .runner-dot {
   flex: none;
@@ -3578,6 +3584,24 @@ iframe.visualizer-frame {
 
 .runner-tally-fail {
   color: var(--danger);
+}
+
+/* 提前收手的说明：一条细横幅压在明细上方。主句用 warn——这一轮不是"出错"，
+   而是"按你的设置在失败处停下了"；余量退成灰字，别跟主句抢读 */
+.runner-halt {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: #fdf6ec;
+  color: var(--warn);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+.runner-halt-rest {
+  color: var(--muted);
 }
 
 .runner-detail {
@@ -3685,15 +3709,30 @@ iframe.visualizer-frame {
   font-weight: 600;
 }
 
-.runner-field {
+/* 执行设置：每项都是一个勾选框 + 一句说明它自己的话，左对齐竖排。
+   这一列里只有一种形状，读起来才像一份设置清单；解释性文字挂在行末的 ⓘ 上 */
+.runner-settings {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-4);
 }
 
-.runner-field label {
-  color: var(--muted);
+.runner-setting {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 22px;
   font-size: var(--text-sm);
+  cursor: pointer;
+  user-select: none;
+}
+
+.runner-setting-text {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  color: var(--text);
 }
 
 /* 单位放进框里、贴着数字读：吊在框外像一句被截断的话 */
@@ -3719,9 +3758,47 @@ iframe.visualizer-frame {
   font-variant-numeric: tabular-nums;
 }
 
+/* 嵌在句子里的数字框：宽度只够放下 6 位数与单位，边框也退一档，别真的像一句被切开的话 */
+.runner-setting .runner-input {
+  flex: none;
+  width: 96px;
+  border-color: var(--border);
+}
+
+.runner-setting .runner-input input {
+  padding: var(--space-1) var(--space-2);
+  text-align: right;
+}
+
+.runner-setting .runner-input input:disabled {
+  color: var(--muted);
+}
+
+/* 行末的说明入口：一个圈里的 i。悬停才把话说完，比行下多压一段灰字安静 */
+.runner-info {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1;
+  cursor: help;
+}
+
+.runner-info:hover {
+  border-color: var(--muted);
+  color: var(--text);
+}
+
 .runner-unit {
   flex: none;
-  padding-right: var(--space-4);
+  padding-right: var(--space-3);
   color: var(--muted);
   font-size: var(--text-xs);
 }
@@ -3731,6 +3808,18 @@ iframe.visualizer-frame {
   color: var(--muted);
   font-size: var(--text-xs);
   line-height: 1.5;
+}
+
+/* 全局给 input 设了 width:100%（表单控件撑满一列）；勾选框必须自己收回尺寸，
+   否则它会把整行占满、后面的文字被挤到看不见 */
+.runner-setting input[type='checkbox'] {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .runner-hint-center {

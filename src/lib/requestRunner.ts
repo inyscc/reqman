@@ -122,6 +122,13 @@ export function statusOfOutcome(outcome: RequestExecutionOutcome): RunStepResult
 export interface RunSequenceOptions {
   /** 两条请求之间的等待（毫秒）；0 表示不等待。第一条之前不等待。 */
   intervalMs: number;
+  /**
+   * 遇失败即停：某一条判为 `fail` 或 `error` 后不再发起后面的。
+   *
+   * 只在**失败之后**生效——`stopped` 与用户主动停止走同一条出口，不在这里判。默认关闭，
+   * 因为"跑完看全貌"和"断了就收手"是两种意图，得由用户选。
+   */
+  stopOnFailure?: boolean;
   /** 用户按下停止（或界面已关闭）：每一条开始前与间隔结束后各问一次。 */
   shouldStop?: () => boolean;
   /** 可注入的等待：测试用假时钟，生产用 setTimeout。 */
@@ -140,6 +147,10 @@ const defaultWait = (ms: number) =>
  *
  * 间隔放在两条之间而不是每条之前：最后一条跑完不必再等一次，否则「跑完了」与「还在转圈」
  * 之间会多出一段没有意义的空白。
+ *
+ * 中断有三个来源：用户停止、这一条自己被取消、以及开了「失败即停」时这一条失败。三者都
+ * 只是**提前结束这一轮**，返回的仍是已跑过的前缀——没跑的那些不伪造结果，界面上它们是
+ * 空白，而不是一堆假的"通过"。
  */
 export async function runSequence(
   count: number,
@@ -164,6 +175,8 @@ export async function runSequence(
 
     // 被取消的那一条自己会回报 `stopped`：不必等下一轮的 shouldStop 才收手
     if (result.status === 'stopped' || shouldStop()) break;
+
+    if (options.stopOnFailure && (result.status === 'fail' || result.status === 'error')) break;
   }
 
   return results;

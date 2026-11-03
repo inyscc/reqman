@@ -79,7 +79,9 @@ describe('运行器的名单与选择', () => {
     renderPanel();
 
     expect(screen.getByTestId('runner-selection').textContent).toContain('已选 2 / 2');
-    const boxes = screen.getAllByRole('checkbox') as HTMLInputElement[];
+    // 只数名单里的勾选框：「失败时自动结束」那个不是选择，默认也不该是勾上的
+    const boxes = screen.getAllByLabelText(/^选择 /) as HTMLInputElement[];
+    expect(boxes).toHaveLength(2);
     expect(boxes.every((box) => box.checked)).toBe(true);
   });
 
@@ -155,6 +157,119 @@ describe('运行中的结果与明细', () => {
 
     await waitFor(() => expect(screen.getByTestId('runner-detail-error').textContent).toContain('找不到主机'));
     expect(screen.getAllByTestId('runner-row')[0].getAttribute('data-status')).toBe('error');
+  });
+});
+
+describe('执行设置', () => {
+  it('两项都是勾选框：默认都不勾，间隔的数字框在没勾时不可编辑', () => {
+    renderPanel();
+
+    const delay = screen.getByTestId('runner-delay-toggle') as HTMLInputElement;
+    const stop = screen.getByTestId('runner-stop-on-failure') as HTMLInputElement;
+    const interval = document.getElementById('runner-interval') as HTMLInputElement;
+
+    expect(delay.checked).toBe(false);
+    expect(stop.checked).toBe(false);
+    // 勾选框是这一项的总开关：没勾时填的数字不生效，所以也不该让人填
+    expect(interval.disabled).toBe(true);
+
+    fireEvent.click(delay);
+    expect(interval.disabled).toBe(false);
+  });
+
+  it('说明挂在行末的 ⓘ 上，不占行下的一段灰字', () => {
+    renderPanel();
+
+    expect(
+      screen.getByLabelText('第一条立即发出，之后每条之间等这么久。'),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText('任一条有断言未通过、脚本报错或请求出错，就停下，不再往后跑。'),
+    ).toBeTruthy();
+  });
+});
+
+describe('失败时自动结束', () => {
+  /** 第一条断言失败、其余通过：开了「失败即停」的话，只该跑第一条。 */
+  const failingFirst = () =>
+    vi.fn(async (request: SavedRequest) =>
+      request.id === 'r1'
+        ? outcome({
+            assertions: [{ name: '状态码 200', passed: false, skipped: false, error: null }],
+          })
+        : outcome({
+            assertions: [{ name: '状态码 200', passed: true, skipped: false, error: null }],
+          }),
+    );
+
+  it('勾上后第一条失败就收手，并交代剩余几条没跑', async () => {
+    const execute = failingFirst();
+    renderPanel({ execute });
+
+    fireEvent.click(screen.getByTestId('runner-stop-on-failure'));
+    fireEvent.click(screen.getByTestId('runner-start'));
+
+    await waitFor(() => expect(screen.getByTestId('runner-halt')).toBeTruthy());
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('runner-halt').textContent).toContain('其余 1 条未执行');
+    // 没轮到的那一行写明"未执行"，留白看起来像还在排队
+    expect(screen.getByTestId('runner-row-skip').textContent).toContain('未执行');
+  });
+
+  it('默认不勾：失败也把剩下的跑完，不收手也不出现收手说明', async () => {
+    const execute = failingFirst();
+    renderPanel({ execute });
+
+    fireEvent.click(screen.getByTestId('runner-start'));
+
+    await waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId('runner-halt')).toBeNull();
+    expect(screen.queryByTestId('runner-row-skip')).toBeNull();
+  });
+
+  it('出错同样触发收手，说明里写的是"执行出错"', async () => {
+    const execute = vi.fn(async () => outcome({ error: { code: 'dns_failure', message: '找不到主机' } }));
+    renderPanel({ execute });
+
+    fireEvent.click(screen.getByTestId('runner-stop-on-failure'));
+    fireEvent.click(screen.getByTestId('runner-start'));
+
+    await waitFor(() => expect(screen.getByTestId('runner-halt')).toBeTruthy());
+    expect(screen.getByTestId('runner-halt').textContent).toContain('执行出错');
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('收手后明细直接翻到断掉的那一条，不停在第一条上', async () => {
+    const execute = vi.fn(async (request: SavedRequest) =>
+      request.id === 'r2'
+        ? outcome({
+            assertions: [{ name: '状态码 200', passed: false, skipped: false, error: null }],
+          })
+        : outcome(),
+    );
+    renderPanel({
+      execute,
+      items: [item('r1', '登录', 'POST'), item('r2', '列表'), item('r3', '详情')],
+    });
+
+    fireEvent.click(screen.getByTestId('runner-stop-on-failure'));
+    fireEvent.click(screen.getByTestId('runner-start'));
+
+    await waitFor(() => expect(screen.getByTestId('runner-halt')).toBeTruthy());
+    expect(screen.getByTestId('runner-detail').textContent).toContain('列表');
+  });
+
+  it('全通过时不出现收手说明，勾选状态保持不变', async () => {
+    renderPanel();
+
+    const check = screen.getByTestId('runner-stop-on-failure') as HTMLInputElement;
+    fireEvent.click(check);
+    fireEvent.click(screen.getByTestId('runner-start'));
+
+    await waitFor(() => expect(screen.getAllByTestId('runner-row-meta')).toHaveLength(2));
+    expect(screen.queryByTestId('runner-halt')).toBeNull();
+    expect(check.checked).toBe(true);
   });
 });
 

@@ -319,3 +319,65 @@ describe('顺序执行与间隔', () => {
     expect(seen).toEqual([0, 1]);
   });
 });
+
+describe('失败即停', () => {
+  it('开了之后，判为失败就不再往后跑', async () => {
+    const run = vi.fn(async () => step({ status: 'fail', failed: 1 }));
+
+    const results = await runSequence(3, run, { intervalMs: 0, stopOnFailure: true });
+
+    expect(run).toHaveBeenCalledTimes(1);
+    // 没跑的那些不伪造结果：返回的只是已跑过的前缀
+    expect(results).toHaveLength(1);
+  });
+
+  it('出错与失败同等对待', async () => {
+    const run = vi.fn(async () => step({ status: 'error', message: '找不到主机' }));
+
+    const results = await runSequence(3, run, { intervalMs: 0, stopOnFailure: true });
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(results[0].status).toBe('error');
+  });
+
+  it('前面通过了，到失败那一条才收手', async () => {
+    const run = vi
+      .fn<(index: number) => Promise<RunStepResult>>()
+      .mockResolvedValueOnce(step())
+      .mockResolvedValueOnce(step())
+      .mockResolvedValueOnce(step({ status: 'fail', failed: 1 }))
+      .mockResolvedValue(step());
+
+    const results = await runSequence(5, run, { intervalMs: 0, stopOnFailure: true });
+
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(results.map((item) => item.status)).toEqual(['pass', 'pass', 'fail']);
+  });
+
+  it('全通过时与没开一样跑完', async () => {
+    const run = vi.fn(async () => step());
+
+    const results = await runSequence(3, run, { intervalMs: 0, stopOnFailure: true });
+
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(results).toHaveLength(3);
+  });
+
+  it('没开就照旧跑完：失败只是结果之一，不是中断的理由', async () => {
+    const run = vi.fn(async () => step({ status: 'fail', failed: 2 }));
+
+    const results = await runSequence(3, run, { intervalMs: 0 });
+
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(results).toHaveLength(3);
+  });
+
+  it('被取消的那条不因"失败即停"重复处理：仍然只跑一条', async () => {
+    const run = vi.fn(async () => step({ status: 'stopped', message: '已停止' }));
+
+    const results = await runSequence(4, run, { intervalMs: 0, stopOnFailure: true });
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(results).toHaveLength(1);
+  });
+});

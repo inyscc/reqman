@@ -52,6 +52,26 @@ function summarize(result: RunStepResult): { text: string; ms: number } {
 }
 
 /**
+ * 设置项行末的说明入口：平时只是一个圈里的 i，悬停才把话说完。
+ *
+ * 挂在 `title` 上而不是自绘浮层——这条说明只在"想知道"时才需要，原生提示够用，
+ * 也省掉一层定位与关闭逻辑。点它不该顺手勾上外层那一项，所以吃掉点击的默认行为。
+ */
+function Info({ title }: { title: string }) {
+  return (
+    <span
+      className="runner-info"
+      role="img"
+      aria-label={title}
+      title={title}
+      onClick={(event) => event.preventDefault()}
+    >
+      i
+    </span>
+  );
+}
+
+/**
  * 集合 / 目录的运行器（change: collection-runner）。
  *
  * 打开时**默认全选**子树里的所有请求——运行集合最常见的意图就是"全跑一遍"，让人再勾一次
@@ -76,9 +96,23 @@ export function RunnerPanel({
   // 默认全选：运行集合就是"全都跑一遍"，取消个别的才需要动手
   const [selected, setSelected] = useState<Set<string>>(() => new Set(items.map((item) => item.id)));
   const [intervalText, setIntervalText] = useState('0');
+  /** 间隔要显式打开：不勾即不等，与「失败时自动结束」是同一形状的两项设置。 */
+  const [delayEnabled, setDelayEnabled] = useState(false);
+  /**
+   * 失败即停：一条判为失败 / 出错就不再往后跑。默认关闭——"跑完看全貌"和"断了就收手"
+   * 是两种意图，谁也不该替用户先选；而一旦开了，这一轮就该留下说明，不能只是少跑几条。
+   */
+  const [stopOnFailure, setStopOnFailure] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<Record<string, RunStepResult>>({});
   const [outcomes, setOutcomes] = useState<Record<string, RequestExecutionOutcome>>({});
+  /** 因失败提前收手的现场：结果区据此说明"为什么后面没跑"。 */
+  const [halt, setHalt] = useState<{
+    index: number;
+    name: string;
+    status: RunStatus;
+    remaining: number;
+  } | null>(null);
   /** 正在跑的那一条：行的状态点据此显示"进行中"。 */
   const [activeId, setActiveId] = useState<string | null>(null);
   /** 明细面板里展示的那一条。 */
@@ -110,7 +144,10 @@ export function RunnerPanel({
     () => items.filter((item) => selected.has(item.id)),
     [items, selected],
   );
-  const intervalMs = Math.max(0, Math.min(600_000, Number.parseInt(intervalText, 10) || 0));
+  // 没勾「请求之间等待」时，填的数字不生效——勾选框才是这一项的总开关
+  const intervalMs = delayEnabled
+    ? Math.max(0, Math.min(600_000, Number.parseInt(intervalText, 10) || 0))
+    : 0;
   const gatePending = gate !== null && gateChoice === null;
   const done = Object.keys(results).length;
 
@@ -155,10 +192,11 @@ export function RunnerPanel({
     setResults({});
     setOutcomes({});
     setDetailId(null);
+    setHalt(null);
 
     const skipScripts = gateChoice === 'skip';
 
-    await runSequence(
+    const ran = await runSequence(
       queued.length,
       async (index) => {
         const item = queued[index];
@@ -169,6 +207,7 @@ export function RunnerPanel({
       },
       {
         intervalMs,
+        stopOnFailure,
         shouldStop: () => stopRef.current,
         wait,
         onStep: (index, result) => {
@@ -182,6 +221,25 @@ export function RunnerPanel({
 
     setActiveId(null);
     setRunning(false);
+
+    // 停下来的是"失败"，还是用户按了停止？前者要交代剩余多少条没跑，后者界面已有停止按钮的语义
+    const last = ran[ran.length - 1];
+    if (
+      stopOnFailure &&
+      !stopRef.current &&
+      last !== undefined &&
+      ran.length < queued.length &&
+      (last.status === 'fail' || last.status === 'error')
+    ) {
+      setHalt({
+        index: ran.length,
+        name: queued[ran.length - 1].name,
+        status: last.status,
+        remaining: queued.length - ran.length,
+      });
+      // 明细直接翻到断掉的那一条：收手之后要看的就是它，不该还停在第一条上
+      setDetailId(queued[ran.length - 1].id);
+    }
   };
 
   const stop = () => {
@@ -310,8 +368,15 @@ export function RunnerPanel({
                           <span>{summary.text}</span>
                           {summary.ms > 0 && <span className="runner-ms">{summary.ms} ms</span>}
                         </>
+                      ) : status === 'running' ? (
+                        <span>运行中</span>
                       ) : (
-                        status === 'running' && <span>运行中</span>
+                        // 提前收手后，没轮到的那些写「未执行」：空白看起来像"还在排队"
+                        halt !== null && (
+                          <span className="runner-skip" data-testid="runner-row-skip">
+                            未执行
+                          </span>
+                        )
                       )}
                     </span>
                   </li>
@@ -331,6 +396,17 @@ export function RunnerPanel({
               </span>
             )}
           </div>
+
+          {/* 少跑几条不能没有交代：说明是谁触发的收手、还剩多少条没跑 */}
+          {halt && (
+            <div className="runner-halt" role="status" data-testid="runner-halt">
+              <span>
+                第 {halt.index} 条「{halt.name}」{halt.status === 'error' ? '执行出错' : '有断言未通过'}
+                ，已按设置结束本轮。
+              </span>
+              <span className="runner-halt-rest">其余 {halt.remaining} 条未执行。</span>
+            </div>
+          )}
 
           <div className="runner-detail" data-testid="runner-detail">
             {!detail && (
@@ -392,23 +468,49 @@ export function RunnerPanel({
         <aside className="runner-side">
           <div className="runner-rail-block">
             <div className="runner-card-head">执行设置</div>
-            <div className="runner-field">
-              <label htmlFor="runner-interval">请求间隔</label>
-              <div className="runner-input">
+            {/* 每项都是一样的形状：一个勾选框 + 一句说明它自己的话，左对齐竖排。
+                需要额外解释的挂在行末的 ⓘ 上（悬停才出），不在行下压一段灰字 */}
+            <div className="runner-settings">
+              <label className="runner-setting">
                 <input
-                  id="runner-interval"
-                  type="number"
-                  min={0}
-                  max={600000}
-                  step={100}
-                  value={intervalText}
+                  type="checkbox"
+                  checked={delayEnabled}
                   disabled={running}
-                  onChange={(event) => setIntervalText(event.target.value)}
+                  onChange={(event) => setDelayEnabled(event.target.checked)}
+                  data-testid="runner-delay-toggle"
                 />
-                <span className="runner-unit">毫秒</span>
-              </div>
+                <span className="runner-setting-text">
+                  请求之间等待
+                  <span className="runner-input">
+                    <input
+                      id="runner-interval"
+                      type="number"
+                      min={0}
+                      max={600000}
+                      step={100}
+                      value={intervalText}
+                      disabled={running || !delayEnabled}
+                      onChange={(event) => setIntervalText(event.target.value)}
+                    />
+                    <span className="runner-unit">毫秒</span>
+                  </span>
+                </span>
+                <Info title="第一条立即发出，之后每条之间等这么久。" />
+              </label>
+
+              <label className="runner-setting">
+                <input
+                  id="runner-stop-on-failure"
+                  type="checkbox"
+                  checked={stopOnFailure}
+                  disabled={running}
+                  onChange={(event) => setStopOnFailure(event.target.checked)}
+                  data-testid="runner-stop-on-failure"
+                />
+                <span className="runner-setting-text">失败时自动结束</span>
+                <Info title="任一条有断言未通过、脚本报错或请求出错，就停下，不再往后跑。" />
+              </label>
             </div>
-            <p className="runner-hint">第一条立即发出，之后每条之间等这么久。</p>
           </div>
 
           <div className="runner-rail-block">
@@ -437,7 +539,11 @@ export function RunnerPanel({
               </p>
             ) : (
               <p className="runner-hint">
-                {done > 0 ? `本轮共 ${queued.length} 条` : `共 ${queued.length} 条待运行`}
+                {halt
+                  ? `已执行 ${done} / ${queued.length} 条`
+                  : done > 0
+                    ? `本轮共 ${queued.length} 条`
+                    : `共 ${queued.length} 条待运行`}
               </p>
             )}
           </div>
