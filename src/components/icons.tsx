@@ -40,6 +40,20 @@ export function CollectionIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/**
+ * 运行器图标：一个实心三角，读作「跑起来」。
+ *
+ * 会话标签里用它标出「这个标签是一轮运行」，与集合 / 文件夹图标同一档尺寸与浓度；
+ * 同样是实心面而不是描边——12px 下描边会糊。
+ */
+export function RunnerIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...BOX} {...props}>
+      <path d="M4.5 2.8 13 8l-8.5 5.2z" fill="currentColor" opacity="0.75" />
+    </svg>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // 变量行的操作图标（change: rework-collection-tree-and-variable-model）
 //

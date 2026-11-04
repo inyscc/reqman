@@ -3304,7 +3304,8 @@ iframe.visualizer-frame {
 /* ==========================================================================
  * 集合 / 目录的运行器（spec: ui-layout「集合与目录的运行器」）
  *
- * 入口是实体面板头右上角的「运行」；面板是一个铺满模态的**三列工作区**：
+ * 入口是实体面板头右上角的「运行」；它占一个**会话标签**（change: runner-as-tab），
+ * 标签内容是一块三列工作区：
  *
  *   待运行请求 │ 运行结果 │ 执行设置
  *
@@ -3313,42 +3314,28 @@ iframe.visualizer-frame {
  * 有了一个固定的落脚处。列与列之间用竖线分隔，行内不给描边，名单读起来像一张表。
  * ========================================================================== */
 
-.modal.modal-runner {
-  /* 运行器是"做一件事"的工作区，不是确认框：宽高都吃到窗口的大部分，
-     剩下的边距留给遮罩，让人一眼看出这是浮在应用之上的一层 */
-  width: min(1180px, 100%);
-  height: min(760px, 100%);
-}
-
-/* 三列自己管自己的滚动，模态正文因此不再滚动、也不再留内边距 */
-.modal-runner .modal-body {
+/* 运行器标签的内容区：吃掉会话标签行以下的整块主区。
+   所有运行器标签都渲染、只把非激活的藏起来——"只渲染激活那一个"会让切走一次
+   就等于把这一轮停掉（面板卸载会收手）。 */
+.runner-tab-pane {
+  grid-column: 1 / -1;
+  grid-row: 2 / -1;
   display: flex;
   flex-direction: column;
-  padding: 0;
-  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
 }
 
-/* 头部比其它模态略高：这一层是工作区，标题与列首之间要有分界感 */
-.modal-runner .modal-header {
-  flex: none;
-  padding: var(--space-5) var(--space-6);
+/* display: flex 会盖掉 hidden 的默认样式，这里显式补回 */
+.runner-tab-pane[hidden] {
+  display: none;
 }
 
-.modal-runner .modal-header button {
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border-color: transparent;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--text-base);
-  line-height: 1;
-}
-
-.modal-runner .modal-header button:hover:not(:disabled) {
-  border-color: transparent;
-  background: var(--panel-2);
-  color: var(--text);
+/* 运行器占着主区时，请求带与分栏区让位：它们属于请求标签，不属于这一轮运行 */
+.main.runner-active > .request-top,
+.main.runner-active > .request-region {
+  display: none;
 }
 
 .runner {
@@ -3661,6 +3648,76 @@ iframe.visualizer-frame {
 
 .runner-detail-meta {
   font-size: var(--text-xs);
+}
+
+/* 明细页签（请求 / 响应 / 脚本）：与响应区的页签同一套观感，但落在列首那条本来就窄的
+   工具行里，因此收紧内边距与字号 */
+.runner-tabs {
+  flex: none;
+  flex-wrap: nowrap;
+  gap: var(--space-1);
+}
+
+/* 列首一行放不下时让页签整体折到第二行：三个页签与标题挤在一起比折一行更难看 */
+.runner-result-pane .runner-pane-head {
+  flex-wrap: wrap;
+}
+
+.runner-tabs .tab {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+/* 请求行：方法与目标 URL 同排，URL 可断行 */
+.runner-request-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+/* 一组内容（请求体 / 请求头 / 响应体 / 响应头）：小标题一行，内容一块 */
+.runner-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.runner-block-title {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.runner-block-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+/* 正文块：等宽、保留换行。给它自己的滚动条而不是一直长下去——否则「响应头」会被一份
+   几万字的正文推到很远，要滚很久才看得到 */
+.runner-pre {
+  margin: 0;
+  padding: var(--space-4);
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+
+/* 头表：名称列窄、退成灰字；值很长（签名、Cookie），靠全局的断行规则排 */
+.runner-headers td:first-child {
+  width: 32%;
+  color: var(--muted);
 }
 
 .runner-pill {

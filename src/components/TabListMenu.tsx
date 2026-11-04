@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMenuDismiss } from '../lib/useMenuDismiss';
 import { useMenuPlacement } from '../lib/useMenuPlacement';
-import { CollectionIcon, FolderIcon } from './icons';
+import { CollectionIcon, FolderIcon, RunnerIcon } from './icons';
 
 /** 菜单里一项需要的全部信息：够在本行重复陈述标签自身（spec: 会话标签栏）。 */
 export interface TabListEntry {
@@ -12,6 +12,8 @@ export interface TabListEntry {
   method: string | null;
   /** 实体标签的种类图标；请求标签没有。 */
   entityKind: 'collection' | 'folder' | null;
+  /** 运行器标签：与请求、实体并列的第三种标签（change: runner-as-tab）。 */
+  runner?: boolean;
   dirty: boolean;
   active: boolean;
 }
@@ -106,6 +108,8 @@ export function TabListMenu({ tabs, onSelect, onClose }: TabListMenuProps) {
                     <span className="method-badge" data-method={tab.method}>
                       {tab.method}
                     </span>
+                  ) : tab.runner ? (
+                    <RunnerIcon className="tab-kind-icon" role="img" aria-label="运行器" />
                   ) : tab.entityKind === 'collection' ? (
                     <CollectionIcon className="tab-kind-icon" role="img" aria-label="集合" />
                   ) : (

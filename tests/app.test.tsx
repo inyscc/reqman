@@ -7247,12 +7247,21 @@ describe('集合与目录的运行器（collection-runner）', () => {
     await screen.findByTestId('entity-script-panel');
     fireEvent.click(screen.getByTestId('entity-run'));
 
-    const dialog = await screen.findByRole('dialog');
-    expect(dialog.textContent).toContain('运行「我的集合」');
+    // 运行器是一个会话标签，不是模态：标题写在标签上，内容在它自己的页里
+    const pane = await screen.findByTestId('runner-tab');
+    expect(
+      screen
+        .getAllByTestId('session-tab')
+        .some((tab) => (tab.textContent ?? '').includes('运行「我的集合」')),
+    ).toBe(true);
+    // 点「运行」的那一页仍在标签行里（运行器不顶替来源标签），只是激活态交给了运行器
+    const strip = screen.getAllByTestId('session-tab');
+    expect(strip).toHaveLength(2);
+    expect(strip.some((tab) => tab.getAttribute('data-tab-kind') === 'entity')).toBe(true);
     // 两个请求都在名单里，且默认全选
-    expect(within(dialog).getByText('我的请求')).toBeTruthy();
-    expect(within(dialog).getByText('另一个请求')).toBeTruthy();
-    expect(within(dialog).getByTestId('runner-selection').textContent).toContain('已选 2 / 2');
+    expect(within(pane).getByText('我的请求')).toBeTruthy();
+    expect(within(pane).getByText('另一个请求')).toBeTruthy();
+    expect(within(pane).getByTestId('runner-selection').textContent).toContain('已选 2 / 2');
   });
 
   it('点运行后逐条发出，并按断言结果给出通过 / 失败', async () => {
@@ -7264,16 +7273,16 @@ describe('集合与目录的运行器（collection-runner）', () => {
     fireEvent.click(await tree().findByText('我的集合'));
     await screen.findByTestId('entity-script-panel');
     fireEvent.click(screen.getByTestId('entity-run'));
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.click(within(dialog).getByTestId('runner-start'));
+    const pane = await screen.findByTestId('runner-tab');
+    fireEvent.click(within(pane).getByTestId('runner-start'));
 
     // 两条都发出去（运行器直接调流水线，不经过标签的发送按钮）
     await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(2));
     await waitFor(() =>
-      expect(within(dialog).getAllByTestId('runner-row-meta')).toHaveLength(2),
+      expect(within(pane).getAllByTestId('runner-row-meta')).toHaveLength(2),
     );
 
-    for (const row of within(dialog).getAllByTestId('runner-row')) {
+    for (const row of within(pane).getAllByTestId('runner-row')) {
       expect(row.getAttribute('data-status')).toBe('pass');
     }
   });
@@ -7287,13 +7296,60 @@ describe('集合与目录的运行器（collection-runner）', () => {
     fireEvent.click(await tree().findByText('我的集合'));
     await screen.findByTestId('entity-script-panel');
     fireEvent.click(screen.getByTestId('entity-run'));
-    const dialog = await screen.findByRole('dialog');
+    const pane = await screen.findByTestId('runner-tab');
 
-    fireEvent.click(within(dialog).getByLabelText('选择 另一个请求'));
-    fireEvent.click(within(dialog).getByTestId('runner-start'));
+    fireEvent.click(within(pane).getByLabelText('选择 另一个请求'));
+    fireEvent.click(within(pane).getByTestId('runner-start'));
 
     await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(1));
     expect(sendRequest.mock.calls[0][0]).toMatchObject({ saved_id: 'r1' });
+  });
+
+  it('点名单里的一条只是就地看明细，不会再多开一个标签', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+
+    fireEvent.click(await tree().findByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.click(screen.getByTestId('entity-run'));
+    const pane = await screen.findByTestId('runner-tab');
+    fireEvent.click(within(pane).getByTestId('runner-start'));
+    await waitFor(() =>
+      expect(within(pane).getAllByTestId('runner-row-meta')).toHaveLength(2),
+    );
+
+    const before = screen.getAllByTestId('session-tab').length;
+    fireEvent.click(within(pane).getByRole('button', { name: '另一个请求' }));
+
+    // 选中项就地切到明细面板，标签行没有长出新东西
+    expect(screen.getAllByTestId('session-tab')).toHaveLength(before);
+    expect(within(pane).getByTestId('runner-detail').textContent).toContain('另一个请求');
+    // 主区仍是运行器，没有被请求编辑器顶掉
+    expect(screen.getByTestId('runner-tab')).toBe(pane);
+  });
+
+  it('同一目标重复点「运行」只聚焦既有的运行器标签', async () => {
+    const { client } = harness();
+    render(<App client={client} />);
+
+    fireEvent.click(await tree().findByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.click(screen.getByTestId('entity-run'));
+    await screen.findByTestId('runner-tab');
+
+    const runnerTabCount = () =>
+      screen
+        .getAllByTestId('session-tab')
+        .filter((item) => item.getAttribute('data-tab-kind') === 'runner');
+    const before = runnerTabCount().length;
+
+    // 回到集合标签再点一次「运行」：同一目标不该长出第二个运行器标签
+    fireEvent.click(await tree().findByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.click(screen.getByTestId('entity-run'));
+
+    await waitFor(() => expect(screen.getAllByTestId('runner-tab')).toHaveLength(before));
+    expect(runnerTabCount()).toHaveLength(1);
   });
 });
 
@@ -7373,11 +7429,38 @@ describe('全局 Console 的时间线（add-console-panel）', () => {
     fireEvent.click(await tree().findByText('我的集合'));
     await screen.findByTestId('entity-script-panel');
     fireEvent.click(screen.getByTestId('entity-run'));
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.click(within(dialog).getByTestId('runner-start'));
+    const pane = await screen.findByTestId('runner-tab');
+    fireEvent.click(within(pane).getByTestId('runner-start'));
 
     await waitFor(() => expect(sendRequest).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(consoleLog.snapshot()).toHaveLength(2));
     expect(consoleLog.snapshot().every((entry) => entry.kind === 'network')).toBe(true);
+  }, 60_000);
+
+  it('跑完之后「请求」页能看实际发出的那一份：快照随结果一起交回面板', async () => {
+    const { client } = harness({
+      sendResult: response({
+        request_headers: [['x-sign', 'abc']],
+        request_body: '{"a":1}',
+      }),
+    });
+    render(<App client={client} />);
+
+    fireEvent.click(await tree().findByText('我的集合'));
+    await screen.findByTestId('entity-script-panel');
+    fireEvent.click(screen.getByTestId('entity-run'));
+    const pane = await screen.findByTestId('runner-tab');
+    fireEvent.click(within(pane).getByTestId('runner-start'));
+
+    await waitFor(() => expect(within(pane).getAllByTestId('runner-row-meta')).toHaveLength(1));
+    fireEvent.click(within(pane).getByTestId('runner-tab-request'));
+
+    // 走的是真实流水线（只有测试桩的 client），所以这条也验证了 sent 确实传到了界面
+    expect(within(pane).getByTestId('runner-request-line').textContent).toContain(
+      'https://api.test/users',
+    );
+    // 请求头来自后端回带的「实际发出」那一份
+    expect(within(pane).getByTestId('runner-request-headers').textContent).toContain('x-sign');
+    expect(within(pane).queryByText('这一次没有可呈现的请求。')).toBeNull();
   }, 60_000);
 });

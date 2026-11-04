@@ -5,9 +5,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { RunnerPanel } from '../src/components/RunnerPanel';
-import type { RequestExecutionOutcome } from '../src/lib/requestExecution';
+import type { RequestExecutionOutcome, SentRequest } from '../src/lib/requestExecution';
 import type { RunRequest } from '../src/lib/requestRunner';
-import type { SavedRequest } from '../src/lib/types';
+import type { ResponsePayload, SavedRequest } from '../src/lib/types';
 
 function makeRequest(id: string, name: string, method = 'GET'): SavedRequest {
   return {
@@ -38,6 +38,17 @@ function item(id: string, name: string, method = 'GET', folderPath: string[] = [
   return { id, name, method, folderPath, request: makeRequest(id, name, method) };
 }
 
+function sent(overrides: Partial<SentRequest> = {}): SentRequest {
+  return {
+    method: 'GET',
+    url: 'https://api.test/r1',
+    headers: [],
+    bodyKind: 'none',
+    body: null,
+    ...overrides,
+  };
+}
+
 function outcome(overrides: Partial<RequestExecutionOutcome> = {}): RequestExecutionOutcome {
   return {
     response: null,
@@ -48,6 +59,32 @@ function outcome(overrides: Partial<RequestExecutionOutcome> = {}): RequestExecu
     visualizer: null,
     gated: null,
     cancelled: false,
+    sent: sent(),
+    ...overrides,
+  };
+}
+
+function response(overrides: Partial<ResponsePayload> = {}): ResponsePayload {
+  return {
+    id: 'resp-1',
+    status: 200,
+    status_text: 'OK',
+    elapsed_ms: 12,
+    size_bytes: 21,
+    truncated: false,
+    headers: [['content-type', 'application/json']],
+    content_type: 'application/json',
+    body_text: '{"ok":true,"id":7}',
+    body_base64: null,
+    pretty_available: true,
+    pretty_print_threshold: 1_000_000,
+    size_limit_bytes: 8 * 1024 * 1024,
+    insecure_warning: false,
+    final_url: 'https://api.test/r1',
+    request_url: 'https://api.test/r1',
+    via_proxy: false,
+    http_version: 'HTTP/1.1',
+    unresolved: [],
     ...overrides,
   };
 }
@@ -144,6 +181,7 @@ describe('运行中的结果与明细', () => {
     await waitFor(() => expect(screen.getByTestId('runner-detail-status')).toBeTruthy());
 
     fireEvent.click(screen.getByRole('button', { name: '列表' }));
+    // 断言与 console 归在「脚本」页签下，而明细默认就停在那一页
 
     expect(screen.getByTestId('script-assertions').textContent).toContain('状态码 200');
 
@@ -152,6 +190,21 @@ describe('运行中的结果与明细', () => {
     const list = screen.getByTestId('script-console');
     expect(list.classList.contains('script-console')).toBe(true);
     expect(list.textContent).toContain('第一行\n第二行');
+  });
+
+  it('失败时脚本页签上有一盏红灯：断言退到页签后面，不能只剩名单上那个数字', async () => {
+    const execute = vi.fn(async () =>
+      outcome({
+        assertions: [{ name: '状态码 200', passed: false, skipped: false, error: null }],
+      }),
+    );
+    renderPanel({ execute });
+
+    fireEvent.click(screen.getByTestId('runner-start'));
+    await waitFor(() => expect(screen.getByTestId('runner-detail-status')).toBeTruthy());
+
+    const tab = screen.getByTestId('runner-tab-script');
+    expect(tab.querySelector('.tab-dot.fail')).toBeTruthy();
   });
 
   it('请求失败时明细给出原因，不冒充"没有断言"', async () => {
@@ -164,6 +217,103 @@ describe('运行中的结果与明细', () => {
 
     await waitFor(() => expect(screen.getByTestId('runner-detail-error').textContent).toContain('找不到主机'));
     expect(screen.getAllByTestId('runner-row')[0].getAttribute('data-status')).toBe('error');
+  });
+});
+
+describe('明细的三页：请求 / 响应 / 脚本', () => {
+  /** 一次走完全程的发送：请求侧有脚本加的头与正文，响应侧有正文与响应头。 */
+  const withExchange = () =>
+    vi.fn(async () =>
+      outcome({
+        response: response({
+          request_headers: [['X-Sign', 'abc123']],
+          request_body: '{"name":"x"}',
+        }),
+        sent: sent({
+          method: 'POST',
+          url: 'https://api.test/r1?sig=abc',
+          headers: [
+            ['X-Sign', 'abc123'],
+            ['Content-Type', 'application/json'],
+          ],
+          bodyKind: 'raw',
+          body: '{"name":"x"}',
+        }),
+      }),
+    );
+
+  it('默认停在「脚本」：跑完先给断言与输出，响应要点过去才看', async () => {
+    renderPanel({ execute: withExchange() });
+
+    fireEvent.click(screen.getByTestId('runner-start'));
+    await waitFor(() =>
+      expect(screen.getByTestId('runner-tab-script').getAttribute('aria-selected')).toBe('true'),
+    );
+
+    // 一页只讲一次往返的一侧：停在脚本页时，请求与响应的东西都不在
+    expect(screen.queryByTestId('runner-response-body')).toBeNull();
+    expect(screen.queryByTestId('runner-request-line')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('runner-tab-response'));
+    expect(screen.getByTestId('runner-response-body').textContent).toContain('"ok"');
+    expect(screen.getByTestId('runner-response-headers').textContent).toContain('content-type');
+  });
+
+  it('点另一条请求会回到「脚本」页：上一面的语境不跟着换人', async () => {
+    renderPanel({ execute: withExchange() });
+
+    fireEvent.click(screen.getByTestId('runner-start'));
+    await waitFor(() => expect(screen.getAllByTestId('runner-row-meta')).toHaveLength(2));
+
+    // 先自己切到「响应」，再点名单里的另一条
+    fireEvent.click(screen.getByTestId('runner-tab-response'));
+    expect(screen.getByTestId('runner-tab-response').getAttribute('aria-selected')).toBe('true');
+
+    fireEvent.click(screen.getAllByTestId('runner-row')[1]);
+
+    expect(screen.getByTestId('runner-tab-script').getAttribute('aria-selected')).toBe('true');
+    expect(screen.queryByTestId('runner-response-body')).toBeNull();
+  });
+
+  it('「请求」页是实际发出的那一份：目标、脚本加的头、实际正文', async () => {
+    renderPanel({ execute: withExchange() });
+    fireEvent.click(screen.getByTestId('runner-start'));
+    await waitFor(() => expect(screen.getByTestId('runner-tab-request')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('runner-tab-request'));
+
+    expect(screen.getByTestId('runner-request-line').textContent).toContain(
+      'https://api.test/r1?sig=abc',
+    );
+    expect(screen.getByTestId('runner-request-body').textContent).toContain('"name"');
+    expect(screen.getByTestId('runner-request-headers').textContent).toContain('X-Sign');
+  });
+
+  it('请求没发出去时，「响应」页说明没有响应，而不是留白', async () => {
+    const execute = vi.fn(async () =>
+      outcome({ error: { code: 'dns_failure', message: '找不到主机' } }),
+    );
+    renderPanel({ execute });
+
+    fireEvent.click(screen.getByTestId('runner-start'));
+    await waitFor(() => expect(screen.getByTestId('runner-tab-response')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('runner-tab-response'));
+
+    await waitFor(() => expect(screen.getByTestId('runner-no-response')).toBeTruthy());
+  });
+
+  it('表单正文没有原文可给时，说明是哪一种形态', async () => {
+    const execute = vi.fn(async () =>
+      outcome({ sent: sent({ method: 'POST', bodyKind: 'form_data', body: null }) }),
+    );
+    renderPanel({ execute });
+    fireEvent.click(screen.getByTestId('runner-start'));
+    await waitFor(() => expect(screen.getByTestId('runner-tab-request')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('runner-tab-request'));
+
+    expect(screen.getByTestId('runner-request-body-empty').textContent).toContain('form-data');
   });
 });
 

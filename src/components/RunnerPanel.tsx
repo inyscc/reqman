@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ScriptReport } from './ScriptReport';
-import type { RequestExecutionOutcome } from '../lib/requestExecution';
+import { detectResponseFormat, humanBytes, renderBody } from '../lib/sandbox';
+import type { RequestExecutionOutcome, SentRequest } from '../lib/requestExecution';
 import {
   runSequence,
   statusOfOutcome,
@@ -8,7 +9,7 @@ import {
   type RunStatus,
   type RunStepResult,
 } from '../lib/requestRunner';
-import type { SavedRequest } from '../lib/types';
+import type { BodyKind, ResponsePayload, SavedRequest } from '../lib/types';
 
 export interface RunnerPanelProps {
   items: RunRequest[];
@@ -52,6 +53,153 @@ function summarize(result: RunStepResult): { text: string; ms: number } {
 }
 
 /**
+ * 明细里正在看的那一面。
+ *
+ * 按「一次往返的哪一侧」切分，而不是按「头 / 体」切分：排查时的问句是"发出去的到底是
+ * 什么""回来的到底是什么"，头与体是同一次发送的两部分，不该分成四个页签。
+ */
+type DetailTab = 'request' | 'response' | 'script';
+
+const DETAIL_TABS: { key: DetailTab; label: string }[] = [
+  { key: 'request', label: '请求' },
+  { key: 'response', label: '响应' },
+  { key: 'script', label: '脚本' },
+];
+
+/**
+ * 没有正文原文时的说法。
+ *
+ * 后端只回带 `raw` 形态的正文，表单与二进制因此没有原文可给。这里说的是"为什么没有"，
+ * 而不是留一片空白——空白读起来像"这条请求没带正文"，与事实相反。
+ */
+function emptyBodyNote(kind: BodyKind): string {
+  switch (kind) {
+    case 'none':
+      return '这条请求没有正文。';
+    case 'raw':
+      return '正文为空。';
+    case 'form_data':
+      return '正文是 form-data 表单，运行器只呈现 raw 形态的原文。';
+    case 'url_encoded':
+      return '正文是 x-www-form-urlencoded 表单，运行器只呈现 raw 形态的原文。';
+    case 'binary':
+      return '正文是二进制文件，没有可呈现的原文。';
+  }
+}
+
+/** 一组请求头 / 响应头：名称与值两列，值一律等宽并允许断行（签名、Cookie 都很长）。 */
+function HeaderRows({
+  title,
+  rows,
+  testId,
+}: {
+  title: string;
+  rows: [string, string][];
+  testId: string;
+}) {
+  return (
+    <div className="runner-block">
+      <div className="runner-block-title">{title}</div>
+      {rows.length === 0 ? (
+        <p className="runner-block-empty">没有{title}。</p>
+      ) : (
+        <table className="runner-headers" data-testid={testId}>
+          <tbody>
+            {rows.map(([name, value], index) => (
+              <tr key={`${name}-${index}`}>
+                <td className="mono">{name}</td>
+                <td className="mono break-all">{value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 「请求」页：本次**实际发出**的那一份。
+ *
+ * 与请求编辑器里显示的不是同一份东西——变量已解析、认证已落成、前置脚本的改写已合并。
+ * 签名、`AccessKey` 这类只在运行时才有的头，只有在这里才看得到。
+ */
+function RequestDetail({ sent }: { sent: SentRequest | null }) {
+  if (!sent) return <p className="runner-placeholder">这一次没有可呈现的请求。</p>;
+
+  return (
+    <div className="stack">
+      <div className="runner-request-line" data-testid="runner-request-line">
+        <span className="method-badge" data-method={sent.method}>
+          {sent.method}
+        </span>
+        <span className="mono break-all">{sent.url}</span>
+      </div>
+
+      <HeaderRows title="请求头" rows={sent.headers} testId="runner-request-headers" />
+
+      <div className="runner-block">
+        <div className="runner-block-title">请求体</div>
+        {sent.body ? (
+          <pre className="runner-pre" data-testid="runner-request-body">
+            {sent.body}
+          </pre>
+        ) : (
+          <p className="runner-block-empty" data-testid="runner-request-body-empty">
+            {emptyBodyNote(sent.bodyKind)}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 「响应」页：与「请求」页同一个顺序——响应头在上、响应体在下。
+ *
+ * 头是"这一次到底带了什么"的清单，短、要逐行核；体本就长，放在最后，长就让它长，
+ * 不会把别的东西推到折叠线以下。两页同序，来回切的时候不必重新找位置。
+ */
+function ResponseDetail({ response }: { response: ResponsePayload | null }) {
+  if (!response) {
+    return (
+      <p className="runner-placeholder" data-testid="runner-no-response">
+        这一次没有响应，也就没有响应头与正文。
+      </p>
+    );
+  }
+
+  // auto：按 Content-Type 检测结果格式化。大正文不套格式化器——那会把主线程占住，
+  // 而这里只是"看一眼回来的东西"
+  const rendered = response.pretty_available
+    ? renderBody('auto', detectResponseFormat(response.content_type), response.body_text ?? '')
+    : { view: 'text' as const, text: response.body_text ?? '' };
+
+  return (
+    <div className="stack">
+      <HeaderRows title="响应头" rows={response.headers} testId="runner-response-headers" />
+
+      <div className="runner-block">
+        <div className="runner-block-title">响应体</div>
+        {response.truncated && (
+          <div className="notice warn" role="status" data-testid="runner-truncated">
+            正文超过体积上限，界面只持有前{' '}
+            {humanBytes(Math.min(response.size_bytes, response.size_limit_bytes))}。
+          </div>
+        )}
+        {response.body_text === null ? (
+          <p className="runner-block-empty">正文是二进制内容，没有可呈现的文本。</p>
+        ) : (
+          <pre className="runner-pre" data-testid="runner-response-body">
+            {rendered.view === 'text' ? rendered.text : ''}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * 设置项行末的说明入口：平时只是一个圈里的 i，悬停才把话说完。
  *
  * 挂在 `title` 上而不是自绘浮层——这条说明只在"想知道"时才需要，原生提示够用，
@@ -83,8 +231,12 @@ function Info({ title }: { title: string }) {
  * "怎么跑"是两件事，各自的控件该有自己的位置；主按钮落在右列底部，与设置同在一处。
  *
  * 这里只呈现结果，不做判定：通过/失败由 `statusOfOutcome` 从执行结果里折出来，断言明细
- * 交给 `ScriptReport`——与响应区的「脚本」页签是同一个组件，两处口径不会分叉。唯一的差别
- * 是这里还要列出 console 输出：运行器是模态，开着时看不到底部的 Console 抽屉。
+ * 交给 `ScriptReport`——与响应区的「脚本」页签是同一个组件，两处口径不会分叉。
+ *
+ * 明细按**一次往返的两侧**分「请求 / 响应 / 脚本」三个页签：跑挂之后要先能回答的问题依次是
+ * "发出去的到底是什么""回来的是什么""脚本看见了什么"。请求页看的是**实际发出**的那一份
+ * （变量已解析、认证已落成、前置脚本改过的头与正文已合并），不是编辑器里的草稿。
+ * console 输出跟着断言留在「脚本」页：按请求归拢的这一份与混排的全局时间线不是同一件事。
  */
 export function RunnerPanel({
   items,
@@ -118,6 +270,16 @@ export function RunnerPanel({
   const [activeId, setActiveId] = useState<string | null>(null);
   /** 明细面板里展示的那一条。 */
   const [detailId, setDetailId] = useState<string | null>(null);
+  /**
+   * 明细正在看哪一面。
+   *
+   * 默认落在「脚本」：跑集合的人点开某一条，多半是问"它为什么是这样"——断言与 console
+   * 输出直接回答这个问题；请求与响应是进一步核对时才去的两页。
+   *
+   * 点一条就回到默认页（见 `openDetail`），而不是沿用上一面：上一面是上一条的语境，
+   * 带着它跳到新的一条，等于替用户预设了这一条也要看响应。
+   */
+  const [detailTab, setDetailTab] = useState<DetailTab>('script');
   /** 门禁的选择：`null` 表示还没选（此时不能开跑）。 */
   const [gateChoice, setGateChoice] = useState<'allow' | 'skip' | null>(null);
 
@@ -172,6 +334,12 @@ export function RunnerPanel({
     });
   };
 
+  /** 在明细里打开某一条：除了换人，还要把页签交回默认那一面（「脚本」）。 */
+  const openDetail = (id: string) => {
+    setDetailId(id);
+    setDetailTab('script');
+  };
+
   const wait = (ms: number) =>
     new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
@@ -193,6 +361,7 @@ export function RunnerPanel({
     setResults({});
     setOutcomes({});
     setDetailId(null);
+    setDetailTab('script');
     setHalt(null);
 
     const skipScripts = gateChoice === 'skip';
@@ -259,6 +428,22 @@ export function RunnerPanel({
   const detail = detailId ? items.find((item) => item.id === detailId) : undefined;
   const detailOutcome = detailId ? outcomes[detailId] : undefined;
   const detailResult = detailId ? results[detailId] : undefined;
+
+  /**
+   * 「脚本」页签上的状态点：有断言才点，全通过是绿点、任一失败或脚本报错是红点。
+   *
+   * 与响应区的「脚本」页签同一套口径——断言现在退到了一个页签后面，没有这盏灯，
+   * 失败就只剩名单行上那一个数字。
+   */
+  const scriptDot: 'pass' | 'fail' | null = detailOutcome
+    ? detailOutcome.scriptError
+      ? 'fail'
+      : detailOutcome.assertions.length > 0
+        ? detailOutcome.assertions.some((assertion) => !assertion.passed && !assertion.skipped)
+          ? 'fail'
+          : 'pass'
+        : null
+    : null;
 
   return (
     <div className="runner">
@@ -331,7 +516,7 @@ export function RunnerPanel({
                     className={`runner-row ${detailId === item.id ? 'selected' : ''}`}
                     data-testid="runner-row"
                     data-status={status}
-                    onClick={() => setDetailId(item.id)}
+                    onClick={() => openDetail(item.id)}
                   >
                     <input
                       type="checkbox"
@@ -352,7 +537,7 @@ export function RunnerPanel({
                       className="runner-name"
                       onClick={(event) => {
                         event.stopPropagation();
-                        setDetailId(item.id);
+                        openDetail(item.id);
                       }}
                       title={[...item.folderPath, item.name].join(' / ')}
                     >
@@ -396,6 +581,33 @@ export function RunnerPanel({
                 {tally.failed > 0 && <span className="runner-tally-fail">失败 {tally.failed}</span>}
               </span>
             )}
+            <span className="grow" />
+            {/* 页签只在这一条真有结果时出现：没有可看的东西时摆一排空页签只是噪声 */}
+            {detail && detailResult && (
+              <span className="tabs runner-tabs" role="tablist">
+                {DETAIL_TABS.map((entry) => (
+                  <button
+                    key={entry.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={detailTab === entry.key}
+                    className={`tab ${detailTab === entry.key ? 'active' : ''}`}
+                    onClick={() => setDetailTab(entry.key)}
+                    data-testid={`runner-tab-${entry.key}`}
+                  >
+                    {entry.label}
+                    {entry.key === 'script' && scriptDot && (
+                      <span
+                        className={`tab-dot ${scriptDot === 'fail' ? 'fail' : ''}`}
+                        role="img"
+                        aria-label={scriptDot === 'fail' ? '存在失败的断言' : '断言全部通过'}
+                        title={scriptDot === 'fail' ? '存在失败的断言' : '断言全部通过'}
+                      />
+                    )}
+                  </button>
+                ))}
+              </span>
+            )}
           </div>
 
           {/* 少跑几条不能没有交代：说明是谁触发的收手、还剩多少条没跑 */}
@@ -414,7 +626,7 @@ export function RunnerPanel({
               <div className="runner-empty-state">
                 <p className="runner-empty-title">还没有运行结果</p>
                 <p className="runner-empty-hint">
-                  点「开始运行」跑完这一轮，再点左边的任意一行，这里会显示它的响应、脚本输出与断言。
+                  点「开始运行」跑完这一轮，再点左边的任意一行，这里会先给它的脚本输出与断言，请求与响应在另两个页签里。
                 </p>
               </div>
             )}
@@ -454,12 +666,20 @@ export function RunnerPanel({
                     {detailResult.message}
                   </div>
                 )}
-                {detailOutcome && (
+                {/* 三个页签是这只请求的三面：发出去的是什么、回来的是什么、脚本看见了什么 */}
+                {detailTab === 'request' && <RequestDetail sent={detailOutcome?.sent ?? null} />}
+                {detailTab === 'response' && (
+                  <ResponseDetail response={detailOutcome?.response ?? null} />
+                )}
+                {detailTab === 'script' && detailOutcome && (
                   <ScriptReport
                     console={detailOutcome.console}
                     assertions={detailOutcome.assertions}
                     error={detailOutcome.scriptError}
                   />
+                )}
+                {detailTab === 'script' && !detailOutcome && (
+                  <p className="runner-placeholder">这一次没有脚本输出的记录。</p>
                 )}
               </>
             )}

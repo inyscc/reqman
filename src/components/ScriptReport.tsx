@@ -5,8 +5,8 @@ export interface ScriptReportProps {
    * console 输出。**只有运行器的请求明细会传**：响应区的「脚本」页签不再承载输出——
    * 它只有全局 Console 一个去处，同一条输出不该在两个面板里各抄一遍。
    *
-   * 运行器是模态，开着时看不到底部抽屉，所以明细里仍随断言列一份，否则跑集合时
-   * 某一条为什么失败会无从查起。
+   * 运行器明细里的这份是**按请求归拢**的：全局 Console 是按时间混排的一条线，而这里要回答
+   * 的是"这一条为什么挂了"，两者切法不同，不是同一份东西。
    */
   console?: ConsoleEntry[];
   assertions: TestAssertion[];

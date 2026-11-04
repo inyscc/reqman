@@ -91,12 +91,17 @@ function fakeClient(overrides: Partial<Record<keyof Commands, unknown>> = {}) {
 
 async function run(
   client: Commands,
-  input: { skipScripts?: boolean; onBegin?: (pending: unknown) => void; attemptId?: string } = {},
+  input: {
+    skipScripts?: boolean;
+    onBegin?: (pending: unknown) => void;
+    attemptId?: string;
+    request?: Partial<SavedRequest>;
+  } = {},
 ): Promise<RequestExecutionOutcome> {
   return executeRequest(
     { client, workspaceId: 'w1', environmentId: 'e1' },
     {
-      request: makeRequest(),
+      request: makeRequest(input.request),
       dirty: true,
       // 默认跳过脚本：这些用例只关心 requestExecution 自己的 trace，脚本侧另有覆盖
       skipScripts: input.skipScripts ?? true,
@@ -153,6 +158,66 @@ describe('成功响应的 trace', () => {
     const outcome = await run(client);
 
     expect(outcome.trace.bodyTruncated).toBe(true);
+  });
+});
+
+describe('「实际发出的请求」快照', () => {
+  const rawBody = { ...emptyBody(), kind: 'raw' as const, raw: '{"name":"x"}' };
+
+  it('成功时以响应回带的头与正文为准：认证与 Content-Type 只有后端知道', async () => {
+    const client = fakeClient({
+      sendRequest: vi.fn(async () => payload({ request_body: '{"name":"x"}' })),
+    });
+
+    const outcome = await run(client, { request: { body: rawBody } });
+
+    expect(outcome.sent).toEqual({
+      method: 'POST',
+      url: 'https://api.test/device',
+      headers: [
+        ['accept', 'application/json'],
+        ['authorization', 'Bearer t'],
+      ],
+      bodyKind: 'raw',
+      body: '{"name":"x"}',
+    });
+  });
+
+  it('没有响应时退回草稿里的正文与解析快照的头，URL 用解析后的目标', async () => {
+    const client = fakeClient({
+      sendRequest: vi.fn(async () => {
+        throw { code: 'dns_failure', message: '找不到主机' };
+      }),
+    });
+
+    const outcome = await run(client, { request: { body: rawBody } });
+
+    expect(outcome.sent.url).toBe('https://api.test/device');
+    expect(outcome.sent.body).toBe('{"name":"x"}');
+    expect(outcome.sent.headers).toEqual([['accept', 'application/json']]);
+  });
+
+  it('表单正文没有原文可给：留空并由形态说明，不伪造成一段可复制的文本', async () => {
+    const client = fakeClient();
+    const outcome = await run(client, {
+      request: { body: { ...emptyBody(), kind: 'form_data' } },
+    });
+
+    expect(outcome.sent).toMatchObject({ bodyKind: 'form_data', body: null });
+  });
+
+  it('变量解析就失败时也要交出一份快照，而不是在出口上再抛一次', async () => {
+    const client = fakeClient({
+      variablesPreview: vi.fn(async () => {
+        throw { code: 'internal', message: '解析失败' };
+      }),
+    });
+
+    const outcome = await run(client);
+
+    expect(outcome.error).not.toBeNull();
+    // 解析都没走到：头是空的、URL 退回草稿原文，但这份快照本身必须存在
+    expect(outcome.sent).toMatchObject({ headers: [], url: 'https://api.test/{{path}}' });
   });
 });
 

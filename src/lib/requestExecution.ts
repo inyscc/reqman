@@ -34,7 +34,7 @@ import type {
   VisualizerResult,
 } from './scriptRuntime';
 import type { ConsoleResult, NetworkStart, RequestTrace } from './consoleLog';
-import type { AppError, RequestPreview, ResponsePayload, SavedRequest } from './types';
+import type { AppError, BodyKind, RequestPreview, ResponsePayload, SavedRequest } from './types';
 
 /** 流水线要的宿主能力：后端命令 + 当前工作区/环境的上下文。 */
 export interface RequestExecutionDeps {
@@ -69,6 +69,29 @@ export interface RequestExecutionInput {
 }
 
 /**
+ * 本次**实际发出**的请求。
+ *
+ * 与调用方手里的草稿不是一回事：变量已解析、认证已落成、前置脚本的改写已合并。运行器的
+ * 「请求」页要看的正是这一份——否则「脚本加了什么头」永远只能靠 console 打出来猜。
+ */
+export interface SentRequest {
+  method: string;
+  /** 实际发送的目标（重定向前）；连解析都没走到时退回草稿里的原文。 */
+  url: string;
+  /** 实际带出去的请求头，顺序即发送顺序。 */
+  headers: [string, string][];
+  /** 正文形态：`body` 为空时，界面据此说明"为什么没有原文"而不是留一片空白。 */
+  bodyKind: BodyKind;
+  /**
+   * 实际发出的正文文本。
+   *
+   * 只有 `raw` 形态能回读（后端只回带这一种）；表单 / 二进制为 null，此时以 `bodyKind`
+   * 说明形态，SHALL NOT 伪造成一段可以复制走的原文。
+   */
+  body: string | null;
+}
+
+/**
  * 一次执行的结果。
  *
  * 所有出口（正常、失败、取消、门禁拦截）都收敛成这个对象，调用方据此决定怎么呈现：
@@ -88,6 +111,13 @@ export interface RequestExecutionOutcome {
   gated: { collectionId: string; name: string } | null;
   /** 本次执行被取消（前端脚本段或后端网络段）。 */
   cancelled: boolean;
+  /**
+   * 本次实际发出的请求（脚本改写、变量解析之后的那一份）。
+   *
+   * 与 `response` 并存：失败、取消、门禁拦截时没有响应，但「本来要发的是什么」同样要能看见
+   * ——那恰恰是排查"为什么没发出去 / 发出去的不是我想要的"的起点。
+   */
+  sent: SentRequest;
   /**
    * 交给全局 Console 的一份事实。
    *
@@ -125,6 +155,29 @@ export async function executeRequest(
   let resolvedUrl: string | null = null;
   let phaseLabels: { prerequest: string[]; test: string[] } = { prerequest: [], test: [] };
 
+  // 待发的那一份草稿只算一次：前置脚本改过请求头/正文时要在这上面合并（design D3）
+  const inlineDraft = cleanForSend(request);
+  // 待发请求与「请求头或请求体是否被脚本改过」。未改动时完全走原路径（design D3）
+  let outgoing: { request: SavedRequest; changed: boolean } = {
+    request: inlineDraft,
+    changed: false,
+  };
+  /**
+   * 解析快照里的待发请求头。
+   *
+   * 解析可能根本没走到（变量解析就失败了），而 `finish` 在那条路上照样要交出一份请求头，
+   * 所以它是个可变量，而不是后面那个 `const sandboxRequest` 的一部分。
+   */
+  let snapshotHeaders: [string, string][] = [];
+
+  /**
+   * 本次**实际带出去的**请求头。
+   *
+   * 成功时以后端回带的为准（认证头、正文的 Content-Type、Cookie 只有它知道）；失败时没有
+   * 这份东西，退回解析快照——它至少是「脚本改完之后、认证之前」的那一份，比空白有用。
+   */
+  const sentHeaders = (): [string, string][] => response?.request_headers ?? snapshotHeaders;
+
   /** 统一出口：把散在函数体里的临时状态收敛成结果对象。 */
   const finish = (
     outcome: Partial<RequestExecutionOutcome> & Pick<RequestExecutionOutcome, 'cancelled'>,
@@ -140,14 +193,26 @@ export async function executeRequest(
       ...outcome,
     } as RequestExecutionOutcome;
 
+    // 优先用后端回带的「实际发送目标」：前置脚本可能改写过去向
+    const url = response?.request_url || resolvedUrl || outgoing.request.url;
+
     return {
       ...merged,
+      sent: {
+        method: outgoing.request.method,
+        url,
+        headers: sentHeaders(),
+        bodyKind: outgoing.request.body.kind,
+        // 后端只回带 raw 正文；其余形态没有原文可给，如实留空由界面按形态说明
+        body:
+          response?.request_body ??
+          (outgoing.request.body.kind === 'raw' ? (outgoing.request.body.raw ?? '') : null),
+      },
       trace: {
         sendId: attempt.attemptId,
         requestId: request.id,
         method: request.method,
-        // 优先用后端回带的「实际发送目标」：前置脚本可能改写过去向
-        url: response?.request_url || resolvedUrl || request.url,
+        url,
         startedAt,
         requestHeaders: sentHeaders(),
         result: traceResult(merged),
@@ -159,19 +224,6 @@ export async function executeRequest(
         segments: phaseLabels,
       },
     };
-  };
-
-  /**
-   * 本次**实际带出去的**请求头。
-   *
-   * 成功时以后端回带的为准（认证头、正文的 Content-Type、Cookie 只有它知道）；失败时没有
-   * 这份东西，退回解析快照——它至少是「脚本改完之后、认证之前」的那一份，比空白有用。
-   */
-  const sentHeaders = (): [string, string][] => {
-    if (response?.request_headers) return response.request_headers;
-    return sandboxRequest.header
-      .filter((header) => !header.disabled)
-      .map((header): [string, string] => [header.key, header.value]);
   };
 
   const traceResult = (merged: RequestExecutionOutcome): ConsoleResult => {
@@ -196,8 +248,6 @@ export async function executeRequest(
     return { kind: 'not-sent', reason: '请求未发出' };
   };
 
-  // 待发的那一份草稿只算一次：前置脚本改过请求头/正文时要在这上面合并（design D3）
-  const inlineDraft = cleanForSend(request);
   const sendInput = {
     saved_id: input.dirty ? null : request.id,
     inline: inlineDraft,
@@ -225,6 +275,10 @@ export async function executeRequest(
   // 每段执行完的改动都会接力给下一段（design D2）。
   const sandboxRequest = toSandboxRequest(resolved);
   resolvedUrl = resolved.url || null;
+  // 解析失败时这份替身是空的；走到这里就有一份「脚本执行之前」的真实请求头可退
+  snapshotHeaders = sandboxRequest.header
+    .filter((header) => !header.disabled)
+    .map((header): [string, string] => [header.key, header.value]);
 
   // 目标定了，时间线可以占位了：赶在门禁、前置脚本与网络往返之前，顺序才等于发起顺序
   input.onBegin?.({
@@ -232,18 +286,11 @@ export async function executeRequest(
     requestId: request.id,
     method: request.method,
     url: resolvedUrl || request.url,
-    requestHeaders: sandboxRequest.header
-      .filter((header) => !header.disabled)
-      .map((header): [string, string] => [header.key, header.value]),
+    requestHeaders: snapshotHeaders,
     at: startedAt,
   });
   // 前置脚本结束时的请求形态：后置阶段据此看到脚本改过的头与正文；没有前置脚本时就是快照
   let scriptedRequest: SandboxRequest = sandboxRequest;
-  // 待发请求与「请求头或请求体是否被脚本改过」。未改动时完全走原路径（design D3）
-  let outgoing: { request: SavedRequest; changed: boolean } = {
-    request: inlineDraft,
-    changed: false,
-  };
   // 前置脚本写入的**本地**作用域（`pm.variables`）：不落库，但要交给本次请求的解析，
   // 否则「脚本里算一个值、请求里引用它」这条最常用的写法就只在别的三个作用域里成立
   let scriptLocal: Record<string, string> = {};

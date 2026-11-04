@@ -14,7 +14,7 @@ import {
 import { EnvironmentsPanel } from './components/EnvironmentsPanel';
 import { applyEnvironmentOrder, moveIdInOrder, type DropPosition } from './lib/environmentMoves';
 import { TabListMenu, type TabListEntry } from './components/TabListMenu';
-import { CollectionIcon, FolderIcon } from './components/icons';
+import { CollectionIcon, FolderIcon, RunnerIcon } from './components/icons';
 import { ImportExportPanel } from './components/ImportExportPanel';
 import { Modal } from './components/Modal';
 import { OverlayScrollbar } from './components/OverlayScrollbar';
@@ -66,7 +66,13 @@ import {
   readPresentation,
   type ResponsePresentation,
 } from './lib/responsePresentation';
-import { entityTabId, readTabs, writeTabs } from './lib/sessionTabs';
+import {
+  entityTabId,
+  readTabs,
+  writeTabs,
+  type PersistedTab,
+  type PersistedTabs,
+} from './lib/sessionTabs';
 import {
   allowScriptExecution,
   isScriptExecutionAllowed,
@@ -160,7 +166,31 @@ interface EntitySessionTab {
   preview: boolean;
 }
 
-type SessionTab = RequestSessionTab | EntitySessionTab;
+/**
+ * 运行器会话标签（change: runner-as-tab）。
+ *
+ * 运行器不再是模态：它占一个会话标签，与请求、集合脚本并排在标签行里。因此"看结果"
+ * 和"改请求"可以互相切——切走**不打断**这一轮（标签只是隐藏，组件不卸载），切回来
+ * 结果还在原处。名单在打开时冻结，之后树怎么改都不影响这一轮。
+ *
+ * 运行结果是会话数据，不落库：重启后这条标签不会回来（标签集合本来也只记"开着哪些"）。
+ */
+interface RunnerSessionTab {
+  kind: 'runner';
+  /** `runner:<kind>:<id>`，同时是运行器面板的 id。 */
+  id: string;
+  entityKind: EntityKind;
+  entityId: string;
+  collectionId: string;
+  title: string;
+  items: RunRequest[];
+  /** 集合脚本尚未获准执行时为它的名字：这一轮开跑前先问一次。 */
+  gate: { name: string } | null;
+  /** 运行器不做预览：它是被显式点开的，不该被下一次打开顶替。 */
+  preview: false;
+}
+
+type SessionTab = RequestSessionTab | EntitySessionTab | RunnerSessionTab;
 
 /**
  * 请求编辑器**首次**落在哪个内层页签（spec: ui-layout「请求编辑器的默认标签页」）。
@@ -184,17 +214,27 @@ interface SendAttempt extends PhaseCancellation {
 
 const requestTabId = (requestId: string): string => `request:${requestId}`;
 
+/**
+ * 运行器标签的 key：按「跑哪个目标」唯一，同一集合 / 目录至多一个运行器标签。
+ * 重复点「运行」只聚焦既有那一个，不新开第二个——同一份名单没必要开两次。
+ */
+const runnerTabId = (kind: EntityKind, id: string): string => `runner:${kind}:${id}`;
+
 const entityPre = (entity: Collection | Folder): string => entity.pre_request_script ?? '';
 const entityTest = (entity: Collection | Folder): string => entity.test_script ?? '';
 
 function isTabDirty(tab: SessionTab): boolean {
   if (tab.kind === 'request') return tab.dirty;
+  // 运行器没有可编辑内容：结果只是这一轮的事实，不存在"存不存"的问题
+  if (tab.kind === 'runner') return false;
   if (!tab.entity || !tab.baseline) return false;
   return entityPre(tab.entity) !== tab.baseline.pre || entityTest(tab.entity) !== tab.baseline.test;
 }
 
 function tabName(tab: SessionTab): string {
-  return tab.kind === 'request' ? tab.draft.name : (tab.entity?.name ?? '');
+  if (tab.kind === 'request') return tab.draft.name;
+  if (tab.kind === 'runner') return `运行「${tab.title}」`;
+  return tab.entity?.name ?? '';
 }
 
 /**
@@ -218,6 +258,7 @@ function toTabListEntry(tab: SessionTab): Omit<TabListEntry, 'active'> {
     name: tabName(tab),
     method: tab.kind === 'request' ? tab.draft.method : null,
     entityKind: tab.kind === 'entity' ? tab.entityKind : null,
+    runner: tab.kind === 'runner',
     dirty: isTabDirty(tab),
   };
 }
@@ -254,9 +295,9 @@ function entityExists(trees: CollectionTree[], kind: EntityKind, id: string): bo
 }
 
 function tabExistsInTrees(tab: SessionTab, trees: CollectionTree[]): boolean {
-  return tab.kind === 'request'
-    ? findRequest(trees, tab.requestId) !== null
-    : entityExists(trees, tab.entityKind, tab.entityId);
+  if (tab.kind === 'request') return findRequest(trees, tab.requestId) !== null;
+  // 运行器的目标是集合 / 目录：目标没了，这一轮也就没有存在的根据
+  return entityExists(trees, tab.entityKind, tab.entityId);
 }
 
 /** 收集某个文件夹及其全部后代文件夹的 id——删除文件夹的级联范围。 */
@@ -535,20 +576,12 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   /** 低频面板的单例模态（design D5）：非空时打开对应弹窗，同一时间至多一个。 */
   const [modal, setModal] = useState<ModalKind | null>(null);
   /**
-   * 集合 / 目录运行器的目标（spec: ui-layout「集合与目录的运行器」）。
+   * 每个运行器标签当前那一条的取消出口（change: runner-as-tab）。
    *
-   * 打开时就把「跑哪些」算好并冻结：运行期间树被改动（拖动、删除）不该让这一轮跑到
-   * 半截换了一份名单——名单是**按下运行那一刻**的事实。
+   * 按标签 key 分开存：两个运行器标签各自跑各自的，停止只撤自己那一条。运行器不再是
+   * 模态，关掉标签靠卸载收尾，这份映射只为「停止」按钮服务。
    */
-  const [runner, setRunner] = useState<{
-    title: string;
-    collectionId: string;
-    items: RunRequest[];
-    /** 集合的脚本还没获准执行时给出它的名字，运行前先让人选一次。 */
-    gate: { name: string } | null;
-  } | null>(null);
-  /** 运行器当前那一条的取消出口：停止按钮据此撤掉在飞的请求与脚本。 */
-  const runnerAttemptRef = useRef<SendAttempt | null>(null);
+  const runnerAttempts = useRef(new Map<string, SendAttempt>());
   /**
    * 复制被未保存改动挡下时要点名的对象。它只是那个模态的**数据**——开关仍在 `modal`
    * 里（`'copy-blocked'`），因此不存在两个遮罩并存的可能（design D9）。
@@ -604,6 +637,15 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     [tabs],
   );
   const activeEntityTab = activeTab?.kind === 'entity' ? activeTab : null;
+  const activeRunnerTab = activeTab?.kind === 'runner' ? activeTab : null;
+  /**
+   * 全部运行器标签。它们**常驻挂载**、只按激活态显隐（见下方主区渲染）：
+   * 切到请求标签去改个参数再切回来，这一轮既没被打断，也不该丢掉已经跑出的结果。
+   */
+  const runnerTabs = useMemo(
+    () => tabs.filter((item): item is RunnerSessionTab => item.kind === 'runner'),
+    [tabs],
+  );
   const draft = activeRequestTab?.draft ?? null;
   const dirty = activeRequestTab?.dirty ?? false;
   const tab: Tab = activeRequestTab?.innerTab ?? DEFAULT_REQUEST_TAB;
@@ -1029,20 +1071,27 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
   // 标签集合持久化：只在开/关/切时写（design D6），不在每次编辑时写；
   // 恢复完成之前不写，避免用空集合覆盖上次的记录。
+  //
+  // 运行器标签不出现在这里：它是这一轮运行的现场（名单、结果都在内存里），重启后
+  // 只剩一个没有结果的空壳，不如不恢复。激活项若正停在运行器上，记 null——恢复时
+  // 会落到第一个标签，不留下一个认不出的 key。
   useEffect(() => {
     if (!workspaceId || !tabsHydrated) return;
-    const value = {
-      tabs: tabs.map((item) =>
-        item.kind === 'request'
-          ? ({ kind: 'request', id: item.requestId } as const)
-          : ({
-              kind: 'entity',
-              entityKind: item.entityKind,
-              id: item.entityId,
-              innerTab: item.innerTab,
-            } as const),
-      ),
-      activeId: activeTabKey,
+    const value: PersistedTabs = {
+      tabs: tabs.flatMap((item): PersistedTab[] => {
+        if (item.kind === 'runner') return [];
+        if (item.kind === 'request') return [{ kind: 'request', id: item.requestId } as const];
+        return [
+          {
+            kind: 'entity',
+            entityKind: item.entityKind,
+            id: item.entityId,
+            innerTab: item.innerTab,
+          } as const,
+        ];
+      }),
+      activeId:
+        tabs.find((item) => item.id === activeTabKey)?.kind === 'runner' ? null : activeTabKey,
     };
     void writeTabs(client, workspaceId, value);
   }, [client, workspaceId, tabsHydrated, tabs, activeTabKey]);
@@ -1552,6 +1601,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   const saveTab = async (key: string): Promise<boolean> => {
     const current = tabsRef.current.find((item) => item.id === key);
     if (!current) return false;
+    // 运行器没有可保存的内容：它不参与保存，也就不该被当成"存失败了"
+    if (current.kind === 'runner') return true;
     return current.kind === 'request' ? saveRequestTab(key) : saveEntityTab(key);
   };
 
@@ -1736,29 +1787,34 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
   const tabIdsSignature = tabs.map((item) => item.id).join('|');
   useEffect(() => {
-    const offs = tabsRef.current.map((entry) =>
-      editingRegistry.register({
-        id: entry.id,
-        priority:
-          entry.kind === 'request' ? SURFACE_PRIORITY.request : SURFACE_PRIORITY.panel,
-        get label() {
-          const current = tabsRef.current.find((item) => item.id === entry.id);
-          if (!current) return '';
-          if (current.kind === 'request') return `请求「${current.draft.name}」`;
-          const kindLabel = current.entityKind === 'collection' ? '集合' : '文件夹';
-          return `${kindLabel}「${current.entity?.name ?? ''}」的脚本`;
-        },
-        isDirty: () => {
-          const current = tabsRef.current.find((item) => item.id === entry.id);
-          return current ? isTabDirty(current) : false;
-        },
-        save: () => saveTabRef.current(entry.id),
-        isActive: () =>
-          activeKeyRef.current === entry.id &&
-          (entry.kind === 'entity' ||
-            (!showEnvironmentEditorRef.current && modalRef.current === null)),
-      }),
-    );
+    // 运行器标签不注册编辑面：它没有可保存的内容，注册进来只会让 Ctrl+S 选中一个
+    // 什么也不存的「面」，把真正的编辑面挤到后面
+    const offs = tabsRef.current
+      .filter((entry) => entry.kind !== 'runner')
+      .map((entry) =>
+        editingRegistry.register({
+          id: entry.id,
+          priority:
+            entry.kind === 'request' ? SURFACE_PRIORITY.request : SURFACE_PRIORITY.panel,
+          get label() {
+            const current = tabsRef.current.find((item) => item.id === entry.id);
+            if (!current) return '';
+            if (current.kind === 'request') return `请求「${current.draft.name}」`;
+            if (current.kind === 'runner') return '';
+            const kindLabel = current.entityKind === 'collection' ? '集合' : '文件夹';
+            return `${kindLabel}「${current.entity?.name ?? ''}」的脚本`;
+          },
+          isDirty: () => {
+            const current = tabsRef.current.find((item) => item.id === entry.id);
+            return current ? isTabDirty(current) : false;
+          },
+          save: () => saveTabRef.current(entry.id),
+          isActive: () =>
+            activeKeyRef.current === entry.id &&
+            (entry.kind === 'entity' ||
+              (!showEnvironmentEditorRef.current && modalRef.current === null)),
+        }),
+      );
     return () => offs.forEach((off) => off());
     // 标签集合（id 列表）变化时重建；脏状态经 ref 读取，不需要重建
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1974,11 +2030,21 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   /**
    * 打开集合 / 目录的运行器（spec: ui-layout「集合与目录的运行器」）。
    *
+   * 运行器占一个**会话标签**（change: runner-as-tab），不是浮在应用上的模态：因此
+   * 「看结果」与「改请求」可以来回切，切走只是隐藏、不打断这一轮，切回来结果仍在原处。
+   * 同一目标已开着就只聚焦——同一份名单没有理由长成两个标签。
+   *
    * 名单在打开时就拍平并冻结：运行期间树被拖动或删改，这一轮仍按按下运行那一刻的名单走。
    * 门禁与发送路径用同一个口径（spec: 脚本来源的可执行性门禁）——没获准就先问一次，
    * 而不是跑到第一条才发现。
    */
   const openRunner = async (entity: EntitySelection) => {
+    const key = runnerTabId(entity.kind, entity.id);
+    if (tabsRef.current.some((item) => item.id === key)) {
+      setActiveTabKey(key);
+      return;
+    }
+
     const name = findEntityName(treesRef.current, entity) ?? '未命名';
     const items = collectRunRequests(treesRef.current, { kind: entity.kind, id: entity.id });
     const collectionName =
@@ -1986,21 +2052,39 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       name;
     const allowed = await isScriptExecutionAllowed(client, entity.collectionId);
 
-    setRunner({
-      title: name,
+    // 门禁是异步的：等回来时目标可能已被删除，那就不要再开一个指向它的标签
+    if (!entityExists(treesRef.current, entity.kind, entity.id)) return;
+
+    // 「运行」是从那个面板里点出来的：先把来源标签留下来。否则它若还是预览标签，
+    // 运行器会占掉预览槽位把它顶替掉——刚点过「运行」的那一页反而消失了。
+    pinTab(entityTabId(entity.kind, entity.id));
+
+    insertTab({
+      kind: 'runner',
+      id: key,
+      entityKind: entity.kind,
+      entityId: entity.id,
       collectionId: entity.collectionId,
+      title: name,
       items,
       gate: allowed ? null : { name: collectionName },
+      preview: false,
     });
+    setActiveTabKey(key);
   };
 
-  /** 运行器中跑一条：与「发送」共用同一条流水线，但结果只回给运行器，不落到标签上。 */
+  /**
+   * 运行器中跑一条：与「发送」共用同一条流水线，但结果只回给运行器，不落到标签上。
+   *
+   * 取消出口按运行器标签分账：两个运行器各跑各的，「停止」只该撤掉自己那一条。
+   */
   const executeRunRequest = async (
+    tabKey: string,
     request: SavedRequest,
     options: { skipScripts: boolean },
   ) => {
     const attempt = openAttempt();
-    runnerAttemptRef.current = attempt;
+    runnerAttempts.current.set(tabKey, attempt);
     try {
       const outcome = await executeRequest(
         { client, workspaceId, environmentId },
@@ -2018,13 +2102,13 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       consoleLog.recordOutcome(outcome.trace);
       return outcome;
     } finally {
-      if (runnerAttemptRef.current === attempt) runnerAttemptRef.current = null;
+      if (runnerAttempts.current.get(tabKey) === attempt) runnerAttempts.current.delete(tabKey);
     }
   };
 
-  /** 停止运行器里正在跑的那一条：脚本段立刻收手，网络段由后端撤销。 */
-  const cancelRunRequest = () => {
-    const attempt = runnerAttemptRef.current;
+  /** 停止某个运行器里正在跑的那一条：脚本段立刻收手，网络段由后端撤销。 */
+  const cancelRunRequest = (tabKey: string) => {
+    const attempt = runnerAttempts.current.get(tabKey);
     if (!attempt) return;
 
     attempt.cancel();
@@ -2033,10 +2117,10 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
     });
   };
 
-  /** 关掉运行器：还在跑就先停，别让执行留在关掉的界面背后继续跑。 */
-  const closeRunner = () => {
-    cancelRunRequest();
-    setRunner(null);
+  /** 关掉一个运行器标签：先撤掉在飞的那条，再把标签摘掉。 */
+  const closeRunnerTab = (tabKey: string) => {
+    cancelRunRequest(tabKey);
+    removeTabsWhere((item) => item.id === tabKey);
   };
 
   const newCollection = async () => {
@@ -2504,6 +2588,11 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
       guard({ kind: 'close-tab', key });
       return;
     }
+    // 运行器还要先撤掉在飞的那一条：关掉界面不该留下后台继续发请求
+    if (current?.kind === 'runner') {
+      closeRunnerTab(key);
+      return;
+    }
     removeTabsWhere((item) => item.id === key);
   };
   requestCloseTabRef.current = requestCloseTab;
@@ -2626,7 +2715,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
 
       {/* 分栏比例通过 --split 传给 CSS：拖动时只改这一个变量（design D7） */}
       <main
-        className={`main ${draft && !showEnvironmentEditor ? 'with-response' : ''}`}
+        className={`main ${draft && !showEnvironmentEditor ? 'with-response' : ''} ${activeRunnerTab ? 'runner-active' : ''}`}
         style={{ '--split': `${splitRatio * 100}%` } as CSSProperties}
       >
         {/* 会话标签栏（spec: 会话标签栏）：左侧承载标签集合，右侧只有环境选择器
@@ -2699,6 +2788,8 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
                           <span className="method-badge" data-method={item.draft.method}>
                             {item.draft.method}
                           </span>
+                        ) : item.kind === 'runner' ? (
+                          <RunnerIcon className="tab-kind-icon" role="img" aria-label="运行器" />
                         ) : item.entityKind === 'collection' ? (
                           <CollectionIcon className="tab-kind-icon" role="img" aria-label="集合" />
                         ) : (
@@ -3083,6 +3174,28 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             </div>
           </>
         )}
+
+        {/* 运行器标签的内容区（change: runner-as-tab）。
+            所有运行器标签都挂在这里、只把非激活的藏起来——换成"只渲染激活那一个"的话，
+            切走一次就等于把这一轮停掉（面板卸载会收手）。运行器也不占用左右分栏。 */}
+        {runnerTabs.map((item) => (
+          <div
+            key={item.id}
+            className="runner-tab-pane"
+            data-testid="runner-tab"
+            data-runner-key={item.id}
+            hidden={item.id !== activeTabKey}
+          >
+            <RunnerPanel
+              items={item.items}
+              gate={item.gate}
+              onAllow={() => allowScriptExecution(client, item.collectionId)}
+              execute={(request, options) => executeRunRequest(item.id, request, options)}
+              cancelCurrent={() => cancelRunRequest(item.id)}
+              onClose={() => closeRunnerTab(item.id)}
+            />
+          </div>
+        ))}
       </main>
 
       {/* Console 抽屉：占自己的高度带，主区随之收缩——不覆盖响应区正文，
@@ -3129,23 +3242,6 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
             ))}
           </ul>
           <p className="muted">先保存（Ctrl+S）再复制。</p>
-        </Modal>
-      )}
-
-      {runner && (
-        <Modal
-          title={`运行「${runner.title}」`}
-          onClose={closeRunner}
-          className="modal-runner"
-        >
-          <RunnerPanel
-            items={runner.items}
-            gate={runner.gate}
-            onAllow={() => allowScriptExecution(client, runner.collectionId)}
-            execute={executeRunRequest}
-            cancelCurrent={cancelRunRequest}
-            onClose={closeRunner}
-          />
         </Modal>
       )}
 
