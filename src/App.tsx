@@ -66,7 +66,7 @@ import {
   readPresentation,
   type ResponsePresentation,
 } from './lib/responsePresentation';
-import { readTabs, writeTabs } from './lib/sessionTabs';
+import { entityTabId, readTabs, writeTabs } from './lib/sessionTabs';
 import {
   allowScriptExecution,
   isScriptExecutionAllowed,
@@ -183,7 +183,6 @@ interface SendAttempt extends PhaseCancellation {
 }
 
 const requestTabId = (requestId: string): string => `request:${requestId}`;
-const entityTabId = (kind: EntityKind, id: string): string => `entity:${kind}:${id}`;
 
 const entityPre = (entity: Collection | Folder): string => entity.pre_request_script ?? '';
 const entityTest = (entity: Collection | Folder): string => entity.test_script ?? '';
@@ -594,6 +593,16 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
   // ---------------------------------------------------------------------------
   const activeTab = tabs.find((item) => item.id === activeTabKey) ?? null;
   const activeRequestTab = activeTab?.kind === 'request' ? activeTab : null;
+  /**
+   * 已打开（含未激活）的集合 / 文件夹标签 key 集合。
+   *
+   * 集合树用它决定单击目录行的效果（spec: 集合树的展开、折叠与打开「第一次单击」）：
+   * 标签还没开时这一击只负责打开，标签已开时这一击才顺带切换展开。
+   */
+  const openEntityTabs = useMemo(
+    () => new Set(tabs.filter((item) => item.kind === 'entity').map((item) => item.id)),
+    [tabs],
+  );
   const activeEntityTab = activeTab?.kind === 'entity' ? activeTab : null;
   const draft = activeRequestTab?.draft ?? null;
   const dirty = activeRequestTab?.dirty ?? false;
@@ -2579,6 +2588,7 @@ export function App({ client = defaultCommands, windowCloser = tauriWindowCloser
               trees={displayTrees}
               selectedRequestId={activeRequestTab?.requestId ?? null}
               selectedEntity={selectedEntity}
+              openEntityTabs={openEntityTabs}
               onSelectRequest={(id) => void selectRequest(id)}
               onSelectEntity={(entity) => void selectEntity(entity)}
               onNewCollection={() => void newCollection()}

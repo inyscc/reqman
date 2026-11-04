@@ -14,6 +14,7 @@ import { FolderIcon } from './icons';
 import { NodeMenu, type MenuItem } from './NodeMenu';
 import { OverlayScrollbar } from './OverlayScrollbar';
 import type { CollectionTree, TreeNode } from '../lib/types';
+import { entityTabId } from '../lib/sessionTabs';
 import {
   buildMove,
   type ContainerParent,
@@ -82,6 +83,11 @@ export interface WorkspaceTreeProps {
   selectedRequestId: string | null;
   /** 当前选中的集合/文件夹；请求选中时为 null。 */
   selectedEntity: EntitySelection | null;
+  /**
+   * 已经打开（含未激活）的集合 / 文件夹标签 key 集合（见 `entityTabId`）。
+   * 决定单击目录行的效果：标签还没开时只打开，已开时才顺带切换展开。
+   */
+  openEntityTabs: ReadonlySet<string>;
   onSelectRequest: (id: string) => void;
   onSelectEntity: (entity: EntitySelection) => void;
   onNewCollection: () => void;
@@ -115,6 +121,8 @@ export interface WorkspaceTreeProps {
 interface TreeActions {
   onSelectRequest: (id: string) => void;
   onSelectEntity: (entity: EntitySelection) => void;
+  /** 已打开的实体标签 key 集合，供行单击判断「这一击是打开还是打开+折叠」。 */
+  openEntityTabs: ReadonlySet<string>;
   onNewRequest: (collectionId: string, folderId: string | null) => void;
   onNewFolder: (collectionId: string, parentFolderId: string | null) => void;
   onDeleteCollection: (id: string) => void;
@@ -384,6 +392,8 @@ function EntryRow({
   const expanded = view.searching || !view.collapsed.has(id);
   const revealed = view.activeId === id || view.menuId === id;
   const entity: EntitySelection = { kind, id, collectionId };
+  /** 该实体的标签是否已经开着（含未激活）：决定单击是否顺带切换展开。 */
+  const tabOpen = actions.openEntityTabs.has(entityTabId(kind, id));
   const reveal = useRowReveal(id, view);
   // 「⋯」按钮本身：菜单锚在它身上，据此决定朝上还是朝下
   const moreRef = useRef<HTMLButtonElement>(null);
@@ -440,22 +450,26 @@ function EntryRow({
         className={className}
         role="button"
         tabIndex={0}
-        title={`打开 ${name}`}
+        title={tabOpen ? `${expanded ? '折叠' : '展开'} ${name}` : `打开 ${name}`}
         {...dragHandlers(row, view, () => view.hoverFolder(id, expanded))}
         onClick={(event) => {
           // 双击的第二击不重复打开：onSelectEntity 是异步的（标签不存在时要先拉数据），
           // 两击会在「标签是否已存在」的检查前同时通过，可能插出两个标签
           if (event.detail === 2) return;
-          // 单击目录行**只**打开该实体的面板，不动展开态（spec: 集合树的展开、折叠与打开）。
-          // 折叠是行内箭头的事：模型与 Postman / VS Code 一致，点目录不会顺手把子树收起来。
+          // 单击目录行（spec: 集合树的展开、折叠与打开）：标签还没开时，这一击只负责
+          // 把面板打开——不然「第一次点目录」总会顺手收掉整棵子树；标签已经开着时，
+          // 单击回到原来的手势：打开/聚焦面板，同时切换展开。
           actions.onSelectEntity(entity);
+          if (tabOpen) actions.onToggle(id);
         }}
         onKeyDown={(event) => {
           // Enter 只归行容器自己。行内还有折叠箭头、「⋯」与菜单项，它们的 keydown 会
           // 冒泡到这里，而浏览器对聚焦的按钮按 Enter 还会再补一次 click——不拦住就会
           // 出现「在箭头上按 Enter 净零无效」「在「⋯」上按 Enter 把目录折叠掉」。
           if (event.key === 'Enter' && event.target === event.currentTarget) {
+            // 与单击同义：标签没开时只打开，已开时顺带切换展开
             actions.onSelectEntity(entity);
+            if (tabOpen) actions.onToggle(id);
           }
         }}
         // 与请求行同款：右键与「⋯」是同一份菜单、同一个展开状态
@@ -818,6 +832,7 @@ function WorkspaceTreeInner(props: WorkspaceTreeProps & { handle: Ref<WorkspaceT
     trees,
     selectedRequestId,
     selectedEntity,
+    openEntityTabs,
     onSelectRequest,
     onSelectEntity,
     onNewCollection,
@@ -857,6 +872,7 @@ function WorkspaceTreeInner(props: WorkspaceTreeProps & { handle: Ref<WorkspaceT
   const actions: TreeActions = {
     onSelectRequest,
     onSelectEntity,
+    openEntityTabs,
     onNewRequest,
     onNewFolder,
     onDeleteCollection,

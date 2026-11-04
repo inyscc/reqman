@@ -11,6 +11,16 @@ import type { Commands } from './commands';
 /** 标签集合存在 settings 表里的作用域；key 用工作区 id（与 ui_layout 的用法一致）。 */
 export const TABS_SCOPE = 'ui_tabs';
 
+/**
+ * 集合 / 文件夹标签的 key：`entity:<kind>:<id>`（与请求标签的 `request:<id>` 相对）。
+ *
+ * 由 App 生成、由集合树查询——单击目录行要先知道「这个实体的标签开着没有」，
+ * 那份判断必须与真实的标签 key 同源，否则两处各写一份格式就会悄悄失配。
+ */
+export function entityTabId(kind: 'collection' | 'folder', id: string): string {
+  return `entity:${kind}:${id}`;
+}
+
 export type PersistedTab =
   | { kind: 'request'; id: string }
   | {

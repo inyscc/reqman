@@ -180,7 +180,7 @@ async function invoked(page: Page): Promise<string[]> {
  * 行内就地的重命名输入框仍在树里，照旧用 `tree.getByLabel(...)`。
  */
 describe('集合树展开手势（真实引擎）', () => {
-  it('单击目录行只打开该实体的面板，展开态与子树都不动', async () => {
+  it('标签还没打开时，单击目录行只打开该实体的面板，展开态与子树都不动', async () => {
     const page = await openApp();
     page.setDefaultTimeout(10_000);
     const tree = page.getByTestId('workspace-tree');
@@ -192,12 +192,33 @@ describe('集合树展开手势（真实引擎）', () => {
     // 打开：主区进脚本面板，标签栏多一个
     await page.getByTestId('entity-script-panel').waitFor();
     expect(await page.getByTestId('session-tab').count()).toBe(1);
-    // 树没被这一击改动（spec: 单击目录行打开面板并切换展开）
+    // 树没被这一击改动（spec: 首次单击只打开）
     expect(await expandedNow(page, '外层')).toBe(true);
     expect(await visibleNow(page, '深处的请求')).toBe(true);
   });
 
-  it('已折叠的目录行被单击后仍折叠，展开只能靠箭头', async () => {
+  it('标签已经打开时，再单击同一目录行会折叠它、再点一次又展开', async () => {
+    const page = await openApp();
+    page.setDefaultTimeout(10_000);
+    const tree = page.getByTestId('workspace-tree');
+
+    await tree.getByText('外层', { exact: true }).click();
+    await page.getByTestId('entity-script-panel').waitFor();
+    expect(await expandedNow(page, '外层')).toBe(true);
+
+    // 第二击：标签已存在，回到原来的手势——打开/聚焦 + 切换展开
+    await tree.getByText('外层', { exact: true }).click();
+    expect(await expandedNow(page, '外层')).toBe(false);
+    expect(await visibleNow(page, '内层')).toBe(false);
+    expect(await page.getByTestId('session-tab').count()).toBe(1);
+
+    await tree.getByText('外层', { exact: true }).click();
+    expect(await expandedNow(page, '外层')).toBe(true);
+    expect(await visibleNow(page, '内层')).toBe(true);
+    expect(await page.getByTestId('session-tab').count()).toBe(1);
+  });
+
+  it('标签还没打开时，已折叠的目录行被单击后仍折叠，展开只能靠箭头', async () => {
     const page = await openApp();
     page.setDefaultTimeout(10_000);
     const tree = page.getByTestId('workspace-tree');
@@ -225,6 +246,21 @@ describe('集合树展开手势（真实引擎）', () => {
     await page.getByTestId('entity-script-panel').waitFor();
     expect(await page.getByTestId('session-tab').count()).toBe(1);
     expect(await expandedNow(page, '外层')).toBe(true);
+  });
+
+  it('标签已打开时双击只切换一次展开（第二击被忽略）', async () => {
+    const page = await openApp();
+    page.setDefaultTimeout(10_000);
+    const tree = page.getByTestId('workspace-tree');
+
+    await tree.getByText('外层', { exact: true }).click();
+    await page.getByTestId('entity-script-panel').waitFor();
+
+    await tree.getByText('外层', { exact: true }).dblclick();
+
+    // 一次双击只算一次切换：收起，而不是「收起又展开」地闪一下
+    expect(await expandedNow(page, '外层')).toBe(false);
+    expect(await page.getByTestId('session-tab').count()).toBe(1);
   });
 
   it('箭头折叠 / 展开只作用于被点的那一层，后代的折叠态被保留', async () => {
@@ -308,7 +344,7 @@ describe('集合树展开手势（真实引擎）', () => {
     expect(await page.getByLabel('文件夹名称').inputValue()).toBe('外层');
   });
 
-  it('单击目录名不选中文字，也不改动展开态', async () => {
+  it('单击目录名不选中文字；首次单击不改动展开态', async () => {
     const page = await openApp();
     page.setDefaultTimeout(10_000);
     const tree = page.getByTestId('workspace-tree');
