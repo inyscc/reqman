@@ -174,6 +174,14 @@ pub enum RawLanguage {
 }
 
 impl RawLanguage {
+    /// 正文语言**未指定**时的语言（`RequestBody::raw_language` 为 `None`）。
+    ///
+    /// 判据只有一个：编辑器的呈现。请求编辑器把「未指定」显示成 JSON——语言选择停在
+    /// JSON，语法高亮、结构折叠与 Beautify / Minify 也都按 JSON 提供（`?? 'json'`）。
+    /// 后端若在这里取「字面意义上的纯文本」，症状就是界面上写着 JSON、发出去却是
+    /// `text/plain`：两边各说一套，用户只能从抓包或运行结果里发现。
+    pub const DEFAULT: RawLanguage = RawLanguage::Json;
+
     pub fn content_type(self) -> &'static str {
         match self {
             RawLanguage::Json => "application/json",
@@ -1054,6 +1062,17 @@ mod tests {
         assert_eq!(
             RawLanguage::Javascript.content_type(),
             "application/javascript"
+        );
+    }
+
+    /// 未指定语言时的那一档必须与编辑器显示的一致（编辑器显示 JSON）。
+    /// 这条断言写在这里，是因为改了它会同时改掉「界面说什么就发什么」这件事。
+    #[test]
+    fn unspecified_language_falls_back_to_json() {
+        assert_eq!(RawLanguage::DEFAULT, RawLanguage::Json);
+        assert_eq!(
+            RawLanguage::DEFAULT.content_type(),
+            "application/json"
         );
     }
 }

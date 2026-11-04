@@ -462,6 +462,16 @@ describe('请求体类型的选择行（spec: 请求体类型的选择行）', (
     expect(screen.getByLabelText('新增字段的名称')).toBeTruthy();
   });
 
+  it('切到 raw 时语言落成显式的 JSON（否则发出去的 Content-Type 与界面说法不一致）', () => {
+    const { latest } = bodyTab({});
+
+    fireEvent.click(screen.getByRole('radio', { name: 'raw' }));
+
+    expect(latest().body.kind).toBe('raw');
+    // 界面上语言选择显示的就是 JSON；库里留 null 等于让下游去猜，猜错的后果是 text/plain
+    expect(latest().body.raw_language).toBe('json');
+  });
+
   it('raw 的语言选择紧跟 raw 单选项，且只在 raw 时出现', () => {
     const { latest } = bodyTab({ kind: 'raw', raw: '', raw_language: 'json' });
 

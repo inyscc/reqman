@@ -409,7 +409,8 @@ where
     match body.kind {
         BodyKind::None => ResolvedBody::None,
         BodyKind::Raw => {
-            let language = body.raw_language.unwrap_or(RawLanguage::Text);
+            // 未指定语言＝编辑器显示的那一档（JSON），否则界面写 JSON、线上发 text/plain
+            let language = body.raw_language.unwrap_or(RawLanguage::DEFAULT);
             ResolvedBody::Raw {
                 text: resolve_text(body.raw.as_deref().unwrap_or("")),
                 content_type: language.content_type().to_string(),
@@ -931,6 +932,19 @@ mod tests {
             ResolvedBody::Raw { text, content_type } => {
                 assert_eq!(text, "{\"n\":\"reqman\"}");
                 assert_eq!(content_type, "application/json");
+            }
+            other => panic!("期望 Raw，得到 {:?}", other),
+        }
+
+        // 没选过语言：编辑器把它显示成 JSON，发出去的 Content-Type 必须跟着是 JSON
+        request.body = RequestBody {
+            raw_language: None,
+            ..RequestBody::raw("{\"n\":1}", RawLanguage::Json)
+        };
+        let resolved = resolve_request(&request, &AuthConfig::none(), &layers);
+        match resolved.body {
+            ResolvedBody::Raw { content_type, .. } => {
+                assert_eq!(content_type, "application/json")
             }
             other => panic!("期望 Raw，得到 {:?}", other),
         }

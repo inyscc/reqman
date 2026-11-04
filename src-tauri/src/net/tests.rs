@@ -172,6 +172,37 @@ async fn raw_languages_send_the_expected_content_types() {
     }
 }
 
+/// 没选过语言的 raw 正文：编辑器把它显示成 JSON，线上也必须发 `application/json`。
+///
+/// 回归用例：这条路曾经默认成 `text/plain`——界面写着 JSON、抓包里却是纯文本，
+/// 服务端按文本解析，症状只在运行结果的请求头里露出来。
+#[tokio::test]
+async fn raw_body_without_a_language_is_sent_as_json() {
+    let server = TestServer::start(Reply::ok("{}"));
+    let harness = Harness::new("net-raw-default");
+    let mut request = harness.request("R", "POST", &server.url("/b"));
+    request.body = RequestBody {
+        raw_language: None,
+        ..RequestBody::raw("{\"a\":1}", RawLanguage::Json)
+    };
+
+    let saved = harness.save(&request);
+    harness
+        .send(&SendRequestInput::saved(&saved.id))
+        .await
+        .expect("发送");
+
+    let last = server.last_request();
+    assert_eq!(last.body_text(), "{\"a\":1}");
+    assert!(
+        last.content_type()
+            .unwrap_or_default()
+            .starts_with("application/json"),
+        "未指定语言时应按编辑器显示的 JSON 发出，实际 {:?}",
+        last.content_type()
+    );
+}
+
 #[tokio::test]
 async fn urlencoded_body_is_sent_as_a_form() {
     let server = TestServer::start(Reply::ok("{}"));

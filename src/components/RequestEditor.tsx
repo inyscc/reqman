@@ -609,6 +609,14 @@ export function RequestEditor({
         ...draft.body,
         kind,
         raw: kind === 'raw' ? draft.body.raw : null,
+        /**
+         * 切到 raw 时把语言落成显式的 JSON。
+         *
+         * 语言选择在 `null` 时显示的就是 JSON（见下方下拉的 `?? 'json'`），因此界面上
+         * 说「这是 JSON」；留一个 `null` 在库里，等于把「到底是哪种」留给下游去猜。
+         * 猜错的表现很隐蔽：正文是 JSON，实际发出去的 Content-Type 却是 `text/plain`。
+         */
+        raw_language: kind === 'raw' ? (draft.body.raw_language ?? 'json') : draft.body.raw_language,
         form: kind === 'form_data' ? draft.body.form : [],
         urlencoded: kind === 'url_encoded' ? draft.body.urlencoded : [],
       },

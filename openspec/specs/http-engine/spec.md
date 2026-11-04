@@ -48,9 +48,15 @@
 ### Requirement: 请求体类型
 系统 SHALL 支持以下请求体类型并正确设置对应内容类型：无正文、raw 文本（至少覆盖 JSON、XML、HTML、Text、JavaScript）、表单字段、含文件上传的多段表单、URL 编码表单、二进制内容。
 
+正文语言**未指定过**时（库里的语言为空）SHALL 按 JSON 处理：编辑器的语言选择在这种状态下显示的就是 JSON，实际发出的内容类型 SHALL 与它一致，SHALL NOT 出现「界面写着 JSON、线上发 `text/plain`」这种两套说法——那种分歧只能从运行结果的请求头或抓包里发现。
+
 #### Scenario: JSON raw 正文
 - **WHEN** 用户选择 raw 并将格式设为 JSON 后发送
 - **THEN** 实际请求正文为所填内容，且内容类型为 JSON
+
+#### Scenario: 未选过语言的 raw 正文
+- **WHEN** 请求体是 raw 且从未选过正文语言（编辑器显示 JSON），用户直接发送
+- **THEN** 实际发出的内容类型为 JSON，与编辑器显示的那一档相同
 
 #### Scenario: 多段表单含文件
 - **WHEN** 用户在多段表单中添加一个文件字段并选择一个本地文件

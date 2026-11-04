@@ -314,7 +314,9 @@ fn body_value(body: &RequestBody) -> Option<Value> {
             "raw": body.raw.clone().unwrap_or_default(),
             "options": {
                 "raw": {
-                    "language": raw_language_name(body.raw_language.unwrap_or(RawLanguage::Text))
+                    // 与发送同一条规则：未指定语言按编辑器显示的那一档导出，
+                    // 否则导出的集合会在 Postman 里变成 text（而应用里写着 JSON）
+                    "language": raw_language_name(body.raw_language.unwrap_or(RawLanguage::DEFAULT))
                 }
             }
         })),
