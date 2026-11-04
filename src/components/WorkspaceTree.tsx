@@ -440,14 +440,14 @@ function EntryRow({
         className={className}
         role="button"
         tabIndex={0}
-        title={`打开 ${name}（${expanded ? '折叠' : '展开'}）`}
+        title={`打开 ${name}`}
         {...dragHandlers(row, view, () => view.hoverFolder(id, expanded))}
         onClick={(event) => {
-          // 双击的第二击不重复切换，否则会「展开后又立刻折回」地闪一下
+          // 双击的第二击不重复打开：onSelectEntity 是异步的（标签不存在时要先拉数据），
+          // 两击会在「标签是否已存在」的检查前同时通过，可能插出两个标签
           if (event.detail === 2) return;
-          // 单击目录行 = 打开该实体的面板 + 切换展开（spec: 集合树的展开、折叠与打开）。
-          // 搜索态下 onToggle 是空操作，但打开面板与折叠无关，因此照常执行。
-          actions.onToggle(id);
+          // 单击目录行**只**打开该实体的面板，不动展开态（spec: 集合树的展开、折叠与打开）。
+          // 折叠是行内箭头的事：模型与 Postman / VS Code 一致，点目录不会顺手把子树收起来。
           actions.onSelectEntity(entity);
         }}
         onKeyDown={(event) => {
@@ -455,7 +455,6 @@ function EntryRow({
           // 冒泡到这里，而浏览器对聚焦的按钮按 Enter 还会再补一次 click——不拦住就会
           // 出现「在箭头上按 Enter 净零无效」「在「⋯」上按 Enter 把目录折叠掉」。
           if (event.key === 'Enter' && event.target === event.currentTarget) {
-            actions.onToggle(id);
             actions.onSelectEntity(entity);
           }
         }}

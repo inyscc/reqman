@@ -469,7 +469,7 @@ describe('会话标签行的溢出（真实引擎）', () => {
         await openTab(page, index);
       }
       // 再开一个实体标签（种类图标那一类），让两种标记都出现在同一行里。
-      // 集合行单击会折叠它，标签本身也只是一瞥——这里点一下标签把它留下来
+      // 集合行单击只打开实体标签、不动树的展开态，但标签是「一瞥」，点一下把它留下来
       await page.getByTestId('workspace-tree').getByText('探针集合', { exact: true }).click();
       await page.getByTestId('session-tab').last().click();
       await page.getByRole('tab').first().waitFor();

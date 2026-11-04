@@ -1977,7 +1977,7 @@ function openNodeMenu(name: string) {
  */
 const menu = () => screen.getByRole('menu');
 
-/** 打开集合 / 文件夹的脚本面板：入口在「⋯」菜单里（单击目录行改为切换展开）。 */
+/** 打开集合 / 文件夹的脚本面板：入口在「⋯」菜单里（与单击目录行等价，但不用先展开）。 */
 async function openEntityPanel(name: string) {
   openNodeMenu(name);
   fireEvent.click(within(menu()).getByText('编辑脚本'));
@@ -4723,26 +4723,43 @@ function doubleClick(element: HTMLElement) {
 }
 
 describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
-  it('单击展开态目录行收起它、后代一并不可见，并打开该实体的面板（spec: 单击目录行打开面板并切换展开）', () => {
+  it('单击目录行只打开该实体的面板，展开态与后代的可见性都不变（spec: 单击目录行打开面板并切换展开）', () => {
     const { actions, view } = renderTree();
     const outer = view.getByLabelText('折叠 外层') as HTMLButtonElement;
     expect(outer.getAttribute('aria-expanded')).toBe('true');
 
     fireEvent.click(view.getByText('外层'));
 
-    expect(outer.getAttribute('aria-expanded')).toBe('false');
-    expect(view.queryByText('内层')).toBeNull();
-    expect(view.queryByText('深处的请求')).toBeNull();
-    expect(view.queryByText('外层请求')).toBeNull();
-    // 单击目录行同时打开这个实体（M1：与请求行同款「单击即打开」）
+    // 打开：与请求行同款「单击即打开」
     expect(actions.onSelectEntity).toHaveBeenCalledTimes(1);
     expect(actions.onSelectEntity.mock.calls[0][0]).toMatchObject({
       kind: 'folder',
       id: '外层',
     });
+    // 折叠：一个都不动——那是箭头的事
+    expect(outer.getAttribute('aria-expanded')).toBe('true');
+    expect(view.queryByText('内层')).not.toBeNull();
+    expect(view.queryByText('深处的请求')).not.toBeNull();
+    expect(view.queryByText('外层请求')).not.toBeNull();
   });
 
-  it('再次单击恢复展开，后代自己的折叠状态被保留（不是递归展开）', () => {
+  it('已折叠的目录被单击后仍保持折叠，展开只能靠箭头（spec: 单击已折叠目录行恢复展开）', () => {
+    const { actions, view } = renderTree();
+    fireEvent.click(view.getByLabelText('折叠 外层'));
+    expect(view.queryByText('内层')).toBeNull();
+
+    fireEvent.click(view.getByText('外层'));
+
+    // 面板打开了，树没跟着展开：单击没有第二个效果
+    expect(actions.onSelectEntity).toHaveBeenCalledTimes(1);
+    expect(view.getByLabelText('展开 外层').getAttribute('aria-expanded')).toBe('false');
+    expect(view.queryByText('内层')).toBeNull();
+
+    fireEvent.click(view.getByLabelText('展开 外层'));
+    expect(view.queryByText('内层')).not.toBeNull();
+  });
+
+  it('箭头是唯一的折叠入口，展开也只作用于被点的那一层', () => {
     const { view } = renderTree();
     const outer = view.getByLabelText('折叠 外层') as HTMLButtonElement;
 
@@ -4750,60 +4767,63 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     fireEvent.click(view.getByLabelText('折叠 内层'));
     expect(view.queryByText('深处的请求')).toBeNull();
 
-    fireEvent.click(view.getByText('外层'));
+    fireEvent.click(view.getByLabelText('折叠 外层'));
     expect(outer.getAttribute('aria-expanded')).toBe('false');
     expect(view.queryByText('内层')).toBeNull();
 
-    fireEvent.click(view.getByText('外层'));
-    expect(outer.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(view.getByLabelText('展开 外层'));
     expect(view.queryByText('内层')).not.toBeNull();
     expect(view.queryByText('外层请求')).not.toBeNull();
     // 内层仍保持折叠：展开只作用于被点的那一层
     expect(view.queryByText('深处的请求')).toBeNull();
   });
 
-  it('双击只切换一次，不出现「展开后立即折回」的残留', () => {
-    const { view } = renderTree();
+  it('双击只打开一次，不生出第二个标签', () => {
+    const { actions, view } = renderTree();
     const outer = view.getByLabelText('折叠 外层') as HTMLButtonElement;
 
+    // 第二击 detail === 2 被忽略：openEntity 是异步的，派发两次会插出两个标签
     doubleClick(view.getByText('外层'));
-    expect(outer.getAttribute('aria-expanded')).toBe('false');
-    expect(view.queryByText('深处的请求')).toBeNull();
-
-    doubleClick(view.getByText('外层'));
+    expect(actions.onSelectEntity).toHaveBeenCalledTimes(1);
     expect(outer.getAttribute('aria-expanded')).toBe('true');
     expect(view.queryByText('深处的请求')).not.toBeNull();
   });
 
-  it('单击行内空白区同样切换；单击箭头只切换一次（stopPropagation 生效）', () => {
-    const { view } = renderTree();
+  it('单击行内空白区同样只打开；单击箭头只切换一次（stopPropagation 生效）', () => {
+    const { actions, view } = renderTree();
     const toggle = view.getByLabelText('折叠 外层') as HTMLButtonElement;
     const row = toggle.closest('.node') as HTMLElement;
 
     fireEvent.click(row);
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(actions.onSelectEntity).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(view.getByLabelText('展开 外层'));
-    expect(view.getByLabelText('折叠 外层').getAttribute('aria-expanded')).toBe('true');
+    // 箭头：只折叠，不开面板
+    fireEvent.click(view.getByLabelText('折叠 外层'));
+    expect(view.getByLabelText('展开 外层').getAttribute('aria-expanded')).toBe('false');
+    expect(actions.onSelectEntity).toHaveBeenCalledTimes(1);
   });
 
-  it('Enter 与单击同义：打开该实体的面板并切换展开（spec: Enter 与单击同义）', () => {
+  it('Enter 与单击同义：只打开面板，展开态不变（spec: Enter 与单击同义）', () => {
     const { actions, view } = renderTree();
     const outer = view.getByLabelText('折叠 外层') as HTMLButtonElement;
     const row = outer.closest('.node') as HTMLElement;
 
     fireEvent.keyDown(row, { key: 'Enter' });
 
-    expect(view.getByLabelText('展开 外层').getAttribute('aria-expanded')).toBe('false');
     expect(actions.onSelectEntity).toHaveBeenCalledTimes(1);
+    expect(view.getByLabelText('折叠 外层').getAttribute('aria-expanded')).toBe('true');
   });
 
-  it('Enter 落在行内控件上不切换行（箭头 / 「⋯」/ 菜单项）', () => {
-    const { view } = renderTree();
+  it('Enter 落在行内控件上不触发行（箭头 / 「⋯」/ 菜单项）', () => {
+    const { actions, view } = renderTree();
     const outer = view.getByLabelText('折叠 外层') as HTMLButtonElement;
     const row = outer.closest('.node') as HTMLElement;
-    const stillExpanded = () =>
+    const stillExpanded = () => {
       expect(view.getByLabelText('折叠 外层').getAttribute('aria-expanded')).toBe('true');
+      // 行级 Enter 的另一个效果（打开面板）也不该被行内控件带出来
+      expect(actions.onSelectEntity).not.toHaveBeenCalled();
+    };
 
     // jsdom 不会为「聚焦的按钮上按 Enter」补发 click，所以这里只能验冒泡那一半；
     // 完整路径（冒泡 + 补发的 click 互相抵消）由真实引擎用例守。
@@ -4821,12 +4841,15 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
   });
 
   it('搜索态下单击行不改变折叠集合', () => {
-    const { view } = renderTree();
+    const { actions, view } = renderTree();
 
     fireEvent.change(view.getByLabelText('搜索请求'), { target: { value: '深处' } });
     expect((view.getByLabelText('折叠 外层') as HTMLButtonElement).disabled).toBe(true);
 
     fireEvent.click(view.getByText('外层'));
+
+    // 搜索态下单击仍打开面板
+    expect(actions.onSelectEntity).toHaveBeenCalledTimes(1);
 
     fireEvent.change(view.getByLabelText('搜索请求'), { target: { value: '' } });
     // 清空搜索后仍是展开的，说明搜索期间那一击没有偷偷写进折叠集合
@@ -4873,7 +4896,7 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     expect(view.queryByText('深处的请求')).toBeNull();
     expect(view.getByText('我的集合')).toBeTruthy();
 
-    fireEvent.click(view.getByText('我的集合'));
+    fireEvent.click(view.getByLabelText('展开 我的集合'));
     expect(view.getByLabelText('折叠 我的集合').getAttribute('aria-expanded')).toBe('true');
     expect(view.getByText('外层')).toBeTruthy();
     // 更深一层仍保持折叠
@@ -4886,8 +4909,8 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
 
     fireEvent.click(view.getByLabelText('折叠 内层'));
     fireEvent.click(view.getByLabelText('全部折叠'));
-    fireEvent.click(view.getByText('我的集合'));
-    fireEvent.click(view.getByText('外层'));
+    fireEvent.click(view.getByLabelText('展开 我的集合'));
+    fireEvent.click(view.getByLabelText('展开 外层'));
 
     expect(view.getByText('内层')).toBeTruthy();
     expect(view.queryByText('深处的请求')).toBeNull();
@@ -4908,7 +4931,7 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     expect(view.queryByText('深处的请求')).not.toBeNull();
   });
 
-  it('单击目录行不产生标签、不切换主区；「编辑脚本」才进面板', async () => {
+  it('单击目录行打开该实体的标签、且不改动树；「编辑脚本」仍能直达脚本页', async () => {
     const harnessed = harness({
       folder: makeFolder({ id: '外层', name: '外层' }),
       extraRequest: makeRequest({ id: 'r-outer', name: '外层请求', url: 'https://api.test/outer' }),
@@ -4918,19 +4941,19 @@ describe('集合树的展开手势（rework-tree-expansion-gestures）', () => {
     render(<App client={client} />);
     await tree().findByText('外层');
 
-    // 规格 scenario 的前提是「主区当前正打开着某个请求」——先真的打开一个，
-    // 否则「不新增标签」只是把 0 断言成 0，验不到「原本打开的内容保持显示」
     fireEvent.click(tree().getByText('外层请求'));
     await screen.findByLabelText('请求地址');
     expect(screen.getAllByTestId('session-tab')).toHaveLength(1);
     // 点成常驻：目录面板是「另一个面」，会顶替预览标签（spec: 会话标签的生命周期）
     pinSessionTab('外层请求');
 
-    // 单击目录行 = 打开该实体的面板 + 切换展开：标签因此多一个，请求标签仍在
+    // 单击目录行 = 只打开该实体的面板（spec: 单击目录行打开面板并切换展开）
     fireEvent.click(tree().getByText('外层'));
-    expect(tree().queryByText('深处的请求')).toBeNull();
     expect(await screen.findByTestId('entity-script-panel')).toBeTruthy();
     expect(screen.getAllByTestId('session-tab')).toHaveLength(2);
+    // 树没被这一击改动：子树照旧展开
+    expect(tree().queryByText('深处的请求')).not.toBeNull();
+    expect(tree().getByLabelText('折叠 外层').getAttribute('aria-expanded')).toBe('true');
 
     // 再点一次只是聚焦同一个实体标签，不重复新增
     fireEvent.click(tree().getByText('外层'));
