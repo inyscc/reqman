@@ -436,7 +436,8 @@ main.main {
 /* 两个状态，只有这两个有底色：悬停（临时）与激活（常驻）。
    其余标签一律透明——一排等宽的方框会在标题栏里切出一堆无意义的边界。 */
 @media (hover: hover) and (pointer: fine) {
-  .session-tab:hover {
+  /* :not(:disabled) 用来压过全局 button:hover（权重更高），否则悬停会凭空长出一圈描边 */
+  .session-tab:hover:not(:disabled) {
     background: var(--panel-2);
     /* 透明边框只用来占位，悬停时也不许染色（见文件上方 button:hover 的说明） */
     border-color: transparent;
@@ -603,7 +604,10 @@ main.main {
   cursor: pointer;
 }
 
-.tab-list-trigger:hover {
+/* 悬停只换底色，不描边。`:not(:disabled)` 不是写给人看的装饰：
+   全局 `button:hover:not(:disabled)` 的权重（0,2,1）高于 `.foo:hover`（0,2,0），
+   少了它这一句就压不住，悬停时整行会长出一圈 --border-strong 的方框。 */
+.tab-list-trigger:hover:not(:disabled) {
   background: var(--panel-2);
   border-color: transparent;
   color: var(--text);
@@ -634,6 +638,13 @@ main.main {
   overflow-y: auto;
 }
 
+/* 就地关闭一项后焦点回落到菜单自身（见 TabListMenu）：焦点环跟着应用自己的强调色走，
+   而不是浏览器默认的黑色粗框 */
+.tab-menu:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .tab-menu-row {
   display: flex;
   align-items: center;
@@ -660,7 +671,10 @@ main.main {
   text-align: left;
 }
 
-.tab-menu-pick:hover {
+/* 悬停的表面由**整行**的底色表达（.tab-menu-row:hover），这里不准再描边：
+   一行列表项被框起来，读起来像一个待填的表单控件，而不是「指针停在这一项」。
+   带 :not(:disabled) 才压得住全局的 button:hover（见文件上方那条说明）。 */
+.tab-menu-pick:hover:not(:disabled) {
   background: transparent;
   border-color: transparent;
   color: var(--text);
@@ -700,7 +714,9 @@ main.main {
   visibility: visible;
 }
 
-.tab-menu-close:hover {
+/* 关闭入口与标签上的同款：悬停该行才出现，占位不变。
+   悬停只换底色，同样不许描边（理由见上方 .tab-menu-pick:hover）。 */
+.tab-menu-close:hover:not(:disabled) {
   background: var(--panel);
   border-color: transparent;
   color: var(--text);

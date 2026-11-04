@@ -6019,10 +6019,40 @@ describe('预览标签与标签栏（preview-tabs-and-tab-strip）', () => {
     fireEvent.click(items[0]);
     await waitFor(() => expect(tabByName('我的请求').className).toContain('active'));
 
-    // 关掉第二个标签
+    // 关掉第二个标签：菜单**不跟着消失**，可以接着关下一个
     fireEvent.click(screen.getByTestId('tab-list-trigger'));
     fireEvent.click(await screen.findByLabelText('关闭 另一个请求'));
     await waitFor(() => expect(tabNames()).toEqual(['我的请求']));
+    // 标签栏内容变短时浏览器会把 scrollLeft 夹回去，这是一次真实滚动——它不能把菜单带走
+    fireEvent.scroll(screen.getByTestId('session-tabs'));
+    const menuStillOpen = screen.getByTestId('tab-menu');
+    expect(within(menuStillOpen).getAllByTestId('tab-menu-item')).toHaveLength(1);
+
+    // 同一份菜单里接着关最后一个：关到没有标签时，菜单随触发器一起退场
+    fireEvent.click(within(menuStillOpen).getByLabelText('关闭 我的请求'));
+    await waitFor(() => expect(tabNames()).toEqual([]));
+    expect(screen.queryByTestId('tab-menu')).toBeNull();
+  });
+
+  it('从全部标签菜单关闭未保存标签时，菜单让位给确认框（spec: 会话标签栏）', async () => {
+    const { client } = harness({ extraRequest: makeRequest({ id: 'r2', name: '另一个请求' }) });
+    render(<App client={client} />);
+    await openRequest();
+    pinSessionTab('我的请求');
+    fireEvent.click(tree().getByText('另一个请求'));
+    await screen.findByLabelText('请求地址');
+    // 改一个字段：当前标签带上未保存改动，关闭它就得先问
+    fireEvent.change(screen.getByLabelText('请求地址'), {
+      target: { value: 'https://api.test/edited' },
+    });
+    await screen.findByText('未保存');
+
+    fireEvent.click(screen.getByTestId('tab-list-trigger'));
+    fireEvent.click(await screen.findByLabelText('关闭 另一个请求'));
+
+    // 菜单先退场：它的层级高于模态遮罩，留着会浮在确认框上面
+    expect(screen.queryByTestId('tab-menu')).toBeNull();
+    expect(screen.getByTestId('unsaved-guard')).toBeTruthy();
   });
 
   it('拖动标签改变顺序，插入线指示落点（spec: 会话标签的拖动排序）', async () => {

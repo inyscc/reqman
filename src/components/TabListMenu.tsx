@@ -39,6 +39,9 @@ const MENU_SELECTOR = '.tab-menu';
  * 也没有位置暗示。这个菜单是那条路的**兜底入口**——把当前打开的标签原样列一遍，逐个陈述
  * 与标签一致的识别信息（方法徽标 / 种类图标、名称、未保存标记），可跳转、可就地关闭。
  *
+ * 就地关闭**不收菜单**：这里最常见的用法是连续整理几个标签，关一个就收起来等于把一条
+ * 连贯的动作拆成来回（展开 → 点 × → 再展开 → 再点 ×）。收起条件见关闭入口处的注释。
+ *
  * 定位与关闭沿用行内菜单与下拉共用的两份实现（`useMenuPlacement` / `useMenuDismiss`）：
  * 会话行同时是窗口拖拽区与浮层的宿主，菜单必须按触发器的实测矩形定位、并且能溢出这一行。
  */
@@ -51,7 +54,12 @@ export function TabListMenu({ tabs, onSelect, onClose }: TabListMenuProps) {
   const position = useMenuPlacement({ open, anchor: trigger, menu, align: 'right' });
 
   const close = () => setOpen(false);
-  useMenuDismiss(root, close, MENU_SELECTOR);
+  /**
+   * 「别人滚了」这条不适用：这个菜单锚在会话标签行的固定触发器上，不跟着任何滚动容器走。
+   * 而就地关闭一个标签本身就会连带滚动别处（激活标签自动进入可见范围、控制台追到底部），
+   * 那条规则会让菜单在用户点完之后自己消失——正是要修的症状。
+   */
+  useMenuDismiss(root, close, MENU_SELECTOR, { dismissOnOutsideScroll: false });
 
   return (
     <div className="tab-list" ref={root}>
@@ -80,6 +88,9 @@ export function TabListMenu({ tabs, onSelect, onClose }: TabListMenuProps) {
             role="menu"
             aria-label="全部标签"
             data-testid="tab-menu"
+            /* 就地关闭一项后焦点收回到菜单自身（见关闭入口的注释），因此这里必须可聚焦：
+               -1 表示不进 Tab 序列，只在被程序化聚焦时接住焦点 */
+            tabIndex={-1}
             style={{
               top: position?.top ?? 0,
               left: position?.left,
@@ -123,8 +134,20 @@ export function TabListMenu({ tabs, onSelect, onClose }: TabListMenuProps) {
                   className="tab-menu-close"
                   aria-label={`关闭 ${tab.name}`}
                   onClick={() => {
+                    /**
+                     * 焦点先收回菜单：这一行随后连按钮一起卸载，焦点留在按钮上会掉到 body，
+                     * 键盘用户下一次 Tab 得从页面开头重新走。
+                     */
+                    menu.current?.focus();
                     onClose(tab.key);
-                    close();
+                    /**
+                     * 就地关闭**不收起菜单**：整理一批标签时，「展开 → 点 × → 再展开 → 再点 ×」
+                     * 把一条本该连贯的动作拆成来回跑；菜单留着，下一项就在指针下面。
+                     *
+                     * 例外只有脏标签——关它会拉起「未保存」确认，而菜单的 z 序（40）高于模态
+                     * 遮罩（20），不收起就会浮在确认框上面，所以这里先让位。
+                     */
+                    if (tab.dirty) close();
                   }}
                 >
                   ×

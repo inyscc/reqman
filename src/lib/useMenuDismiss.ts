@@ -17,11 +17,26 @@ import { useEffect, type RefObject } from 'react';
  * 调用方都是条件渲染（菜单挂载 = 打开），但监听在这里始终挂着，收起时调用 close
  * 只是把已经是 false 的状态再设一次，React 会自行跳过。
  */
+export interface MenuDismissOptions {
+  /**
+   * 菜单之外的容器滚动是否收起菜单（默认收起，即上面第三条）。
+   *
+   * 这条规则的用意是「锚点被滚走了，菜单还挂在原地就成了错位的东西」。锚点不在任何
+   * 滚动容器里的菜单没有这个风险，反而会被它误伤：用户自己的操作（关一个标签）常常
+   * 顺带滚动别处（激活标签自动进入可见范围、控制台追到底部），滚动事件一到，菜单就
+   * 在用户按下之后自己消失了。这类菜单把它关掉。
+   */
+  dismissOnOutsideScroll?: boolean;
+}
+
 export function useMenuDismiss(
   ref: RefObject<HTMLElement | null>,
   onClose: () => void,
   exemptSelector?: string,
+  options: MenuDismissOptions = {},
 ): void {
+  const { dismissOnOutsideScroll = true } = options;
+
   useEffect(() => {
     /**
      * 本次监听挂载的时刻，用来给滚动事件判「新旧」。
@@ -59,11 +74,11 @@ export function useMenuDismiss(
 
     document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
-    document.addEventListener('scroll', onScroll, true);
+    if (dismissOnOutsideScroll) document.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('mousedown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('scroll', onScroll, true);
     };
-  }, [ref, onClose, exemptSelector]);
+  }, [ref, onClose, exemptSelector, dismissOnOutsideScroll]);
 }
