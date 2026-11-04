@@ -4116,9 +4116,11 @@ iframe.visualizer-frame {
   font-size: var(--text-sm);
   color: var(--text);
   cursor: pointer;
+  /* 这一行的文字就是要拿去别处用的东西，别让容器的点击语义把它变成不可选 */
+  user-select: text;
 }
 
-.console-line:disabled {
+.console-line[aria-disabled='true'] {
   cursor: default;
 }
 
@@ -4155,6 +4157,40 @@ iframe.visualizer-frame {
 .console-tag {
   flex: none;
   white-space: nowrap;
+}
+
+/* 复制入口：默认不可见（一行日志的主职是读，常驻按钮会挤掉 URL 与正文的宽度），
+   悬停或键盘落到行内时显形。用 opacity 而不是 visibility——visibility: hidden 的元素
+   不参与 Tab 顺序，键盘用户就永远够不到它。它始终占位，显形时不会让整行重排。 */
+.console-copy {
+  flex: none;
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-family: inherit;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  cursor: pointer;
+}
+
+.console-entry:hover .console-copy,
+.console-entry:focus-within .console-copy,
+.console-copy:focus-visible {
+  opacity: 1;
+}
+
+.console-copy:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+/* 复制失败比成功更需要被看见：回执文字本身变红，原因挂在 title 上 */
+.console-copy[data-state='failed'] {
+  opacity: 1;
+  color: var(--danger);
 }
 
 /* 输出文本按原样呈现：换行与缩进是脚本自己写出来的，不能折成一行 */

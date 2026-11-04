@@ -100,23 +100,55 @@ export function clipBody(text: string): { text: string; truncated: boolean } {
   return { text: text.slice(0, CONSOLE_BODY_LIMIT), truncated: true };
 }
 
+/**
+ * 一次发送的终态在文字上的叫法。
+ *
+ * 搜索与「复制这一条」共用它：同一个终态在两处不能有两种叫法，否则读起来像两回事
+ * （design D3）。
+ */
+export function resultText(result: ConsoleResult | null): string {
+  if (result === null) return '发送中';
+
+  switch (result.kind) {
+    case 'response':
+      return `${result.status} ${result.statusText} ${result.elapsedMs} ms`;
+    case 'failed':
+      return `失败：${result.message}`;
+    case 'cancelled':
+      return '已取消';
+    case 'not-sent':
+      return `未发出：${result.reason}`;
+  }
+}
+
+/** 输出的来源标记：阶段 · 脚本层级 · 级别。没有层级（集合层之外的兜底输出）就省略那一段。 */
+export function entryTag(entry: Pick<ConsoleOutputEntry, 'phase' | 'level' | 'segment'>): string {
+  return [entry.phase === 'prerequest' ? '前置' : '后置', entry.segment, entry.level]
+    .filter((part): part is string => Boolean(part))
+    .join(' · ');
+}
+
 /** 条目上用于搜索的那几段文本，拼成一条可匹配的串。 */
 function haystack(entry: ConsoleLogEntry): string {
   if (entry.kind === 'network') {
-    const status =
-      entry.result === null
-        ? '发送中'
-        : entry.result.kind === 'response'
-          ? `${entry.result.status} ${entry.result.statusText}`
-          : entry.result.kind === 'failed'
-            ? entry.result.message
-            : entry.result.kind === 'cancelled'
-              ? '已取消'
-              : entry.result.reason;
-    return `${entry.method} ${entry.url} ${status}`;
+    return `${entry.method} ${entry.url} ${resultText(entry.result)}`;
   }
 
   return entry.values.map((value) => value.text).join(' ');
+}
+
+/**
+ * 复制入口写进剪贴板的那一行文本（spec: request-console「条目的复制」）。
+ *
+ * 与界面上看到的一致：网络条目是「方法 URL — 结果」，输出条目是「[来源] 正文」。
+ * 纯函数放在这里而不是组件里——它属于「条目说什么」，单测不必渲染（design D3）。
+ */
+export function entryToText(entry: ConsoleLogEntry): string {
+  if (entry.kind === 'network') {
+    return `${entry.method} ${entry.url} — ${resultText(entry.result)}`;
+  }
+
+  return `[${entryTag(entry)}] ${entry.values.map((value) => value.text).join(' ')}`;
 }
 
 /**

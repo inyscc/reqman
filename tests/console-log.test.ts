@@ -9,6 +9,7 @@ import {
   CONSOLE_LIMIT,
   clipBody,
   createConsoleLog,
+  entryToText,
   filterEntries,
   type ConsoleLogEntry,
   type RequestTrace,
@@ -213,5 +214,74 @@ describe('搜索与过滤', () => {
 
   it('无命中返回空数组，而不是全量', () => {
     expect(filterEntries(seed(), { query: '没有这个词', kind: 'all' })).toEqual([]);
+  });
+});
+
+/**
+ * 复制入口写进剪贴板的那一行（spec: request-console「条目的复制」）。
+ *
+ * 断言字符串而不是渲染结果：这段文本属于「条目说什么」，不该靠组件才能验。
+ */
+describe('复制用的一行文本', () => {
+  /** 跑一次结算，取最后一条（网络条目，或它带出来的最后一条输出）。 */
+  function last(overrides: Partial<RequestTrace> = {}): ConsoleLogEntry {
+    const log = createConsoleLog();
+    log.recordOutcome(trace(overrides));
+    const entries = log.snapshot();
+    return entries[entries.length - 1];
+  }
+
+  it('成功：方法、URL 与状态码耗时', () => {
+    expect(entryToText(last())).toBe('POST https://api.test/device/stream — 200 OK 99 ms');
+  });
+
+  it('失败：带上分类后的原因', () => {
+    const entry = last({ result: { kind: 'failed', message: '找不到主机 api.test' } });
+
+    expect(entryToText(entry)).toBe('POST https://api.test/device/stream — 失败：找不到主机 api.test');
+  });
+
+  it('取消与未发出各说各的', () => {
+    expect(entryToText(last({ result: { kind: 'cancelled' } }))).toContain('— 已取消');
+    expect(
+      entryToText(last({ result: { kind: 'not-sent', reason: '脚本执行未获准：我的集合' } })),
+    ).toContain('— 未发出：脚本执行未获准：我的集合');
+  });
+
+  it('还在飞的时候也有说法', () => {
+    const log = createConsoleLog();
+    log.beginNetwork({
+      sendId: 'pending-1',
+      requestId: null,
+      method: 'GET',
+      url: 'https://api.test/slow',
+      requestHeaders: [],
+    });
+    const entry = log.snapshot()[0];
+
+    expect(entryToText(entry)).toBe('GET https://api.test/slow — 发送中');
+  });
+
+  it('输出：来源标记与正文，多个值以空格相连', () => {
+    const entry = last({
+      outputs: [
+        {
+          level: 'log',
+          phase: 'prerequest',
+          segment: '请求层',
+          values: [{ text: '准备' }, { text: 'accessKey' }],
+        },
+      ],
+    });
+
+    expect(entryToText(entry)).toBe('[前置 · 请求层 · log] 准备 accessKey');
+  });
+
+  it('输出：没有脚本层级时省略那一段', () => {
+    const entry = last({
+      outputs: [{ level: 'warn', phase: 'test', segment: null, values: [{ text: '注意' }] }],
+    });
+
+    expect(entryToText(entry)).toBe('[后置 · warn] 注意');
   });
 });

@@ -2,7 +2,7 @@
 //
 // 每个用例各用一份 `createConsoleLog()`：面板的呈现不该依赖用例之间的先后。
 
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { ConsolePanel } from '../src/components/ConsolePanel';
 import { createConsoleLog, type ConsoleLogStore, type RequestTrace } from '../src/lib/consoleLog';
@@ -94,9 +94,10 @@ describe('条目的呈现', () => {
     expect(tag).toBeTruthy();
     expect(screen.getByTestId('console-output-text').textContent).toContain('注意');
 
-    // 来源排在行尾：先读到输出本身，再回头看它是谁写的（与网络条目同一种排法）
+    // 来源排在输出之后、复制入口之前：先读到输出本身，再回头看它是谁写的
     const line = tag.closest('.console-line');
-    expect(line?.lastElementChild).toBe(tag);
+    expect(tag.previousElementSibling).toBe(screen.getByTestId('console-output-text'));
+    expect(line?.lastElementChild?.getAttribute('data-testid')).toBe('console-copy');
   });
 
   it('展开网络条目能看到请求头、响应头与正文', () => {
@@ -162,9 +163,120 @@ describe('结构化值的展开', () => {
       ),
     );
 
-    const line = screen.getByTestId('console-output-text').closest('button');
-    expect(line?.hasAttribute('disabled')).toBe(true);
+    // 不可展开，但**不是** disabled 按钮：disabled 会把文字的选择能力一起没收（design D1）
+    const line = screen.getByTestId('console-output-text').closest('[role="button"]');
+    expect(line?.getAttribute('aria-disabled')).toBe('true');
+    expect(line?.hasAttribute('tabindex')).toBe(true);
     expect(screen.queryByTestId('console-structure')).toBeNull();
+
+    fireEvent.click(line as Element);
+    expect(screen.queryByTestId('console-structure')).toBeNull();
+  });
+});
+
+/**
+ * 剪贴板在 happy-dom 里不存在，按用例替换掉。
+ *
+ * 用 `defineProperty` 而非直接赋值：`navigator.clipboard` 是只读的 getter。
+ */
+function stubClipboard(write: (text: string) => Promise<void>) {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: write },
+  });
+}
+
+describe('复制条目', () => {
+  it('复制一条输出：带上来源标记，且不顺带展开', async () => {
+    const written: string[] = [];
+    stubClipboard(async (text) => {
+      written.push(text);
+    });
+
+    setup((store) =>
+      store.recordOutcome(
+        trace({
+          outputs: [
+            {
+              level: 'log',
+              phase: 'prerequest',
+              segment: '请求层',
+              values: [{ text: '准备 accessKey', json: { key: 'accessKey' } }],
+            },
+          ],
+        }),
+      ),
+    );
+
+    // 第 1 条是网络日志，第 2 条才是这条输出
+    const copy = screen.getAllByTestId('console-copy')[1];
+    fireEvent.click(copy);
+
+    await waitFor(() => expect(written).toEqual(['[前置 · 请求层 · log] 准备 accessKey']));
+    expect(copy.textContent).toBe('已复制');
+
+    // 复制入口在行内，点击不该冒泡成「展开这一条」
+    expect(screen.queryByTestId('console-structure')).toBeNull();
+  });
+
+  it('复制一条网络日志：方法、URL 与结果', async () => {
+    const written: string[] = [];
+    stubClipboard(async (text) => {
+      written.push(text);
+    });
+
+    setup((store) => store.recordOutcome(trace()));
+
+    fireEvent.click(screen.getByTestId('console-copy'));
+    await waitFor(() =>
+      expect(written).toEqual(['POST https://api.test/device/stream — 200 OK 99 ms']),
+    );
+  });
+
+  it('剪贴板写不进去时说失败，而不是看起来像成功', async () => {
+    stubClipboard(async () => {
+      throw new Error('剪贴板被拒绝');
+    });
+
+    setup((store) => store.recordOutcome(trace()));
+
+    const copy = screen.getByTestId('console-copy');
+    fireEvent.click(copy);
+
+    await waitFor(() => expect(copy.textContent).toBe('复制失败'));
+    expect(copy.getAttribute('title')).toContain('剪贴板被拒绝');
+  });
+
+  it('选中文字后松手不切换展开', () => {
+    setup((store) =>
+      store.recordOutcome(
+        trace({
+          outputs: [
+            { level: 'log', phase: 'test', segment: null, values: [{ text: 'x', json: { a: 1 } }] },
+          ],
+        }),
+      ),
+    );
+
+    const line = screen
+      .getByTestId('console-output-text')
+      .closest('[role="button"]') as HTMLElement;
+
+    // 拖选结束后 click 照常派发：此时选区非空，展开状态必须保持不动
+    const original = window.getSelection;
+    window.getSelection = () => ({ toString: () => '选中的一段文字' }) as unknown as Selection;
+    try {
+      fireEvent.click(line);
+    } finally {
+      window.getSelection = original;
+    }
+
+    expect(line.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByTestId('console-structure')).toBeNull();
+
+    // 没有选区时照常展开
+    fireEvent.click(line);
+    expect(line.getAttribute('aria-expanded')).toBe('true');
   });
 });
 

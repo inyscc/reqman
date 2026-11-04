@@ -3,9 +3,17 @@
 // 只负责呈现：条目从 `consoleLog` 来，筛选是纯函数，展开用的结构在收集时就留好了。
 // 抽屉的占位、高度拖动与持久化在 App 侧（spec: ui-layout「底部 Console 抽屉占位」）。
 
-import { useEffect, useRef, useState } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import {
   consoleLog,
+  entryTag,
+  entryToText,
   filterEntries,
   useConsoleLog,
   type ConsoleFilterKind,
@@ -140,6 +148,83 @@ export function ConsolePanel({ store, onClose }: ConsolePanelProps) {
   );
 }
 
+/**
+ * 行是 `role="button"` 的容器，而不是 `<button>`。
+ *
+ * 按钮的 UA 样式带 `user-select: none`（不可展开的行以前还是 `disabled`，连焦点一起没收），
+ * 而这一行的文字正是用户要复制的东西。代价是键盘行为得自己补：Enter 与空格都要能展开，
+ * 空格还得 `preventDefault`，否则会顺带滚一屏（design D1）。
+ */
+function rowKeyDown(toggle: () => void) {
+  return (event: ReactKeyboardEvent<HTMLElement>) => {
+    // 行内有复制按钮：它的按键不该被行当成展开
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    toggle();
+  };
+}
+
+/** 拖选一段文字后松手也会派发 click，有选区时不切换展开（design D2）。 */
+function clickUnlessSelected(toggle: () => void) {
+  return () => {
+    if (window.getSelection()?.toString()) return;
+    toggle();
+  };
+}
+
+/**
+ * 复制这一条。
+ *
+ * 入口默认不显形——一行日志的主职是「读」，常驻按钮会挤掉 URL 与正文的宽度；悬停或键盘
+ * 聚焦到行内时才出现（design D5）。成功给 1.5 秒回执，失败把原因说出来：静默失败会让人
+ * 以为已经复制好了。
+ */
+function CopyButton({ text }: { text: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [reason, setReason] = useState('');
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  const copy = async (event: ReactMouseEvent<HTMLButtonElement>) => {
+    // 行本身是点击区：复制不该顺带把条目折叠或展开
+    event.stopPropagation();
+
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setState('copied');
+      setReason('');
+    } catch (caught) {
+      setState('failed');
+      setReason(caught instanceof Error ? caught.message : String(caught));
+    }
+
+    timerRef.current = window.setTimeout(() => setState('idle'), 1500);
+  };
+
+  return (
+    <button
+      type="button"
+      className="console-copy"
+      data-testid="console-copy"
+      data-state={state}
+      aria-label="复制这一条"
+      title={state === 'failed' ? reason : undefined}
+      onClick={(event) => void copy(event)}
+    >
+      {state === 'copied' ? '已复制' : state === 'failed' ? '复制失败' : '复制'}
+    </button>
+  );
+}
+
 function ConsoleEntryRow({ entry }: { entry: ConsoleLogEntry }) {
   const [open, setOpen] = useState(false);
 
@@ -161,7 +246,14 @@ function NetworkRow({
 }) {
   return (
     <div className="console-entry" data-kind="network" data-testid="console-entry">
-      <button className="console-line" aria-expanded={open} onClick={onToggle}>
+      <div
+        className="console-line"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={clickUnlessSelected(onToggle)}
+        onKeyDown={rowKeyDown(onToggle)}
+      >
         <span className="console-caret">{open ? '▾' : '▸'}</span>
         <span className="method-badge" data-method={entry.method}>
           {entry.method}
@@ -169,7 +261,8 @@ function NetworkRow({
         <span className="mono console-url">{entry.url}</span>
         <span className="grow" />
         <ResultBadge result={entry.result} />
-      </button>
+        <CopyButton text={entryToText(entry)} />
+      </div>
 
       {open && (
         <div className="console-detail">
@@ -222,17 +315,23 @@ function OutputRow({
       data-phase={entry.phase}
       data-level={entry.level}
     >
-      <button className="console-line" aria-expanded={open} onClick={onToggle} disabled={!expandable}>
+      <div
+        className="console-line"
+        role="button"
+        tabIndex={0}
+        aria-expanded={expandable ? open : undefined}
+        aria-disabled={expandable ? undefined : true}
+        onClick={expandable ? clickUnlessSelected(onToggle) : undefined}
+        onKeyDown={expandable ? rowKeyDown(onToggle) : undefined}
+      >
         <span className="console-caret">{expandable ? (open ? '▾' : '▸') : ' '}</span>
         <span className="mono console-output-text" data-testid="console-output-text">
           {entry.values.map((value) => value.text).join(' ')}
         </span>
         {/* 来源（前置 / 后置 · 哪一级脚本 · 级别）排在行尾：先把输出读到，再看它是谁写的 */}
-        <span className="mono muted console-tag">
-          [{entry.phase === 'prerequest' ? '前置' : '后置'}
-          {entry.segment ? ` · ${entry.segment}` : ''} · {entry.level}]
-        </span>
-      </button>
+        <span className="mono muted console-tag">[{entryTag(entry)}]</span>
+        <CopyButton text={entryToText(entry)} />
+      </div>
 
       {open && expandable && (
         <div className="console-detail" data-testid="console-structure">
@@ -282,17 +381,21 @@ function JsonNode({ label, value, depth }: { label: string | null; value: unknow
 
   return (
     <div className="console-json-branch">
-      <button
+      {/* 折叠行同样得能选中：展开后最常被复制的就是这里的键名与取值（design D1） */}
+      <div
         className="console-json-toggle"
+        role="button"
+        tabIndex={0}
         aria-expanded={open}
         data-testid="console-json-toggle"
         style={{ paddingLeft: depth * 12 }}
-        onClick={() => setOpen((current) => !current)}
+        onClick={clickUnlessSelected(() => setOpen((current) => !current))}
+        onKeyDown={rowKeyDown(() => setOpen((current) => !current))}
       >
         <span className="console-caret">{open ? '▾' : '▸'}</span>
         {label !== null && <span className="console-key">{label}: </span>}
         <span className="mono muted">{summary}</span>
-      </button>
+      </div>
 
       {open &&
         children.map(([key, item]) => (

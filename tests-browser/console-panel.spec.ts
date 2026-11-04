@@ -272,3 +272,50 @@ describe('Console 在浅色底上的可读性', () => {
     }
   });
 });
+
+describe('Console 条目的复制', () => {
+  it('行文字可选中，复制入口悬停显形并把这一行写进剪贴板', async () => {
+    // 读回剪贴板要 `clipboard-read` 权限，所以这条用例自建 context
+    const context = await browser.newContext({
+      viewport: { width: 1200, height: 760 },
+      permissions: ['clipboard-read', 'clipboard-write'],
+    });
+    const page = await context.newPage();
+
+    try {
+      await page.addInitScript(FAKE_TAURI);
+      await page.goto(origin, { waitUntil: 'load' });
+      await page.getByTestId('workspace-tree').waitFor();
+
+      await page.getByRole('button', { name: 'GET 请求 1', exact: true }).click({ timeout: 10_000 });
+      await page.getByRole('button', { name: '发送', exact: true }).click({ timeout: 10_000 });
+
+      await page.getByTestId('console-toggle-closed').click();
+      const entry = page.getByTestId('console-entry').first();
+      await entry.waitFor({ timeout: 10_000 });
+
+      // 行是 role=button 的容器而不是 <button>：UA 的禁选规则不该再套在文字上
+      const userSelect = await entry
+        .locator('.console-url')
+        .evaluate((el) => getComputedStyle(el).userSelect);
+      expect(userSelect).toBe('text');
+
+      // 入口默认不显形（不抢宽度），悬停才出现
+      const copy = entry.getByTestId('console-copy');
+      expect(await copy.evaluate((el) => getComputedStyle(el).opacity)).toBe('0');
+      await entry.hover();
+      await expect.poll(() => copy.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+
+      await copy.click();
+      expect(copy).toBeTruthy();
+
+      const text = await page.evaluate(() => navigator.clipboard.readText());
+      expect(text).toBe('GET https://api.test/1 — 200 OK 7 ms');
+
+      // 复制在行内，点它不该顺带把条目展开
+      expect(await page.getByTestId('console-body').count()).toBe(0);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+});
