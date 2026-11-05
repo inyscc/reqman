@@ -18,7 +18,7 @@ import {
 import { useVariableHoverSource } from '../lib/useVariableHoverSource';
 import { useVariableSuggest, type VariableSuggestView } from '../lib/useVariableSuggest';
 import { withParams, withUrl } from '../lib/url';
-import type { VariableHoverLookup, VariableHoverWiring } from '../lib/variableHover';
+import type { VariableHoverWiring, VariableSource } from '../lib/variableHover';
 import { Dropdown } from './Dropdown';
 import { CurlPanel, useCurlSnapshot } from './CurlSnapshot';
 import { OverlayScrollbar } from './OverlayScrollbar';
@@ -623,10 +623,9 @@ export function RequestEditor({
   // 切走内层标签时输入框被卸载，候选收不到 blur——由标签变化主动收一次
   const closeTableSuggest = tableSuggest.close;
   useEffect(() => closeTableSuggest(), [tab, closeTableSuggest]);
-  // Monaco 的 provider 按模型 URI 取用取值源，拿不到组件实例，因此这里交出裸函数形态
-  const hoverLookup: VariableHoverLookup | null = hoverSource
-    ? (name) => hoverSource.resolve(name)
-    : null;
+  // Monaco 的 provider 按模型 URI 取用取值源，拿不到组件实例，因此这里交出源本身
+  // （悬停与输入候选共用它：一个回答「这个名字的值是什么」，一个回答「有哪些名字」）
+  const bodySource: VariableSource | null = hoverSource;
 
   /** binary 的文件选取：取消对话框时无副作用（spec: 请求体文件的选取）。 */
   const pickBinary = async () => {
@@ -853,7 +852,7 @@ export function RequestEditor({
                 value={draft.body.raw ?? ''}
                 fill
                 wrap={wrapLines}
-                variableHover={hoverLookup}
+                variableSource={bodySource}
                 onChange={(next) => {
                   setFormatError(null);
                   patch({ body: { ...draft.body, raw: next } });

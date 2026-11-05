@@ -20,7 +20,8 @@ import 'monaco-editor/esm/vs/language/json/monaco.contribution';
 import type * as Monaco from 'monaco-editor';
 import { rangeAtIndex } from './placeholders';
 import { PM_DTS } from './pmDts';
-import { describeHover, type VariableHoverLookup } from './variableHover';
+import { describeHover, scopeLabel, type VariableSource } from './variableHover';
+import { filterCandidates, suggestContext } from './variableSuggest';
 
 export const THEME_NAME = 'reqman-light';
 
@@ -102,27 +103,28 @@ function setupPmTypes(monaco: typeof Monaco): void {
 }
 
 /** 已登记的取值源：键是模型 URI。 */
-const hoverLookups = new Map<string, VariableHoverLookup>();
+const variableSources = new Map<string, VariableSource>();
 
 /**
- * 给一个模型登记取值源（Body raw 的占位符悬停）。
+ * 给一个模型登记取值源（Body raw 的占位符悬停与输入候选）。
  *
  * provider 只能按**语言**静态注册一次（Monaco 没有「随某个组件挂载而生效」的 provider），
  * 因此「这个模型该查哪个作用域的变量」只能反着传进来：编辑面按模型 URI 登记，回调再按
- * 当前模型去找。没有登记的模型（脚本面、响应正文）自然返回 null，不影响它们原有的悬停。
+ * 当前模型去找。没有登记的模型（脚本面、响应正文）自然什么也不返回，不影响它们原有的
+ * 悬停与补全。
  */
-export function registerVariableHoverLookup(uri: string, lookup: VariableHoverLookup): void {
-  hoverLookups.set(uri, lookup);
+export function registerVariableSource(uri: string, source: VariableSource): void {
+  variableSources.set(uri, source);
 }
 
-/** 编辑面卸载时撤掉登记：留着会让关掉的请求继续响应悬停。 */
-export function releaseVariableHoverLookup(uri: string): void {
-  hoverLookups.delete(uri);
+/** 编辑面卸载时撤掉登记：留着会让关掉的请求继续响应悬停/候选。 */
+export function releaseVariableSource(uri: string): void {
+  variableSources.delete(uri);
 }
 
-/** 当前已登记的模型（排查用）。 */
-export function registeredVariableHoverUris(): string[] {
-  return Array.from(hoverLookups.keys());
+/** 当前已登记的模型（排查与浏览器用例用）。 */
+export function registeredVariableSourceUris(): string[] {
+  return Array.from(variableSources.keys());
 }
 
 let variableHoverReady = false;
@@ -134,7 +136,7 @@ function setupVariableHover(monaco: typeof Monaco): void {
 
   monaco.languages.registerHoverProvider(['json', 'xml', 'html', 'javascript', 'plaintext'], {
     async provideHover(model, position) {
-      const lookup = hoverLookups.get(model.uri.toString());
+      const lookup = variableSources.get(model.uri.toString());
       if (!lookup) return null;
 
       const text = model.getValue();
@@ -142,7 +144,7 @@ function setupVariableHover(monaco: typeof Monaco): void {
       const range = rangeAtIndex(text, model.getOffsetAt(position));
       if (!range) return null;
 
-      const presented = describeHover(await lookup(range.name));
+      const presented = describeHover(await lookup.resolve(range.name));
       const start = model.getPositionAt(range.start);
       const end = model.getPositionAt(range.end);
 
@@ -164,6 +166,80 @@ function setupVariableHover(monaco: typeof Monaco): void {
   });
 }
 
+let variableSuggestReady = false;
+
+/** 补全挂在这些语言上——与编辑面实际用到的 mode 一致（raw 正文可为 json/xml/html/... ）。 */
+const VARIABLE_LANGUAGES = ['json', 'xml', 'html', 'javascript', 'plaintext'];
+
+/**
+ * 注册输入 `{{` 时的变量候选（change: suggest-variables-in-body-editor）。
+ *
+ * 三条与原生输入框那套保持一致的约定：
+ * - **判定同源**：`suggestContext` 决定「光标是否正在写一个未闭合的 `{{`」，因此正文里
+ *   改名字（`{{ho|st}}`）替换的是整个占位符，不会插成 `{{{{name}}st}}`；
+ * - **过滤同源**：`filterCandidates` 保证前缀命中排在包含命中之前，顺序与地址栏一致；
+ * - **取值同源**：`candidates()` 就是悬停用的那一份（同名遮蔽只剩生效条、secret 只给掩码）。
+ *
+ * 触发字符取 `{`：Monaco 的触发是「字符插入之后」，用户敲下第二个 `{` 时才真的构成 `{{`，
+ * 因此单敲一个 `{` 会走到这里但判定为 null、直接返回空集——不会弹出「无建议」面板。
+ */
+function setupVariableSuggest(monaco: typeof Monaco): void {
+  if (variableSuggestReady) return;
+  variableSuggestReady = true;
+
+  monaco.languages.registerCompletionItemProvider(VARIABLE_LANGUAGES, {
+    triggerCharacters: ['{'],
+    async provideCompletionItems(model, position) {
+      const source = variableSources.get(model.uri.toString());
+      if (!source) return { suggestions: [] };
+
+      const text = model.getValue();
+      const caret = model.getOffsetAt(position);
+      const context = suggestContext(text, caret);
+      if (!context) return { suggestions: [] };
+
+      // 打开时重新装载一次（刚加的变量要立刻可选），继续键入走同一份列表
+      const items = filterCandidates(
+        await source.candidates({ refresh: context.query === '' }),
+        context.query,
+      );
+      const start = model.getPositionAt(context.start);
+      const end = model.getPositionAt(context.end);
+      const range = {
+        startLineNumber: start.lineNumber,
+        startColumn: start.column,
+        endLineNumber: end.lineNumber,
+        endColumn: end.column,
+      };
+      // Monaco 拿 `range` 到光标的这段文本做过滤：`filterText` 必须以它开头（`{{ho` ↔
+      // `{{host`），否则刚敲下的两个花括号会把整份候选都滤掉
+      return {
+        suggestions: items.map((item, index) => ({
+          // 行内就给出「名字 · 取值 · 来源」：用户是在挑「哪个变量」，取值与来源是判断依据，
+          // 藏进详情面板等于让他逐条悬停（地址栏那套浮层也是把三样一起摆出来的）
+          label: { label: item.name, description: `${item.value} · ${scopeLabel(item.scope)}` },
+          kind: monaco.languages.CompletionItemKind.Variable,
+          detail: item.value,
+          documentation: {
+            value: [
+              `\`{{${item.name}}}\``,
+              '',
+              item.secret ? '取值：`••••••`（secret，发送时由后端展开）' : `取值：\`${item.value}\``,
+              `来源：${scopeLabel(item.scope)}`,
+            ].join('\n'),
+          },
+          insertText: `{{${item.name}}}`,
+          // 前缀补上 `{{`：Monaco 的过滤是拿 `range` 到光标的文本比的
+          filterText: `{{${item.name}`,
+          // 用下标做排序键：列表顺序即 `filterCandidates` 的结果（当前作用域在前、前缀命中在前）
+          sortText: String(index).padStart(4, '0'),
+          range,
+        })),
+      };
+    },
+  });
+}
+
 let monacoPromise: Promise<typeof Monaco> | null = null;
 
 /** 动态加载 Monaco 并完成一次性装配（同进程内只加载一次）。 */
@@ -172,6 +248,7 @@ export function loadMonaco(): Promise<typeof Monaco> {
     defineTheme(monaco);
     setupPmTypes(monaco);
     setupVariableHover(monaco);
+    setupVariableSuggest(monaco);
     return monaco;
   });
   return monacoPromise;

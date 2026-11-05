@@ -101,6 +101,8 @@ interface SurfaceApi {
   hoverPointAt(uri: string, line: number, column: number): Promise<{ x: number; y: number } | null>;
   /** 取值源被问过几次（provider 被重复注册时，一次悬停会问多次）。 */
   hoverLookupCalls(): number;
+  /** 请求体 raw 面当前的文本（候选插入后由它验证写回结果）。 */
+  hoverBodyValue(): string;
   /** 当前登记了哪些模型的取值源（排查用）。 */
   hoverRegistry(): Promise<string[]>;
 }
@@ -140,6 +142,8 @@ function Harness() {
   const saveCount = useRef(0);
   /** 取值源被问过几次（provider 重复注册时一次悬停会问多次）。 */
   const hoverCalls = useRef(0);
+  /** 请求体 raw 面上的实际文本（候选插入之后要看它变成了什么）。 */
+  const hoverBody = useRef(HOVER_BODY);
 
   // 模拟 App 的 window 层 Ctrl+S 监听（App.tsx 里「不依赖焦点」的那一个）：
   // 验证焦点在 Monaco 里时按键仍会冒泡到 window。
@@ -228,9 +232,10 @@ function Harness() {
         return editor?.getDomNode()?.querySelectorAll('.view-line').length ?? -1;
       },
       hoverLookupCalls: () => hoverCalls.current,
+      hoverBodyValue: () => hoverBody.current,
       hoverRegistry: async () => {
-        const { registeredVariableHoverUris } = await import('../lib/monacoEnv');
-        return registeredVariableHoverUris();
+        const { registeredVariableSourceUris } = await import('../lib/monacoEnv');
+        return registeredVariableSourceUris();
       },
       mountHoverBody: (request) => setHoverRequest(request),
       unmountHoverBody: () => setHoverRequest(null),
@@ -301,9 +306,21 @@ function Harness() {
             language="json"
             value={HOVER_BODY}
             fill
-            variableHover={async (name) => {
-              hoverCalls.current += 1;
-              return HOVER_VALUES[hoverRequest]?.[name] ?? { kind: 'unresolved', name };
+            onChange={(next) => {
+              hoverBody.current = next;
+            }}
+            variableSource={{
+              resolve: async (name) => {
+                hoverCalls.current += 1;
+                return HOVER_VALUES[hoverRequest]?.[name] ?? { kind: 'unresolved', name };
+              },
+              // 候选与悬停同一份假数据：这里验的是「Monaco 那一面接得上」，不是取值判定
+              candidates: async () =>
+                Object.entries(HOVER_VALUES[hoverRequest] ?? {}).flatMap(([name, info]) =>
+                  info.kind === 'value'
+                    ? [{ name, value: info.value, scope: info.scope, secret: info.secret }]
+                    : [],
+                ),
             }}
           />
         </div>
