@@ -148,3 +148,30 @@ export function placeholderAtClientX(
     },
   };
 }
+
+/**
+ * 光标在**视口**里的锚点（change: suggest-variables-while-typing，任务 2.2）。
+ *
+ * 候选浮层要贴在正在输入的那段文字下面，因此需要「第 index 个字符之前」的横坐标。
+ * 测量与 `placeholderAtClientX` 共用同一份（同字体 + 补偿 `scrollLeft`）：两处各量一次
+ * 就会在横向滚动后分叉——一个说占位符在左、一个说在右。
+ *
+ * 结果夹在输入框左右内缘之间：文字滚出可见区时，浮层宁可贴在框边，也不要跑到框外去。
+ */
+export function caretRectAt(
+  input: HTMLInputElement,
+  index: number,
+  options: HitTestOptions = {},
+): { left: number; top: number; bottom: number; width: number } {
+  const text = input.value;
+  const clamped = Math.min(Math.max(index, 0), text.length);
+  const measure = options.measure ?? inputTextMeasure(input);
+  const inset = options.textInset ?? textInset(input);
+  const bounds = input.getBoundingClientRect();
+
+  const min = bounds.left + inset;
+  const max = Math.max(bounds.right - inset, min);
+  const caret = min + measure(text.slice(0, clamped)) - input.scrollLeft;
+
+  return { left: Math.min(Math.max(caret, min), max), top: bounds.top, bottom: bounds.bottom, width: 0 };
+}

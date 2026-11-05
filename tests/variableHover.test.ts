@@ -267,3 +267,105 @@ describe('悬浮提示的 secret 明文边界', () => {
     expect(writes.globalsSet).not.toHaveBeenCalled();
   });
 });
+
+// 候选列表（change: suggest-variables-while-typing，任务 1.2）。
+//
+// 候选与悬停是同一份事实的两种排版，因此这里的断言重点是**同一份判定**：同名遮蔽后只剩
+// 生效条、禁用条目不进列表、secret 不被揭示。任何一条失守，用户就会在输入时看到「另一个
+// 变量」，而发送时用的是另一个值。
+describe('候选列表', () => {
+  it('同名遮蔽后只剩生效的那一条，来源标为 environment', async () => {
+    const { client } = fakeClient(
+      [variable('host', 'env.test', { id: 'env-host' })],
+      [variable('host', 'collection.test', { id: 'col-host', scope: 'collection' })],
+    );
+    const source = createVariableHoverSource(client, CONTEXT);
+
+    expect(await source.candidates()).toEqual([
+      { name: 'host', value: 'env.test', scope: 'environment', secret: false },
+    ]);
+  });
+
+  it('禁用与被遮蔽的条目都不出现', async () => {
+    const { client } = fakeClient(
+      [
+        variable('shadowed', 'first.test', { id: 'a' }),
+        variable('shadowed', 'second.test', { id: 'b' }),
+        variable('off', 'x', { id: 'c', enabled: false }),
+      ],
+      [],
+    );
+    const source = createVariableHoverSource(client, CONTEXT);
+
+    expect((await source.candidates()).map((item) => item.name)).toEqual(['shadowed']);
+  });
+
+  it('当前作用域排在集合之前，各自按名称升序', async () => {
+    const { client } = fakeClient(
+      [variable('zulu', '1'), variable('alpha', '2')],
+      [
+        variable('beta', '3', { scope: 'collection' }),
+        variable('gamma', '4', { scope: 'collection' }),
+      ],
+    );
+    const source = createVariableHoverSource(client, CONTEXT);
+
+    expect((await source.candidates()).map((item) => item.name)).toEqual([
+      'alpha',
+      'zulu',
+      'beta',
+      'gamma',
+    ]);
+  });
+
+  it('secret 只给掩码，且候选路径不调用揭示出口', async () => {
+    const { client, secretReveal } = fakeClient(
+      [variable('token', '••••••', { id: 'v-token', secret: true })],
+      [],
+      { reveal: { 'v-token': 'real-secret' } },
+    );
+    const source = createVariableHoverSource(client, CONTEXT);
+
+    const items = await source.candidates();
+
+    expect(items).toEqual([
+      { name: 'token', value: '••••••', scope: 'environment', secret: true },
+    ]);
+    expect(secretReveal).not.toHaveBeenCalled();
+    expect(JSON.stringify(items)).not.toContain('real-secret');
+  });
+
+  it('默认走缓存：不重复读后端', async () => {
+    const { client, variableList } = fakeClient([variable('host', 'env.test')]);
+    const source = createVariableHoverSource(client, CONTEXT);
+
+    await source.candidates();
+    await source.candidates();
+
+    // 一次装载 = 环境作用域 + 集合各一次；第二次 candidates 不再读后端
+    expect(variableList).toHaveBeenCalledTimes(2);
+  });
+
+  it('refresh 会重新装载：刚加的变量下一次打开就能选到', async () => {
+    const scope = [variable('host', 'env.test')];
+    const { client, variableList } = fakeClient(scope);
+    const source = createVariableHoverSource(client, CONTEXT);
+
+    expect((await source.candidates()).map((item) => item.name)).toEqual(['host']);
+
+    scope.push(variable('added', 'later'));
+    expect((await source.candidates({ refresh: true })).map((item) => item.name)).toEqual([
+      'added',
+      'host',
+    ]);
+    // 第一次装载 2 次（环境 + 集合），refresh 后再装一次 → 共 4 次
+    expect(variableList).toHaveBeenCalledTimes(4);
+  });
+
+  it('装载失败时退化成空列表，不把一次候选变成抛错', async () => {
+    const { client } = fakeClient([], [], { fail: true });
+    const source = createVariableHoverSource(client, CONTEXT);
+
+    expect(await source.candidates()).toEqual([]);
+  });
+});

@@ -1317,6 +1317,72 @@ main.main {
   color: var(--muted);
 }
 
+/* 变量候选浮层（spec: 变量输入时的候选提示）。
+   与悬停提示同一档外观，但**接住指针**——候选项是要被点的。因此它不能是
+   `pointer-events: none`，收起规则也由它自己承担（外部按下 / 失焦 / 滚动）。
+   z 序压在菜单（40）之上、悬停提示（50）之下：两者不会同时出现，这个次序只是
+   保证候选永远不会被表格或下拉挡住。 */
+.variable-suggest {
+  position: fixed;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  max-width: min(420px, 80vw);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  box-shadow: var(--shadow-2);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.variable-suggest-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+/* 高亮用背景而不是描边：列表是一整块，逐项描边会变成一堆小方框 */
+.variable-suggest-item[aria-selected='true'] {
+  background: var(--accent-soft);
+}
+
+.variable-suggest-name {
+  flex: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 值可能很长（token、URL）：截断显示，不改动它本身 */
+.variable-suggest-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.variable-suggest-scope {
+  flex: none;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.variable-suggest-empty {
+  padding: var(--space-2) var(--space-3);
+  color: var(--muted);
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

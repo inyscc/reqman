@@ -6,13 +6,13 @@
 import { useMemo } from 'react';
 import {
   createVariableHoverSource,
-  type VariableHoverSource,
+  type VariableSource,
   type VariableHoverWiring,
 } from './variableHover';
 
 export function useVariableHoverSource(
   wiring: VariableHoverWiring | null | undefined,
-): VariableHoverSource | null {
+): VariableSource | null {
   // 逐个取出、按值做依赖：调用方通常在渲染里就地写对象字面量，用对象本身做依赖会每次重建
   const client = wiring?.client ?? null;
   const workspaceId = wiring?.workspaceId ?? null;

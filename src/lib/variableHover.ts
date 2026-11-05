@@ -45,6 +45,35 @@ export interface VariableHoverSource {
   resolve(name: string): Promise<VariableHoverInfo>;
 }
 
+/**
+ * 候选列表里的一条（change: suggest-variables-while-typing，任务 1.2）。
+ *
+ * 与 `VariableHoverValue` 是同一种事实的两种排版：名字、当前取值、来源作用域。`secret`
+ * 在这里只影响呈现（掩码由后端下发，本出口不去揭示），不改变取值本身。
+ */
+export interface VariableCandidate {
+  name: string;
+  value: string;
+  scope: VariableHoverScope;
+  secret: boolean;
+}
+
+/**
+ * 候选列表的出口。
+ *
+ * 与 `resolve` 共用同一份装载与作用域判定（`load()` 里的那份映射）——候选要是自己再合并
+ * 一次，界面上就会出现「候选说来自 environment、实际发出的是 collection」。
+ *
+ * `refresh` 为真时丢掉缓存重新装载：候选是**输入时**弹出的，刚加的变量必须立刻可选；
+ * 悬停没有这个要求，因此它继续走缓存。
+ */
+export interface VariableCatalog {
+  candidates(options?: { refresh?: boolean }): Promise<VariableCandidate[]>;
+}
+
+/** 悬停与候选共用的一份源：一个负责「这个名字的值是什么」，一个负责「有哪些名字」。 */
+export type VariableSource = VariableHoverSource & VariableCatalog;
+
 /** 取值源的可传递形态（Monaco 的 hover provider 要的正是这个形状）。 */
 export type VariableHoverLookup = (name: string) => Promise<VariableHoverInfo>;
 
@@ -111,6 +140,11 @@ const SCOPE_LABELS: Record<VariableHoverScope, string> = {
   collection: '集合',
   global: '全局',
 };
+
+/** 作用域的说法（候选列表也用它，两处不许各写一套译名）。 */
+export function scopeLabel(scope: VariableHoverScope): string {
+  return SCOPE_LABELS[scope];
+}
 
 /**
  * 提示呈现的中间形态。
@@ -190,7 +224,7 @@ interface ScopedVariable {
 export function createVariableHoverSource(
   client: VariableHoverCommands,
   context: VariableHoverContext,
-): VariableHoverSource {
+): VariableSource {
   let scoped: Promise<Map<string, ScopedVariable>> | null = null;
 
   const load = (): Promise<Map<string, ScopedVariable>> => {
@@ -254,6 +288,38 @@ export function createVariableHoverSource(
         scope,
         secret: false,
       };
+    },
+
+    /**
+     * 列出可选的名字（change: suggest-variables-while-typing，任务 1.2）。
+     *
+     * 数据就是上面那份映射——同名遮蔽只剩生效条、禁用条目不进映射，因此这里不需要（也不
+     * SHALL NOT）再判一次作用域。取值取 `displayValue`：secret 拿到的是后端下发的掩码，
+     * 本出口不调 `secretReveal`——输入时随手弹出的列表不该成为读明文的第三条通道。
+     */
+    async candidates(options: { refresh?: boolean } = {}): Promise<VariableCandidate[]> {
+      // 重新装载：候选在每次「从关闭转为打开」时取一次，刚加的变量必须立刻可选
+      if (options.refresh) scoped = null;
+
+      const byName = await load();
+      const entries: VariableCandidate[] = [];
+
+      for (const [name, found] of byName) {
+        entries.push({
+          name,
+          value: displayValue(found.variable),
+          scope: found.scope,
+          secret: found.variable.is_secret,
+        });
+      }
+
+      // 当前作用域排在集合之前：用户刚改过环境变量时，要选的几乎总是那一层
+      const current = entries.filter((entry) => entry.scope !== 'collection');
+      const collection = entries.filter((entry) => entry.scope === 'collection');
+      const byNameOrder = (left: VariableCandidate, right: VariableCandidate) =>
+        left.name.localeCompare(right.name);
+
+      return [...current.sort(byNameOrder), ...collection.sort(byNameOrder)];
     },
   };
 }

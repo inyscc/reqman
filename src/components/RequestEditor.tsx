@@ -16,6 +16,7 @@ import {
   type PlaceholderHoverHandlers,
 } from '../lib/usePlaceholderHover';
 import { useVariableHoverSource } from '../lib/useVariableHoverSource';
+import { useVariableSuggest, type VariableSuggestView } from '../lib/useVariableSuggest';
 import { withParams, withUrl } from '../lib/url';
 import type { VariableHoverLookup, VariableHoverWiring } from '../lib/variableHover';
 import { Dropdown } from './Dropdown';
@@ -23,6 +24,7 @@ import { CurlPanel, useCurlSnapshot } from './CurlSnapshot';
 import { OverlayScrollbar } from './OverlayScrollbar';
 import { TrashIcon } from './icons';
 import { VariableHoverTip } from './VariableHoverTip';
+import { VariableSuggest } from './VariableSuggest';
 import { ScriptPane } from './ScriptPane';
 import { CodeSurface } from './CodeSurface';
 import { monacoLanguage } from '../lib/codeSurface';
@@ -168,6 +170,7 @@ function KeyValueTable({
   keyPlaceholder,
   valuePlaceholder,
   hover,
+  suggest,
 }: {
   rows: KeyValue[];
   onChange: (rows: KeyValue[]) => void;
@@ -181,6 +184,11 @@ function KeyValueTable({
    * 哪几张表接得上——四个编辑面是有定数的，不是「所有键值表都顺带拥有」。
    */
   hover?: PlaceholderHoverHandlers;
+  /**
+   * 值输入框上的变量候选（spec: 变量输入时的候选提示）。同一份 hook 服务整张表，
+   * 插入按行写回：真实行 `update(index)`、幽灵行 `editGhost`。缺省时该能力不生效。
+   */
+  suggest?: VariableSuggestView | null;
 }) {
   const [pending, setPending] = useState<KeyValue>(EMPTY_ROW);
   const [ownedIndex, setOwnedIndex] = useState<number | null>(null);
@@ -209,6 +217,12 @@ function KeyValueTable({
     }
     update(owned, patch);
   };
+
+  /**
+   * 幽灵行的候选接线。插入写回 `editGhost`——它自己会判断「还没物化就新建一行」还是
+   * 「已经物化就改那一行」，因此这里不必关心 owned 的状态。
+   */
+  const ghostSuggest = suggest?.bind((next) => editGhost({ value: next }));
 
   /** 离开幽灵行：内容留在模型里，幽灵行回到空态；什么都没写就把它摘掉。 */
   const releaseGhost = () => {
@@ -249,8 +263,13 @@ function KeyValueTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) =>
-            index === owned ? null : (
+          {rows.map((row, index) => {
+            if (index === owned) return null;
+
+            // 插入按行走：这一行的候选把新值写回这一行自己
+            const rowSuggest = suggest?.bind((next) => update(index, { value: next }));
+
+            return (
               <tr key={index}>
                 <td>
                   <input
@@ -274,8 +293,22 @@ function KeyValueTable({
                     value={row.value}
                     placeholder={valuePlaceholder}
                     aria-label={`${valuePlaceholder} ${index}`}
-                    onChange={(event) => update(index, { value: event.target.value })}
+                    onChange={(event) => {
+                      update(index, { value: event.target.value });
+                      rowSuggest?.onChange(event);
+                    }}
+                    onKeyDown={(event) => {
+                      rowSuggest?.onKeyDown(event);
+                    }}
+                    onClick={rowSuggest?.onClick}
+                    onCompositionStart={rowSuggest?.onCompositionStart}
+                    onCompositionEnd={rowSuggest?.onCompositionEnd}
                     {...hover}
+                    /* 展开 `hover` 之后必须显式合并失焦：提示要收，候选也要收 */
+                    onBlur={() => {
+                      rowSuggest?.onBlur();
+                      hover?.onBlur();
+                    }}
                   />
                 </td>
                 {/* 描述列：人类可读说明。它不参与「是否发出」（见 lib/rows.ts 的两档
@@ -303,8 +336,8 @@ function KeyValueTable({
                   </button>
                 </td>
               </tr>
-            ),
-          )}
+            );
+          })}
           <tr className="ghost-row">
             <td />
             <td>
@@ -327,15 +360,24 @@ function KeyValueTable({
                 value={ghost.value}
                 placeholder={valuePlaceholder}
                 aria-label="新增行的值"
-                onChange={(event) => editGhost({ value: event.target.value })}
+                onChange={(event) => {
+                  editGhost({ value: event.target.value });
+                  ghostSuggest?.onChange(event);
+                }}
+                onClick={ghostSuggest?.onClick}
+                onCompositionStart={ghostSuggest?.onCompositionStart}
+                onCompositionEnd={ghostSuggest?.onCompositionEnd}
                 {...hover}
-                /* 失焦有两个含义——幽灵行交还空态、提示收起。展开 `hover` 之后必须显式
-                   合并，否则后写的那个会把前一个覆盖掉。 */
+                /* 失焦有三个含义——幽灵行交还空态、提示收起、候选收起。展开 `hover` 之后
+                   必须显式合并，否则后写的那个会把前一个覆盖掉。 */
                 onBlur={(event) => {
+                  ghostSuggest?.onBlur();
                   hover?.onBlur();
                   leaveGhost(event);
                 }}
                 onKeyDown={(event) => {
+                  // 候选优先：回车在候选打开时是「补全」，不是「提交并跳到下一行」
+                  if (ghostSuggest?.onKeyDown(event)) return;
                   if (event.key !== 'Enter') return;
                   event.preventDefault();
                   submitGhost();
@@ -428,6 +470,13 @@ export function RequestBand(props: RequestBandProps) {
   // 是不动的，它一旦吃到指针，光标定位与选取就废了（design D3）
   const urlHover = usePlaceholderHover();
   const hoverSource = useVariableHoverSource(variableHover);
+  // 候选与悬停共用同一份取值源：一个回答「这个名字的值是什么」，一个回答「有哪些名字」
+  const urlSuggest = useVariableSuggest(hoverSource);
+  const urlHandlers = urlSuggest.bind((next) => onChange(withUrl(draft, next)));
+  // 换一条请求时地址栏的内容整体换掉（不是用户键入），候选不会收到 onChange——主动收一次，
+  // 否则它锚的还是上一份文本，这时点选会把候选插到不相干的位置
+  const closeUrlSuggest = urlSuggest.close;
+  useEffect(() => closeUrlSuggest(), [draft.id, closeUrlSuggest]);
 
   return (
     <div className="request-band">
@@ -496,8 +545,20 @@ export function RequestBand(props: RequestBandProps) {
             aria-label="请求地址"
             placeholder="https://api.example.com/users/:id"
             value={draft.url}
-            onChange={(event) => onChange(withUrl(draft, event.target.value))}
+            onChange={(event) => {
+              onChange(withUrl(draft, event.target.value));
+              urlHandlers.onChange(event);
+            }}
+            onKeyDown={urlHandlers.onKeyDown}
+            onClick={urlHandlers.onClick}
+            onCompositionStart={urlHandlers.onCompositionStart}
+            onCompositionEnd={urlHandlers.onCompositionEnd}
             {...urlHover.handlers}
+            /* 展开悬停处理器之后必须显式合并失焦：提示与候选都要收 */
+            onBlur={() => {
+              urlHandlers.onBlur();
+              urlHover.handlers.onBlur();
+            }}
           />
         </div>
 
@@ -518,6 +579,18 @@ export function RequestBand(props: RequestBandProps) {
       {/* 提示是覆盖层：挂在 body 上，因此它与请求带的盒模型无关，出现与消失都不动布局 */}
       {hoverSource && urlHover.hit && (
         <VariableHoverTip source={hoverSource} hit={urlHover.hit} />
+      )}
+
+      {/* 候选同样是覆盖层（spec: 变量输入时的候选提示）：它接住指针以便点选，
+          因此与悬停提示互不遮挡——两者不会同时出现（悬停要指针、候选要焦点） */}
+      {urlSuggest.anchor && (
+        <VariableSuggest
+          anchor={urlSuggest.anchor}
+          items={urlSuggest.items}
+          activeIndex={urlSuggest.activeIndex}
+          onPick={urlSuggest.accept}
+          onActivate={urlSuggest.activate}
+        />
       )}
     </div>
   );
@@ -544,6 +617,12 @@ export function RequestEditor({
   // 同一时刻只渲染一张（各自的内层标签），因此一个实例足够、也不会串（任务 2.2）
   const tableHover = usePlaceholderHover();
   const hoverSource = useVariableHoverSource(variableHover);
+  // 参数表与请求头表共用一份候选：命中只读 `event.currentTarget`，而两张表同一时刻
+  // 只渲染一张，因此一个实例足够、也不会串（与 `tableHover` 同款）
+  const tableSuggest = useVariableSuggest(hoverSource);
+  // 切走内层标签时输入框被卸载，候选收不到 blur——由标签变化主动收一次
+  const closeTableSuggest = tableSuggest.close;
+  useEffect(() => closeTableSuggest(), [tab, closeTableSuggest]);
   // Monaco 的 provider 按模型 URI 取用取值源，拿不到组件实例，因此这里交出裸函数形态
   const hoverLookup: VariableHoverLookup | null = hoverSource
     ? (name) => hoverSource.resolve(name)
@@ -666,6 +745,7 @@ export function RequestEditor({
             /* 改参数表即把查询串写回地址栏，两者是同一份数据（spec: URL 与参数表保持同步） */
             onChange={(params) => onChange(withParams(draft, params))}
             hover={tableHover.handlers}
+            suggest={tableSuggest}
           />
         )}
 
@@ -677,6 +757,7 @@ export function RequestEditor({
             valuePlaceholder="头值（可用 {{var}}）"
             onChange={(headers) => patch({ headers })}
             hover={tableHover.handlers}
+            suggest={tableSuggest}
           />
         )}
 
@@ -873,6 +954,17 @@ export function RequestEditor({
           没动，留在原处的提示也已经没有对应的编辑面了（spec: 指针移开或离开编辑面即消失） */}
       {(tab === 'params' || tab === 'headers') && hoverSource && tableHover.hit && (
         <VariableHoverTip source={hoverSource} hit={tableHover.hit} />
+      )}
+
+      {/* 候选同理：它是覆盖层，与表格的盒模型无关；只在两张接得上的表显示时才可能出现 */}
+      {(tab === 'params' || tab === 'headers') && tableSuggest.anchor && (
+        <VariableSuggest
+          anchor={tableSuggest.anchor}
+          items={tableSuggest.items}
+          activeIndex={tableSuggest.activeIndex}
+          onPick={tableSuggest.accept}
+          onActivate={tableSuggest.activate}
+        />
       )}
     </div>
   );
