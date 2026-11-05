@@ -428,6 +428,10 @@ describe('占位符悬浮值提示（真实应用）', () => {
       // 因此对一个非 secret 的变量再悬停一次，应当**一条命令都不多发**。这比「窗口内没有
       // 写命令」更准——窗口里混着界面自己的标签页持久化，与本能力无关。
       await moveAway(page);
+      // 打开请求后 draft 会连着变几次，解析预览（`variables_preview`）由 200ms 防抖触发。
+      // 先让那一次落地，否则并行跑用例、CPU 紧张时它会晚到，落进下面这段增量窗口，
+      // 被误判成「悬停发了命令」。
+      await page.waitForTimeout(600);
       const beforeSecond = await page.evaluate(
         () => (window as unknown as { __invoked: string[] }).__invoked.length,
       );

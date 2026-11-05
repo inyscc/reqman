@@ -147,10 +147,15 @@ export function CodeSurface(props: CodeSurfaceProps) {
         theme: env.THEME_NAME,
         readOnly: liveRef.current.readOnly,
         automaticLayout: true,
-        // 不开 fixedOverflowWidgets：它会把浮层坐标系从「编辑器内绝对定位」改成
-        //「页面 fixed」，补全详情面板（overlay 浮层）会因此错位到编辑器上方。
-        // 裁切问题改在 CSS 侧解决——`.code-surface` 不设 overflow:hidden，
-        // 浮层本就该溢出编辑器显示（见 App.css 该段注释）。
+        // 浮层用 viewport 坐标系：编辑面外面还有几层不允许溢出的容器
+        //（`.request-region` / `.main` 都是 overflow:hidden，正文区是 overflow:clip），
+        // 它们才是真正下刀的地方——`.code-surface` 放行没用，浮层一旦越过请求区的
+        // 右边界或下边界就被裁掉（补全列表只露出左半边）。
+        //
+        // fixed 定位的元素不受这些祖先裁剪（裁剪只作用于包含块链上的后代，而它的包含块
+        // 是视口）。用这个开关的代价是浮层坐标改由编辑器自己换算，因此**位置仍由
+        // Monaco 负责**，我们只把「能不能溢出去」这件事交还给页面。
+        fixedOverflowWidgets: true,
         minimap: { enabled: false },
         ...fontOptions(appearance),
         lineNumbers: 'on',

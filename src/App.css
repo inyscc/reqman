@@ -2808,7 +2808,12 @@ select.method-select[data-method='OPTIONS'] {
      是设计成允许溢出编辑器自由显示的——`.monaco-editor` 自身就是
      `overflow: visible`，只有内部 `.overflow-guard` 才裁切。宿主容器再裁一刀，
      会把第一行的补全面板和详情面板整个切掉、位置也跟着错。圆角改由下面对
-     编辑器自身的绘制层施加，浮层节点在 `.overflow-guard` 之外，不受影响。 */
+     编辑器自身的绘制层施加，浮层节点在 `.overflow-guard` 之外，不受影响。
+
+     这一层放行只是必要条件：更外层的 `.request-region` / `.main` 仍然是
+     `overflow: hidden`，浮层越过请求区边界还是会被裁。因此浮层的坐标系改在编辑器
+     选项里切走（`fixedOverflowWidgets`，见 CodeSurface 该处注释）——它能溢出是因为
+     包含块变成视口，不是因为这里没设 overflow。 */
 }
 
 .code-surface .monaco-editor,

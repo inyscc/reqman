@@ -287,3 +287,57 @@ describe('参数表的候选（真实渲染）', () => {
     await page.close();
   });
 });
+
+describe('Body 正文的候选（真实渲染）', () => {
+  it('窗口变窄时列表仍完整可见，不被请求区裁掉右半边', async () => {
+    // 回归护栏：补全列表由 Monaco 渲染在编辑器内部，而请求区外面套着
+    // `.request-region` / `.main` 两层 `overflow: hidden`。窗口一窄，列表右缘就越过
+    // 请求区边界，被裁得只剩左半截（截图里就是「被挡住了」）。修法是让浮层走 viewport
+    // 坐标系（`fixedOverflowWidgets`）；这条用例断言**列表四角都还属于列表自己**。
+    const page = await openApp();
+    await page.setViewportSize({ width: 900, height: 700 });
+
+    const editor = page.locator('.monaco-editor').first();
+    await editor.waitFor();
+    await editor.click();
+    await page.keyboard.press('Control+End');
+    await page.keyboard.type('{{');
+    await page.waitForFunction(() => Boolean(document.querySelector('.suggest-widget.visible')), undefined, {
+      timeout: 15_000,
+    });
+
+    const probe = await page.evaluate(() => {
+      const widget = document.querySelector('.suggest-widget');
+      const editor = document.querySelector('.monaco-editor');
+      if (!widget) return { visible: false };
+      const box = widget.getBoundingClientRect();
+      const region = document.querySelector('.request-region')?.getBoundingClientRect();
+      const inset = 4;
+      const corners = [
+        [box.left + inset, box.top + inset],
+        [box.right - inset, box.top + inset],
+        [box.left + inset, box.bottom - inset],
+        [box.right - inset, box.bottom - inset],
+      ];
+      return {
+        visible: true,
+        width: Math.round(box.width),
+        // 溢出请求区是**预期**的（列表本就该盖在相邻面板上），因此不能只断言「在区域内」
+        overflowsRegion: region ? Math.round(box.right - region.right) : 0,
+        corners: corners.map(([x, y]) => {
+          const el = document.elementFromPoint(x, y);
+          return el ? widget.contains(el) : false;
+        }),
+        editorRight: editor ? Math.round(editor.getBoundingClientRect().right) : null,
+        widgetRight: Math.round(box.right),
+      };
+    });
+
+    expect(probe.visible).toBe(true);
+    // 前提成立才谈得上回归：这个宽度下列表确实越过了请求区右边界
+    expect(probe.overflowsRegion, '窄窗口下列表应溢出请求区，否则这条用例没验到东西').toBeGreaterThan(0);
+    expect(probe.corners, `列表有四角被裁：${JSON.stringify(probe)}`).toEqual([true, true, true, true]);
+
+    await page.close();
+  });
+});
